@@ -13,7 +13,10 @@
         {
           "id": "collect-health",
           "name": "Collect Health",
-          "command": "echo 'db unreachable' >&2 && exit 2",
+          "shell": {
+            "program": "scripts/collect_health.sh",
+            "args": ["--mode", "db-unreachable"]
+          },
           "target": {
             "session_target": "shell"
           },

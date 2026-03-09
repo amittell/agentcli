@@ -155,9 +155,34 @@ It MAY define:
 
 Each of these, if present, MUST be an integer greater than or equal to `1`.
 
-### Prompt or Command
+### Prompt or Shell Execution
 
-If `target.session_target` is `shell`, `command` MUST be present.
+If `target.session_target` is `shell`, `shell` MUST be present.
+
+`shell` MUST be an object with:
+
+- `program`
+
+It MAY also define:
+
+- `args`
+- `env`
+- `cwd`
+- `stdin`
+
+`shell.program` MUST be a restricted token.
+
+`shell.args`, if present, MUST be an array of non-empty strings.
+
+`shell.env`, if present, MUST be an object whose keys match `^[A-Za-z_][A-Za-z0-9_]*$` and whose values are strings.
+
+`shell.cwd`, if present, MUST be a non-empty string.
+
+`shell.stdin`, if present, MUST be a string.
+
+The legacy `command` string field is not supported. Implementations MUST reject manifests that include `command` and SHOULD direct users to `shell.program` and `shell.args`.
+
+Backend targets that flatten shell execution into a single string (such as `payload_message` in `openclaw-scheduler`) SHOULD render it as a POSIX-safe shell command with single-quoted arguments. The rendered form is intended for machine consumption, not human display.
 
 Otherwise, `prompt` MUST be present.
 
@@ -170,6 +195,8 @@ If present, `schedule` MUST contain:
 It MAY also contain:
 
 - `tz`
+
+If `tz` is omitted, implementations SHOULD default to `UTC`.
 
 `schedule` represents a root invocation.
 
@@ -217,7 +244,7 @@ If `on_failure.id` is omitted, implementations MAY synthesize one from the paren
 
 - `name`
 - `enabled`
-- `prompt` or `command`
+- `prompt` or `shell`
 - `target`
 - `delay_s`
 - `condition`
@@ -233,7 +260,7 @@ If `on_failure.id` is omitted, implementations MAY synthesize one from the paren
 - `session`
 - `delete_after_run`
 
-If `on_failure.target.session_target` is `shell`, `on_failure.command` MUST be present.
+If `on_failure.target.session_target` is `shell`, `on_failure.shell` MUST be present.
 
 Otherwise, `on_failure.prompt` MUST be present.
 

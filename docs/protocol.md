@@ -4,7 +4,7 @@
 
 This document defines the draft `agentcli` JSON-RPC protocol served over stdio.
 
-The implementation lives in [src/jsonrpc.js](/Users/alex/git/agentcli/src/jsonrpc.js#L1).
+The implementation lives in [src/jsonrpc.js](../src/jsonrpc.js).
 
 ## Transport
 
@@ -24,7 +24,7 @@ Requests MUST follow JSON-RPC `2.0`.
 Example request:
 
 ```json
-{"jsonrpc":"2.0","id":"1","method":"agentcli.compile","params":{"target":"standalone","manifest":{"version":"0.1","workflows":[]}}}
+{"jsonrpc":"2.0","id":"1","method":"agentcli.validate","params":{"manifest":{"version":"0.1","workflows":[{"id":"w1","name":"W","tasks":[{"id":"t1","name":"T","prompt":"hello","target":{"session_target":"isolated"},"schedule":{"cron":"0 9 * * *"}}]}]}}}
 ```
 
 Example response:

@@ -9,13 +9,14 @@
     "./cli": "./src/cli.js",
     "./jsonrpc": "./src/jsonrpc.js",
     "./schema": "./src/schema.js",
-    "./targets": "./src/targets.js"
+    "./targets": "./src/targets.js",
+    "./shell": "./src/shell.js"
   },
   "bin": {
     "agentcli": "bin/agentcli.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "test": "node --test",

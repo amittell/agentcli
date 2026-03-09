@@ -1,10 +1,12 @@
 import { validateManifest } from '../validate.js';
-import { approvalPolicyForTask, normalizedTaskPlan, stableId } from './shared.js';
+import { approvalPolicyForTask, normalizedTaskPlan, payloadMessageForExecution, stableId } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 
 function schedulerOutputPolicy(plan) {
   const previewBytes = Math.max(64, plan.output.preview_bytes || 2000);
-  const outputStoreLimit = Math.max(previewBytes, plan.output.retrieve === 'inline' ? previewBytes * 4 : previewBytes);
+  const outputStoreLimit = plan.output.retrieve === 'inline'
+    ? Math.max(previewBytes, previewBytes * 4)
+    : Math.max(previewBytes, 65536);
   let offloadThreshold = 65536;
   if (plan.output.offload === 'always') offloadThreshold = 128;
   if (plan.output.offload === 'never') offloadThreshold = Math.max(outputStoreLimit, 1024 * 1024);
@@ -49,7 +51,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         session_target: plan.execution.session_target,
         agent_id: plan.execution.agent_id,
         payload_kind: plan.execution.payload_kind,
-        payload_message: plan.execution.payload_message,
+        payload_message: payloadMessageForExecution(plan.execution),
         payload_model: plan.execution.model_policy.scheduler_model,
         payload_thinking: plan.execution.model_policy.thinking,
         execution_intent: plan.intent.mode,

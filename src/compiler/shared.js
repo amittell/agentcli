@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { normalizeShellExecution, renderShellExecution } from '../shell.js';
 
 export function stableId(workflowId, taskId) {
   return createHash('sha256').update(`${workflowId}:${taskId}`).digest('hex').slice(0, 32);
@@ -11,9 +12,14 @@ export function payloadKindForTask(task) {
   return 'agentTurn';
 }
 
-export function payloadMessageForTask(task) {
-  if (task.target?.session_target === 'shell') return task.command;
-  return task.prompt;
+export function payloadForTask(task) {
+  if (task.target?.session_target === 'shell') return normalizeShellExecution(task.shell);
+  return { prompt: task.prompt };
+}
+
+export function payloadMessageForExecution(execution) {
+  if (execution.payload_kind === 'shellCommand') return renderShellExecution(execution.payload);
+  return execution.payload.prompt;
 }
 
 export function approvalPolicyForTask(task) {
@@ -52,7 +58,7 @@ export function taskInvocationForTask(task) {
   return {
     mode: 'schedule',
     cron: task.schedule.cron,
-    tz: task.schedule.tz || 'America/New_York',
+    tz: task.schedule.tz || 'UTC',
   };
 }
 
@@ -115,7 +121,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
       session_target: task.target.session_target,
       agent_id: task.target.agent_id || 'main',
       payload_kind: payloadKindForTask(task),
-      payload_message: payloadMessageForTask(task),
+      payload: payloadForTask(task),
       model_policy: modelPolicy,
     },
     intent,

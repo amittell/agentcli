@@ -8,11 +8,13 @@
         {
           "id": "check-space",
           "name": "Check Disk Space",
-          "command": "df -h",
+          "shell": {
+            "program": "df",
+            "args": ["-h"]
+          },
           "target": {
             "session_target": "shell",
-            "agent_id": "ops",
-            "payload_kind": "shellCommand"
+            "agent_id": "ops"
           },
           "schedule": {
             "cron": "0 * * * *",

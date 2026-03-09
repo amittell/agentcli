@@ -3,6 +3,7 @@ import { onFailureTaskId } from './shorthand.js';
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function isObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -46,9 +47,9 @@ function checkString(errors, path, value, { required = true } = {}) {
   }
 }
 
-function checkIdentifier(errors, path, value) {
-  checkString(errors, path, value);
-  if (typeof value !== 'string' || value.trim() === '') return;
+function checkIdentifier(errors, path, value, { required = true } = {}) {
+  checkString(errors, path, value, { required });
+  if (value == null || typeof value !== 'string' || value.trim() === '') return;
   if (!IDENTIFIER_RE.test(value)) {
     addError(errors, path, 'must match /^[A-Za-z0-9][A-Za-z0-9._-]*$/');
   }
@@ -80,6 +81,12 @@ function checkEnum(errors, path, value, allowed) {
   if (value == null) return;
   if (!allowed.includes(value)) {
     addError(errors, path, `must be one of: ${allowed.join(', ')}`);
+  }
+}
+
+function checkLegacyCommand(errors, path, value) {
+  if (value !== undefined) {
+    addError(errors, path, 'is not supported; use shell.program and shell.args');
   }
 }
 
@@ -116,6 +123,68 @@ function validateTargetLike(errors, path, target) {
   checkEnum(errors, `${path}.session_target`, target.session_target, ['main', 'isolated', 'shell']);
   checkEnum(errors, `${path}.payload_kind`, target.payload_kind, ['systemEvent', 'agentTurn', 'shellCommand']);
   checkToken(errors, `${path}.agent_id`, target.agent_id, { required: false });
+}
+
+function validateShellExecution(errors, path, value) {
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return;
+  }
+
+  checkToken(errors, `${path}.program`, value.program);
+
+  if (value.args != null) {
+    if (!Array.isArray(value.args)) {
+      addError(errors, `${path}.args`, 'must be an array');
+    } else {
+      for (const [index, arg] of value.args.entries()) {
+        checkString(errors, `${path}.args[${index}]`, arg);
+      }
+    }
+  }
+
+  if (value.env != null) {
+    if (!isObject(value.env)) {
+      addError(errors, `${path}.env`, 'must be an object');
+    } else {
+      for (const [name, envValue] of Object.entries(value.env)) {
+        if (!ENV_NAME_RE.test(name)) {
+          addError(errors, `${path}.env.${name}`, 'must match /^[A-Za-z_][A-Za-z0-9_]*$/');
+        }
+        checkString(errors, `${path}.env.${name}`, envValue);
+      }
+    }
+  }
+
+  checkString(errors, `${path}.cwd`, value.cwd, { required: false });
+
+  if (value.stdin != null && typeof value.stdin !== 'string') {
+    addError(errors, `${path}.stdin`, 'must be a string');
+  }
+}
+
+function validateExecutionSurface(errors, path, value, sessionTarget) {
+  checkLegacyCommand(errors, `${path}.command`, value.command);
+
+  if (sessionTarget === 'shell') {
+    if (value.prompt != null) {
+      addError(errors, `${path}.prompt`, 'must not be present for shell targets');
+    }
+    if (value.target?.payload_kind != null && value.target.payload_kind !== 'shellCommand') {
+      addError(errors, `${path}.target.payload_kind`, 'must be shellCommand for shell targets');
+    }
+    if (value.shell == null) {
+      addError(errors, `${path}.shell`, 'is required');
+    } else {
+      validateShellExecution(errors, `${path}.shell`, value.shell);
+    }
+    return;
+  }
+
+  if (value.shell != null) {
+    addError(errors, `${path}.shell`, 'must not be present unless target.session_target is shell');
+  }
+  checkString(errors, `${path}.prompt`, value.prompt);
 }
 
 function validateModelPolicy(errors, path, value) {
@@ -193,6 +262,7 @@ function validateOptionalBlocks(errors, warnings, path, value) {
   }
 
   if (isObject(value.approval)) {
+    checkBoolean(errors, `${path}.approval.required`, value.approval.required);
     checkEnum(errors, `${path}.approval.policy`, value.approval.policy, ['manual', 'auto-approve', 'auto-reject']);
     checkEnum(errors, `${path}.approval.risk_level`, value.approval.risk_level, ['low', 'medium', 'high']);
     checkToken(errors, `${path}.approval.approver_scope`, value.approval.approver_scope, { required: false });
@@ -220,6 +290,8 @@ function validateOptionalBlocks(errors, warnings, path, value) {
   if (isObject(value.session)) {
     checkToken(errors, `${path}.session.preferred_key`, value.session.preferred_key, { required: false });
   }
+
+  checkBoolean(errors, `${path}.delete_after_run`, value.delete_after_run);
 }
 
 function validateOnFailure(errors, warnings, path, task) {
@@ -230,7 +302,7 @@ function validateOnFailure(errors, warnings, path, task) {
   }
 
   const handler = task.on_failure;
-  checkIdentifier(errors, `${path}.id`, handler.id);
+  checkIdentifier(errors, `${path}.id`, handler.id, { required: false });
   checkString(errors, `${path}.name`, handler.name, { required: false });
   checkBoolean(errors, `${path}.enabled`, handler.enabled);
   checkInteger(errors, `${path}.delay_s`, handler.delay_s, 0);
@@ -240,13 +312,8 @@ function validateOnFailure(errors, warnings, path, task) {
     validateTargetLike(errors, `${path}.target`, handler.target);
   }
 
-  const inferredSessionTarget = handler.target?.session_target || (handler.command ? 'shell' : 'isolated');
-  if (inferredSessionTarget === 'shell') {
-    checkString(errors, `${path}.command`, handler.command);
-  } else {
-    checkString(errors, `${path}.prompt`, handler.prompt);
-  }
-
+  const inferredSessionTarget = handler.target?.session_target || (handler.shell ? 'shell' : 'isolated');
+  validateExecutionSurface(errors, path, handler, inferredSessionTarget);
   validateOptionalBlocks(errors, warnings, path, handler);
 }
 
@@ -308,11 +375,7 @@ export function validateManifest(manifest) {
           validateTargetLike(errors, `${taskPath}.target`, task.target);
         }
 
-        if (task.target?.session_target === 'shell') {
-          checkString(errors, `${taskPath}.command`, task.command);
-        } else {
-          checkString(errors, `${taskPath}.prompt`, task.prompt);
-        }
+        validateExecutionSurface(errors, taskPath, task, task.target?.session_target);
 
         const hasSchedule = isObject(task.schedule);
         const hasTrigger = isObject(task.trigger);

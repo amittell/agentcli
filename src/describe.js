@@ -60,6 +60,7 @@ const DESCRIPTIONS = {
     notes: [
       'Approval policy can express manual review intent without forcing every backend to expose the same gate semantics.',
       'Trigger conditions support contains: and regex: prefixes.',
+      'Shell targets use structured execution fields like shell.program and shell.args instead of raw command strings.',
       'Tasks can carry model policy, plan/read-only intent, output hints, and resource budgets without hard-binding to one runtime.'
     ]
   },

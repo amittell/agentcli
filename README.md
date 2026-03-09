@@ -29,6 +29,8 @@ Agents do better with:
 
 `agentcli` packages those ideas into one control plane.
 
+For shell work, manifests use structured execution fields instead of opaque command strings. Complex shell logic should live in scripts that tasks invoke with explicit arguments and environment.
+
 ## What You Get
 
 - a portable workflow manifest
@@ -64,7 +66,7 @@ A manifest contains:
 Each task can define:
 
 - execution target
-- prompt or shell command
+- prompt or `shell.program` plus `shell.args[]`
 - exactly one invocation mode: `schedule` or `trigger`
 - optional `on_failure` shorthand for failure triage or remediation
 - model policy
@@ -77,8 +79,8 @@ Each task can define:
 - approval policy
 - context settings
 
-See [examples/hello-world.json](/Users/alex/git/agentcli/examples/hello-world.json) and [examples/shell-workflow.json](/Users/alex/git/agentcli/examples/shell-workflow.json).
-For public-safe examples that use the newer contract features, see [examples/public-shell-failure-triage.json](/Users/alex/git/agentcli/examples/public-shell-failure-triage.json), [examples/public-report-publish.json](/Users/alex/git/agentcli/examples/public-report-publish.json), and [examples/public-bot-health.json](/Users/alex/git/agentcli/examples/public-bot-health.json).
+See [examples/hello-world.json](examples/hello-world.json) and [examples/shell-workflow.json](examples/shell-workflow.json).
+For public-safe examples that use the newer contract features, see [examples/public-shell-failure-triage.json](examples/public-shell-failure-triage.json), [examples/public-report-publish.json](examples/public-report-publish.json), and [examples/public-bot-health.json](examples/public-bot-health.json).
 Normal users do not need a second repo checkout. Install `agentcli`, run `agentcli init`, and keep your manifests under `~/.agentcli/manifests` by default.
 
 ## Targets
@@ -92,7 +94,7 @@ Normal users do not need a second repo checkout. Install `agentcli`, run `agentc
   - compiler target and inspection surface for the durable scheduler runtime
   - supports runtime model policy, plan/read-only intent, output offload budgets, and queue / approval / fan-out guardrails
 
-The target model is defined in [src/targets.js](/Users/alex/git/agentcli/src/targets.js#L1).
+The target model is defined in [src/targets.js](src/targets.js).
 
 ## Commands
 
@@ -117,6 +119,8 @@ Local development:
 npm install
 npm test
 ```
+
+Node 22.5.0 or newer is required. Scheduler inspection uses `node:sqlite`; that API was still experimental in Node 22.x and only became stable in Node 23.4.0.
 
 After publication:
 
@@ -220,12 +224,13 @@ agentcli serve
 
 ## Publication Docs
 
-- spec: [docs/spec.md](/Users/alex/git/agentcli/docs/spec.md)
-- protocol: [docs/protocol.md](/Users/alex/git/agentcli/docs/protocol.md)
-- capabilities: [docs/capabilities.md](/Users/alex/git/agentcli/docs/capabilities.md)
-- versioning and conformance: [docs/versioning.md](/Users/alex/git/agentcli/docs/versioning.md) and [docs/conformance.md](/Users/alex/git/agentcli/docs/conformance.md)
-- adoption guide: [docs/adoption.md](/Users/alex/git/agentcli/docs/adoption.md)
-- architecture: [docs/architecture.md](/Users/alex/git/agentcli/docs/architecture.md)
+- spec: [docs/spec.md](docs/spec.md)
+- protocol: [docs/protocol.md](docs/protocol.md)
+- capabilities: [docs/capabilities.md](docs/capabilities.md)
+- versioning and conformance: [docs/versioning.md](docs/versioning.md) and [docs/conformance.md](docs/conformance.md)
+- adoption guide: [docs/adoption.md](docs/adoption.md)
+- architecture: [docs/architecture.md](docs/architecture.md)
+- roadmap: [docs/roadmap.md](docs/roadmap.md)
 
 ## Project Status
 

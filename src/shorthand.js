@@ -1,5 +1,5 @@
 function inferFailureTarget(parentTask, handler) {
-  const sessionTarget = handler.target?.session_target || (handler.command ? 'shell' : 'isolated');
+  const sessionTarget = handler.target?.session_target || (handler.shell ? 'shell' : 'isolated');
   return {
     session_target: sessionTarget,
     agent_id: handler.target?.agent_id ?? parentTask.target?.agent_id ?? 'main',
@@ -20,7 +20,7 @@ export function buildOnFailureTask(parentTask) {
     name: handler.name || `${parentTask.name} Failure Handler`,
     enabled: handler.enabled ?? parentTask.enabled,
     ...(handler.prompt ? { prompt: handler.prompt } : {}),
-    ...(handler.command ? { command: handler.command } : {}),
+    ...(handler.shell ? { shell: structuredClone(handler.shell) } : {}),
     target: inferFailureTarget(parentTask, handler),
     trigger: {
       parent: parentTask.id,

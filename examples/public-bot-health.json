@@ -8,7 +8,9 @@
         {
           "id": "check-bot-health",
           "name": "Check Bot Health",
-          "command": "scripts/check_bot_health.sh",
+          "shell": {
+            "program": "scripts/check_bot_health.sh"
+          },
           "target": {
             "session_target": "shell"
           },

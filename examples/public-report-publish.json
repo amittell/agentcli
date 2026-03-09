@@ -13,7 +13,10 @@
         {
           "id": "capture-metrics",
           "name": "Capture Metrics",
-          "command": "python3 scripts/capture_metrics.py",
+          "shell": {
+            "program": "python3",
+            "args": ["scripts/capture_metrics.py"]
+          },
           "target": {
             "session_target": "shell"
           },
@@ -52,7 +55,10 @@
         {
           "id": "publish-report",
           "name": "Publish Report",
-          "command": "python3 scripts/publish_report.py",
+          "shell": {
+            "program": "python3",
+            "args": ["scripts/publish_report.py"]
+          },
           "target": {
             "session_target": "shell"
           },

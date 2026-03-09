@@ -95,6 +95,73 @@ test('invalid on_failure type fails validation', () => {
   assert.match(result.errors[0].message, /must be an object/);
 });
 
+test('on_failure without explicit id validates and compiles with synthesized id', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'auto-id-flow',
+        name: 'Auto ID Flow',
+        tasks: [
+          {
+            id: 'root-task',
+            name: 'Root Task',
+            shell: { program: 'scripts/check.sh' },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            delivery: { mode: 'none' },
+            on_failure: {
+              prompt: 'Diagnose the failure and suggest a fix.',
+              delivery: { mode: 'announce' }
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.equal(result.errors.length, 0);
+
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs.length, 2);
+  const handler = compiled.jobs.find(job => job.source.task_id === 'root-task.failure');
+  assert.ok(handler);
+  assert.equal(handler.parent_id, compiled.jobs[0].id);
+});
+
+test('on_failure with explicit id that collides with another task fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'collide-flow',
+        name: 'Collide Flow',
+        tasks: [
+          {
+            id: 'root-task',
+            name: 'Root Task',
+            shell: { program: 'scripts/check.sh' },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            delivery: { mode: 'none' },
+            on_failure: {
+              id: 'root-task',
+              prompt: 'Diagnose the failure.',
+              delivery: { mode: 'announce' }
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /unique after shorthand expansion/.test(e.message)));
+});
+
 test('compile emits scheduler jobs with parent linkage and explain notes', () => {
   const compiled = compileManifestToScheduler(exampleManifest, { includeExplain: true });
   assert.equal(compiled.target, 'openclaw-scheduler');
@@ -125,11 +192,93 @@ test('shell workflow validates and carries policy-based approval intent', () => 
   assert.equal(result.errors.length, 0);
 
   const compiled = compileManifestToScheduler(shellManifest);
+  const root = compiled.jobs.find(job => job.source.task_id === 'check-space');
   const followup = compiled.jobs.find(job => job.source.task_id === 'escalate-low-space');
+  assert.ok(root);
   assert.ok(followup);
+  assert.equal(root.payload_kind, 'shellCommand');
+  assert.equal(root.payload_message, '\'df\' \'-h\'');
   assert.equal(followup.approval_required, 1);
   assert.equal(followup.approval_auto, 'reject');
   assert.equal(followup.trigger_condition, 'regex:(9[0-9]%|100%)');
+});
+
+test('structured shell execution is preserved in standalone plans and rendered for scheduler jobs', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'structured-shell',
+        name: 'Structured Shell',
+        tasks: [
+          {
+            id: 'query-logs',
+            name: 'Query Logs',
+            shell: {
+              program: 'python3',
+              args: ['scripts/query_logs.py', '--namespace', 'agent x'],
+              env: {
+                START_NS: '1700000000000000000',
+                KUBECONFIG: '/tmp/kube config'
+              },
+              cwd: '/tmp/work dir',
+              stdin: 'line one\nline two'
+            },
+            target: { session_target: 'shell' },
+            schedule: { cron: '*/15 * * * *' },
+            delivery: { mode: 'none' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const validation = validateManifest(manifest);
+  assert.equal(validation.ok, true);
+
+  const schedulerCompiled = compileManifestToScheduler(manifest);
+  assert.equal(schedulerCompiled.jobs[0].payload_message, 'cd \'/tmp/work dir\' && printf %s \'line one\nline two\' | KUBECONFIG=\'/tmp/kube config\' START_NS=\'1700000000000000000\' \'python3\' \'scripts/query_logs.py\' \'--namespace\' \'agent x\'');
+
+  const standaloneCompiled = compileManifestToStandalone(manifest);
+  assert.deepEqual(standaloneCompiled.workflows[0].tasks[0].execution.payload, {
+    program: 'python3',
+    args: ['scripts/query_logs.py', '--namespace', 'agent x'],
+    env: {
+      START_NS: '1700000000000000000',
+      KUBECONFIG: '/tmp/kube config'
+    },
+    cwd: '/tmp/work dir',
+    stdin: 'line one\nline two'
+  });
+});
+
+test('shell.stdin accepts empty strings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'empty-stdin',
+        name: 'Empty Stdin',
+        tasks: [
+          {
+            id: 'pipe-empty',
+            name: 'Pipe Empty',
+            shell: {
+              program: 'cat',
+              stdin: ''
+            },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            delivery: { mode: 'none' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.equal(result.errors.length, 0);
 });
 
 test('public bot health example validates and compiles chained diagnosis flow', () => {
@@ -189,7 +338,9 @@ test('disabled tasks and runtime timeouts compile through the scheduler target',
             id: 'check-health',
             name: 'Check Health',
             enabled: false,
-            command: 'scripts/check_health.sh',
+            shell: {
+              program: 'scripts/check_health.sh'
+            },
             target: { session_target: 'shell' },
             schedule: { cron: '*/5 * * * *' },
             runtime: { timeout_ms: 45000 },
@@ -223,13 +374,13 @@ test('disabled tasks and runtime timeouts compile through the scheduler target',
   assert.equal(diagnose.parent_id, root.id);
 });
 
-test('shell tasks normalize legacy payload_kind values to shellCommand', () => {
+test('shell tasks reject legacy raw command fields and mismatched payload kinds', () => {
   const manifest = {
     version: '0.1',
     workflows: [
       {
-        id: 'legacy-shell-kind',
-        name: 'Legacy Shell Kind',
+        id: 'legacy-shell-shape',
+        name: 'Legacy Shell Shape',
         tasks: [
           {
             id: 'run-legacy-shell',
@@ -251,10 +402,11 @@ test('shell tasks normalize legacy payload_kind values to shellCommand', () => {
     ]
   };
 
-  const compiled = compileManifestToScheduler(manifest);
-  assert.equal(compiled.jobs.length, 1);
-  assert.equal(compiled.jobs[0].session_target, 'shell');
-  assert.equal(compiled.jobs[0].payload_kind, 'shellCommand');
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.equal(result.errors.some(error => error.path.endsWith('.command') && /not supported/.test(error.message)), true);
+  assert.equal(result.errors.some(error => error.path.endsWith('.target.payload_kind') && /shellCommand/.test(error.message)), true);
+  assert.equal(result.errors.some(error => error.path.endsWith('.shell') && /required/.test(error.message)), true);
 });
 
 test('model policy, execution intent, output hints, and budgets compile through both targets', () => {
@@ -446,7 +598,10 @@ test('applyManifestToScheduler converts enabled flags to booleans for scheduler 
             id: 'disabled-root',
             name: 'Disabled Root',
             enabled: false,
-            command: 'echo ok',
+            shell: {
+              program: 'echo',
+              args: ['ok']
+            },
             target: { session_target: 'shell' },
             schedule: { cron: '0 * * * *' },
             delivery: { mode: 'none' }
@@ -476,19 +631,26 @@ test('applyManifestToScheduler converts enabled flags to booleans for scheduler 
   assert.equal(calls[0].enabled, false);
 });
 
-test('cli apply supports dry-run without invoking scheduler writes', async () => {
-  const output = JSON.parse(await runCli(['apply', JSON.stringify(exampleManifest), '--dry-run'], {
-    env: {
-      ...process.env,
-      AGENTCLI_SCHEDULER_BIN: '/Users/alex/git/openclaw-scheduler/bin/openclaw-scheduler.js',
-      AGENTCLI_SCHEDULER_DB: ':memory:'
+test('cli apply supports dry-run without invoking scheduler writes', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const runner = {
+    invocation: { label: 'dry-run-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob() {
+      throw new Error('dry-run should not add jobs');
+    },
+    updateJob() {
+      throw new Error('dry-run should not update jobs');
     }
-  }));
+  };
 
-  assert.equal(output.ok, true);
-  assert.equal(output.dry_run, true);
-  assert.equal(output.job_count, 2);
-  assert.deepEqual(output.actions.map(action => action.action), ['created', 'created']);
+  const result = applyManifestToScheduler(exampleManifest, { dryRun: true, runner });
+  assert.equal(result.ok, true);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.job_count, 2);
+  assert.deepEqual(result.actions.map(action => action.action), ['created', 'created']);
 });
 
 test('cli falls back to json for non-streaming commands in ndjson mode', async () => {

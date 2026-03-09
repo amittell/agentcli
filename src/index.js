@@ -7,3 +7,4 @@ export { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInv
 export { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 export { TARGETS, getTarget, listTargets } from './targets.js';
 export { ensureAgentcliHome, getAgentcliPaths, resolveAgentcliHome } from './home.js';
+export { normalizeShellExecution, renderShellExecution } from './shell.js';
