@@ -158,6 +158,7 @@ const onFailureField = {
     target: {
       type: 'object',
       nullable: true,
+      required: ['session_target'],
       fields: targetField.fields
     },
     delete_after_run: nullableBoolean

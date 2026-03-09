@@ -68,7 +68,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         delivery_guarantee: plan.reliability.guarantee,
         parent_id: plan.parent_compiled_id,
         trigger_on: isTriggered ? plan.invocation.on : null,
-        trigger_delay_s: isTriggered ? plan.invocation.delay_s : 0,
+        trigger_delay_s: isTriggered ? plan.invocation.delay_s : null,
         trigger_condition: isTriggered ? plan.invocation.condition : null,
         approval_required: approval.required,
         approval_timeout_s: approval.timeout_s,

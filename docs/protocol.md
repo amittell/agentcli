@@ -30,7 +30,7 @@ Example request:
 Example response:
 
 ```json
-{"jsonrpc":"2.0","id":"1","result":{"ok":true,"output":{"target":"standalone"}}}
+{"jsonrpc":"2.0","id":"1","result":{"ok":true,"errors":[],"warnings":[]}}
 ```
 
 ## Methods
