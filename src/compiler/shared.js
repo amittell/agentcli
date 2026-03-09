@@ -5,8 +5,8 @@ export function stableId(workflowId, taskId) {
 }
 
 export function payloadKindForTask(task) {
-  if (task.target?.payload_kind) return task.target.payload_kind;
   if (task.target?.session_target === 'shell') return 'shellCommand';
+  if (task.target?.payload_kind) return task.target.payload_kind;
   if (task.target?.session_target === 'main') return 'systemEvent';
   return 'agentTurn';
 }

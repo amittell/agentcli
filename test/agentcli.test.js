@@ -223,6 +223,40 @@ test('disabled tasks and runtime timeouts compile through the scheduler target',
   assert.equal(diagnose.parent_id, root.id);
 });
 
+test('shell tasks normalize legacy payload_kind values to shellCommand', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'legacy-shell-kind',
+        name: 'Legacy Shell Kind',
+        tasks: [
+          {
+            id: 'run-legacy-shell',
+            name: 'Run Legacy Shell',
+            command: 'echo ok',
+            target: {
+              session_target: 'shell',
+              payload_kind: 'systemEvent'
+            },
+            schedule: {
+              cron: '0 * * * *'
+            },
+            delivery: {
+              mode: 'none'
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs.length, 1);
+  assert.equal(compiled.jobs[0].session_target, 'shell');
+  assert.equal(compiled.jobs[0].payload_kind, 'shellCommand');
+});
+
 test('model policy, execution intent, output hints, and budgets compile through both targets', () => {
   const result = validateManifest(publicFailureTriageManifest);
   assert.equal(result.ok, true);
