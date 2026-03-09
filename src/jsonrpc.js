@@ -106,14 +106,18 @@ export async function serveJsonRpc({ input = process.stdin, output = process.std
   for await (const line of lines) {
     if (!line.trim()) continue;
 
-    let response;
+    let parsed;
     try {
-      response = await handleJsonRpcRequest(JSON.parse(line), defaults);
+      parsed = JSON.parse(line);
     } catch (err) {
-      response = responseError(null, -32700, 'Parse error', err.message);
+      output.write(`${JSON.stringify(responseError(null, -32700, 'Parse error', err.message))}\n`);
+      continue;
     }
 
-    if (response?.id !== undefined && response.id !== null) {
+    const isNotification = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !('id' in parsed);
+    const response = await handleJsonRpcRequest(parsed, defaults);
+
+    if (!isNotification) {
       output.write(`${JSON.stringify(response)}\n`);
     }
   }
