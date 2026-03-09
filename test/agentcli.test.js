@@ -432,6 +432,48 @@ test('applyManifestToScheduler plans and executes scheduler upserts', () => {
   assert.equal(calls[1].action, 'create');
 });
 
+test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'disabled-create-flow',
+        name: 'Disabled Create Flow',
+        tasks: [
+          {
+            id: 'disabled-root',
+            name: 'Disabled Root',
+            enabled: false,
+            command: 'echo ok',
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            delivery: { mode: 'none' }
+          }
+        ]
+      }
+    ]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('unexpected update');
+    }
+  };
+
+  const result = applyManifestToScheduler(manifest, { runner });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].enabled, false);
+});
+
 test('cli apply supports dry-run without invoking scheduler writes', async () => {
   const output = JSON.parse(await runCli(['apply', JSON.stringify(exampleManifest), '--dry-run'], {
     env: {

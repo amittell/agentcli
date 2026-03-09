@@ -67,7 +67,10 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
 
 function schedulerJobSpec(job) {
   const { source, ...spec } = job;
-  return spec;
+  return {
+    ...spec,
+    enabled: Boolean(spec.enabled)
+  };
 }
 
 export function createSchedulerCliRunner(options = {}) {
