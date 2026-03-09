@@ -1,0 +1,9 @@
+export { runCli } from './cli.js';
+export { handleJsonRpcRequest, serveJsonRpc } from './jsonrpc.js';
+export { validateManifest } from './validate.js';
+export { compileManifestToStandalone } from './compiler/standalone.js';
+export { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
+export { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation } from './apply.js';
+export { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
+export { TARGETS, getTarget, listTargets } from './targets.js';
+export { ensureAgentcliHome, getAgentcliPaths, resolveAgentcliHome } from './home.js';

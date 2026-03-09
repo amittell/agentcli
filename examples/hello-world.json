@@ -1,0 +1,62 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "daily-report",
+      "name": "Daily Report",
+      "tasks": [
+        {
+          "id": "collect",
+          "name": "Collect Metrics",
+          "prompt": "Collect the daily operating metrics and summarize the notable changes.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "schedule": {
+            "cron": "0 9 * * *",
+            "tz": "America/New_York"
+          },
+          "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": "@owner_dm"
+          },
+          "reliability": {
+            "guarantee": "at-least-once",
+            "max_retries": 2,
+            "overlap_policy": "skip"
+          },
+          "context": {
+            "retrieval": "recent",
+            "limit": 5
+          }
+        },
+        {
+          "id": "alert-followup",
+          "name": "Alert Followup",
+          "prompt": "Investigate the alert condition and propose remediation steps.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "trigger": {
+            "parent": "collect",
+            "on": "success",
+            "condition": "contains:ALERT"
+          },
+          "approval": {
+            "required": true,
+            "timeout_s": 1800,
+            "auto": "reject"
+          },
+          "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": "@owner_dm"
+          }
+        }
+      ]
+    }
+  ]
+}

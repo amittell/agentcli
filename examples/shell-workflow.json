@@ -1,0 +1,63 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "disk-health",
+      "name": "Disk Health",
+      "tasks": [
+        {
+          "id": "check-space",
+          "name": "Check Disk Space",
+          "command": "df -h",
+          "target": {
+            "session_target": "shell",
+            "agent_id": "ops",
+            "payload_kind": "shellCommand"
+          },
+          "schedule": {
+            "cron": "0 * * * *",
+            "tz": "America/New_York"
+          },
+          "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": "@owner_dm"
+          },
+          "reliability": {
+            "guarantee": "at-most-once",
+            "overlap_policy": "skip",
+            "max_retries": 0
+          }
+        },
+        {
+          "id": "escalate-low-space",
+          "name": "Escalate Low Space",
+          "prompt": "Review the disk space output, identify the filesystems at risk, and propose remediation steps.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "ops"
+          },
+          "trigger": {
+            "parent": "check-space",
+            "on": "success",
+            "condition": "regex:(9[0-9]%|100%)"
+          },
+          "approval": {
+            "policy": "manual",
+            "risk_level": "high",
+            "timeout_s": 1800
+          },
+          "delivery": {
+            "mode": "announce-always",
+            "channel": "telegram",
+            "to": "@owner_dm"
+          },
+          "context": {
+            "retrieval": "recent",
+            "limit": 3
+          }
+        }
+      ]
+    }
+  ]
+}

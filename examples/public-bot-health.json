@@ -1,0 +1,59 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "bot-health",
+      "name": "Bot Health",
+      "tasks": [
+        {
+          "id": "check-bot-health",
+          "name": "Check Bot Health",
+          "command": "scripts/check_bot_health.sh",
+          "target": {
+            "session_target": "shell"
+          },
+          "schedule": {
+            "cron": "*/10 * * * *"
+          },
+          "output": {
+            "preview_bytes": 1000,
+            "offload": "auto",
+            "retrieve": "on-demand"
+          },
+          "delivery": {
+            "mode": "none"
+          }
+        },
+        {
+          "id": "diagnose-bot-alert",
+          "name": "Diagnose Bot Alert",
+          "prompt": "Review the parent health check output, explain the likely cause, and recommend next steps without making changes.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "trigger": {
+            "parent": "check-bot-health",
+            "on": "success",
+            "condition": "contains:ALERT"
+          },
+          "intent": {
+            "mode": "plan",
+            "read_only": true
+          },
+          "budgets": {
+            "max_fanout": 3,
+            "max_queued_dispatches": 8
+          },
+          "context": {
+            "retrieval": "recent",
+            "limit": 3
+          },
+          "delivery": {
+            "mode": "announce"
+          }
+        }
+      ]
+    }
+  ]
+}

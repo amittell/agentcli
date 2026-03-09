@@ -1,0 +1,60 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "shell-failure-triage",
+      "name": "Shell Failure Triage",
+      "model_policy": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "thinking": "high"
+      },
+      "tasks": [
+        {
+          "id": "collect-health",
+          "name": "Collect Health",
+          "command": "echo 'db unreachable' >&2 && exit 2",
+          "target": {
+            "session_target": "shell"
+          },
+          "schedule": {
+            "cron": "*/30 * * * *"
+          },
+          "delivery": {
+            "mode": "none"
+          },
+          "on_failure": {
+            "id": "triage-failure",
+            "name": "Triage Failure",
+            "prompt": "Review the parent shell failure, identify the most likely cause, and propose the safest next step. Do not execute changes.",
+            "target": {
+              "session_target": "isolated",
+              "agent_id": "main"
+            },
+            "intent": {
+              "mode": "plan",
+              "read_only": true
+            },
+            "output": {
+              "preview_bytes": 1200,
+              "offload": "auto",
+              "retrieve": "on-demand"
+            },
+            "budgets": {
+              "max_context_items": 7,
+              "max_fanout": 4,
+              "max_pending_approvals": 3,
+              "max_queued_dispatches": 12
+            },
+            "context": {
+              "retrieval": "recent"
+            },
+            "delivery": {
+              "mode": "announce"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

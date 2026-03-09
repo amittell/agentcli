@@ -1,0 +1,75 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "report-publish",
+      "name": "Report Publish",
+      "model_policy": {
+        "provider": "openai",
+        "model": "gpt-5",
+        "thinking": "medium"
+      },
+      "tasks": [
+        {
+          "id": "capture-metrics",
+          "name": "Capture Metrics",
+          "command": "python3 scripts/capture_metrics.py",
+          "target": {
+            "session_target": "shell"
+          },
+          "schedule": {
+            "cron": "0 9 * * 1-5"
+          },
+          "delivery": {
+            "mode": "none"
+          }
+        },
+        {
+          "id": "analyze-metrics",
+          "name": "Analyze Metrics",
+          "prompt": "Review the captured metrics from the parent task and write a concise report draft with the key changes and risks.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "trigger": {
+            "parent": "capture-metrics",
+            "on": "success"
+          },
+          "intent": {
+            "mode": "plan",
+            "read_only": true
+          },
+          "output": {
+            "preview_bytes": 1600,
+            "offload": "auto",
+            "retrieve": "on-demand"
+          },
+          "delivery": {
+            "mode": "announce"
+          }
+        },
+        {
+          "id": "publish-report",
+          "name": "Publish Report",
+          "command": "python3 scripts/publish_report.py",
+          "target": {
+            "session_target": "shell"
+          },
+          "trigger": {
+            "parent": "analyze-metrics",
+            "on": "success"
+          },
+          "approval": {
+            "policy": "manual",
+            "risk_level": "medium",
+            "timeout_s": 1800
+          },
+          "delivery": {
+            "mode": "announce"
+          }
+        }
+      ]
+    }
+  ]
+}
