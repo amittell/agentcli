@@ -430,6 +430,8 @@ test('applyManifestToScheduler plans and executes scheduler upserts', () => {
   assert.equal(calls.length, 2);
   assert.equal(calls[0].action, 'update');
   assert.equal(calls[1].action, 'create');
+  assert.equal('run_timeout_ms' in calls[0].spec, false);
+  assert.equal(calls[0].spec.enabled, true);
 });
 
 test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', () => {

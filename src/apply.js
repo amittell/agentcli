@@ -67,10 +67,13 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
 
 function schedulerJobSpec(job) {
   const { source, ...spec } = job;
-  return {
+  const normalized = {
     ...spec,
     enabled: Boolean(spec.enabled)
   };
+  return Object.fromEntries(
+    Object.entries(normalized).filter(([, value]) => value !== null && value !== undefined)
+  );
 }
 
 export function createSchedulerCliRunner(options = {}) {
