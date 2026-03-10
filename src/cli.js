@@ -21,13 +21,16 @@ Commands:
   init [--home path] [--force]
   validate <path-or-json|->
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
-  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain]
+  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   serve [--db path]
 
 Flags:
-  --json      Force JSON output
-  --ndjson    Emit item streams as newline-delimited JSON
+  --json         Force JSON output
+  --ndjson       Emit item streams as newline-delimited JSON
+  --adopt-by     Strategy for matching existing jobs: id (default) or name.
+                 Use --adopt-by name when migrating existing scheduler jobs
+                 to agentcli management (one-time migration).
 
 Environment:
   AGENTCLI_HOME=~/.agentcli
@@ -158,9 +161,14 @@ export async function runCli(
     }
     case 'apply': {
       const manifest = loadJsonInput(positionals[1], { cwd, env: derivedEnv });
+      const adoptBy = flags['adopt-by'] || 'id';
+      if (adoptBy !== 'id' && adoptBy !== 'name') {
+        throw new Error(`Invalid --adopt-by value: ${adoptBy}. Accepted values: id, name`);
+      }
       const payload = applyManifestToScheduler(manifest, {
         dryRun: Boolean(flags['dry-run']),
         includeExplain: Boolean(flags.explain),
+        adoptBy,
         dbPath: flags.db || defaultDbPath,
         schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
         schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,

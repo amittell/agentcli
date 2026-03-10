@@ -111,6 +111,46 @@ agentcli inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--lim
 agentcli serve [--db path]
 ```
 
+## Migrating existing scheduler jobs to agentcli
+
+When you start using `agentcli apply` on top of an already-running scheduler, there is a stable ID gap:
+`agentcli` assigns each job a deterministic ID — `sha256(workflowId:taskId).slice(0, 32)` — but jobs
+that were created outside agentcli carry random UUIDs. A plain `agentcli apply` will not find those
+jobs by ID and will create duplicates instead of updating the existing ones.
+
+Use `--adopt-by name` for a one-time migration. It matches existing jobs by their `name` field,
+updates them with the compiled spec (including the new stable ID), and re-keys them in the scheduler.
+After migration, future applies use the default `--adopt-by id` — no flag needed.
+
+**Migration workflow:**
+
+1. Write manifests whose task `name` values match your existing scheduler job names exactly (case-sensitive).
+2. Validate the manifest:
+   ```bash
+   agentcli validate my-workflow.json
+   ```
+3. Preview what would be adopted:
+   ```bash
+   agentcli apply my-workflow.json --adopt-by name --dry-run
+   ```
+   Jobs with a matching name show `"action": "adopted"`. Unmatched jobs show `"action": "created"`.
+4. Execute the migration:
+   ```bash
+   agentcli apply my-workflow.json --adopt-by name
+   ```
+   Each matched job is updated with its stable ID. From this point on, the job is managed by agentcli.
+5. Verify, then switch to normal applies — no flag needed going forward:
+   ```bash
+   agentcli apply my-workflow.json
+   ```
+
+**Notes:**
+
+- Job name matching is case-sensitive and exact.
+- If a job name is not found, it is created (same as default behavior).
+- If a job ID already matches (e.g. already migrated), it is updated as normal regardless of `--adopt-by`.
+- Run `--dry-run` first whenever you are unsure — it is always safe.
+
 ## Installation
 
 Local development:

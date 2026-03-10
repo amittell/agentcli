@@ -653,6 +653,128 @@ test('cli apply supports dry-run without invoking scheduler writes', () => {
   assert.deepEqual(result.actions.map(action => action.action), ['created', 'created']);
 });
 
+test('applyManifestToScheduler adopt-by-name matches existing job by name and re-keys to stable id', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const stableJob = compiled.jobs[0];
+  // Simulate existing job with same name but a legacy UUID
+  const legacyId = 'legacy-uuid-aaaa-bbbb-cccc-000000000000';
+  const existing = [{ ...stableJob, id: legacyId }];
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() { return existing; },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      calls.push({ action: 'update', id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.job_count, 2);
+
+  // First job: matched by name → "adopted", second: no match → "created"
+  assert.deepEqual(result.actions.map(a => a.action), ['adopted', 'created']);
+
+  // The adopted action's job_id should be the stable compiled id, not the legacy UUID
+  assert.equal(result.actions[0].job_id, stableJob.id);
+  assert.notEqual(result.actions[0].job_id, legacyId);
+
+  // updateJob was called with the OLD legacy id but the NEW stable id in spec
+  const updateCall = calls.find(c => c.action === 'update');
+  assert.ok(updateCall, 'updateJob should have been called for the adopted job');
+  assert.equal(updateCall.id, legacyId);
+  assert.equal(updateCall.spec.id, stableJob.id);
+
+  // addJob was called for the unmatched second job
+  const createCall = calls.find(c => c.action === 'create');
+  assert.ok(createCall, 'addJob should have been called for the unmatched job');
+});
+
+test('applyManifestToScheduler adopt-by-name creates when no name matches', () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [{ id: 'some-uuid', name: 'Completely Different Job Name' }];
+    },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update when no name matches');
+    }
+  };
+
+  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.actions.map(a => a.action), ['created', 'created']);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(c => c.action === 'create'));
+});
+
+test('applyManifestToScheduler adopt-by-id (default) still works correctly', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  // Existing has first job matching by id
+  const existing = [compiled.jobs[0]];
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() { return existing; },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      calls.push({ action: 'update', id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'id' });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.actions.map(a => a.action), ['updated', 'created']);
+  // updated action should use the stable compiled id (not legacy)
+  assert.equal(calls[0].action, 'update');
+  assert.equal(calls[0].id, compiled.jobs[0].id);
+});
+
+test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler writes', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const legacyId = 'legacy-uuid-dry-run-0000-0000-0000';
+  const existing = [{ ...compiled.jobs[0], id: legacyId }];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() { return existing; },
+    addJob() { throw new Error('dry-run should not add jobs'); },
+    updateJob() { throw new Error('dry-run should not update jobs'); }
+  };
+
+  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name', dryRun: true });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dry_run, true);
+  // Still reports what would happen
+  assert.deepEqual(result.actions.map(a => a.action), ['adopted', 'created']);
+  // job_id in plan reflects the stable id, not the legacy UUID
+  assert.equal(result.actions[0].job_id, compiled.jobs[0].id);
+});
+
+test('cli apply --adopt-by with invalid value throws', async () => {
+  await assert.rejects(
+    runCli(['apply', JSON.stringify(exampleManifest), '--adopt-by', 'uuid']),
+    /Invalid --adopt-by value/
+  );
+});
+
 test('cli falls back to json for non-streaming commands in ndjson mode', async () => {
   const output = JSON.parse(await runCli(['compile', JSON.stringify(exampleManifest)], {
     env: {

@@ -107,6 +107,7 @@ export function applyManifestToScheduler(
   {
     dryRun = false,
     includeExplain = false,
+    adoptBy = 'id',
     runner = null,
     schedulerPrefix = '',
     schedulerBin = '',
@@ -124,18 +125,40 @@ export function applyManifestToScheduler(
     env
   });
 
-  const existingById = new Map(
-    schedulerRunner.listJobs().map(job => [job.id, job])
-  );
+  const existingJobs = schedulerRunner.listJobs();
+  const existingById = new Map(existingJobs.map(job => [job.id, job]));
+  const existingByName = new Map(existingJobs.map(job => [job.name, job]));
 
   const actions = [];
   for (const job of compiled.jobs) {
-    const action = existingById.has(job.id) ? 'updated' : 'created';
     const spec = schedulerJobSpec(job);
-    if (!dryRun) {
-      if (action === 'created') schedulerRunner.addJob(spec);
-      else schedulerRunner.updateJob(job.id, spec);
+
+    let action;
+    let existingId;
+
+    if (adoptBy === 'name') {
+      const existingJob = existingByName.get(job.name);
+      if (existingJob) {
+        action = 'adopted';
+        existingId = existingJob.id;
+      } else {
+        action = 'created';
+      }
+    } else {
+      action = existingById.has(job.id) ? 'updated' : 'created';
     }
+
+    if (!dryRun) {
+      if (action === 'created') {
+        schedulerRunner.addJob(spec);
+      } else if (action === 'updated') {
+        schedulerRunner.updateJob(job.id, spec);
+      } else if (action === 'adopted') {
+        // Re-key the job: update by old UUID but spec contains the new stable id
+        schedulerRunner.updateJob(existingId, spec);
+      }
+    }
+
     actions.push({
       action,
       job_id: job.id,
