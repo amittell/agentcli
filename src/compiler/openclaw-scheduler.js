@@ -3,7 +3,7 @@ import { approvalPolicyForTask, normalizedTaskPlan, payloadMessageForExecution, 
 import { expandManifestShorthands } from '../shorthand.js';
 
 function schedulerOutputPolicy(plan) {
-  const previewBytes = Math.max(64, plan.output.preview_bytes || 2000);
+  const previewBytes = Math.max(64, plan.output.preview_bytes ?? 2000);
   const outputStoreLimit = plan.output.retrieve === 'inline'
     ? Math.max(previewBytes * 4, 65536)
     : Math.max(previewBytes, 65536);

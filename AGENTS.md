@@ -24,8 +24,14 @@ Do not reimplement scheduler durability here. Runtime concerns belong in `opencl
 
 ## Useful Commands
 
+- `agentcli init` -- bootstrap a local home directory with a starter manifest
+- `agentcli targets` -- list available compilation targets
+- `agentcli paths` -- show resolved home directory layout
+- `agentcli schema manifest` -- emit machine-readable schema for the manifest format
+- `agentcli describe commands` -- list all CLI commands with summaries
 - `agentcli validate examples/hello-world.json`
 - `agentcli compile examples/hello-world.json --target standalone --explain`
 - `agentcli compile examples/hello-world.json --target openclaw-scheduler`
+- `agentcli apply <manifest> --adopt-by name --dry-run` -- preview migration of existing scheduler jobs
 - `agentcli inspect jobs --db /path/to/scheduler.sqlite --fields id,status`
 - `agentcli serve`

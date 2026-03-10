@@ -19,11 +19,23 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'apply',
-    summary: 'Upsert a manifest into an OpenClaw Scheduler runtime for dogfooding or production use.'
+    summary: 'Upsert a manifest into an OpenClaw Scheduler runtime. Supports --adopt-by name for migrating existing jobs.'
   },
   {
     command: 'inspect',
     summary: 'Read scheduler runtime state with field masks, sanitization, and NDJSON output.'
+  },
+  {
+    command: 'targets',
+    summary: 'List available compilation targets with capabilities and feature support.'
+  },
+  {
+    command: 'paths',
+    summary: 'Show resolved agentcli home directory paths. Respects AGENTCLI_HOME and --home flag.'
+  },
+  {
+    command: 'init',
+    summary: 'Initialize the agentcli home directory with a starter manifest. Supports --force to overwrite.'
   },
   {
     command: 'serve',

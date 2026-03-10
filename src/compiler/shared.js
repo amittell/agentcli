@@ -86,7 +86,7 @@ function resolveIntent(task) {
 
 function resolveOutput(task) {
   return {
-    preview_bytes: task.output?.preview_bytes || 2000,
+    preview_bytes: task.output?.preview_bytes ?? 2000,
     offload: task.output?.offload || 'auto',
     retrieve: task.output?.retrieve || 'on-demand',
   };
@@ -94,11 +94,11 @@ function resolveOutput(task) {
 
 function resolveBudgets(task) {
   return {
-    max_iterations: task.budgets?.max_iterations || null,
-    max_fanout: task.budgets?.max_fanout || 25,
-    max_context_items: task.budgets?.max_context_items || task.context?.limit || 5,
-    max_pending_approvals: task.budgets?.max_pending_approvals || 10,
-    max_queued_dispatches: task.budgets?.max_queued_dispatches || 25,
+    max_iterations: task.budgets?.max_iterations ?? null,
+    max_fanout: task.budgets?.max_fanout ?? 25,
+    max_context_items: task.budgets?.max_context_items ?? task.context?.limit ?? 5,
+    max_pending_approvals: task.budgets?.max_pending_approvals ?? 10,
+    max_queued_dispatches: task.budgets?.max_queued_dispatches ?? 25,
   };
 }
 
@@ -135,10 +135,10 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     reliability: {
       guarantee: task.reliability?.guarantee || 'at-most-once',
       overlap_policy: task.reliability?.overlap_policy || 'skip',
-      max_retries: task.reliability?.max_retries || 0,
+      max_retries: task.reliability?.max_retries ?? 0,
     },
     runtime: {
-      timeout_ms: task.runtime?.timeout_ms || null,
+      timeout_ms: task.runtime?.timeout_ms ?? null,
     },
     approval: approvalPolicyForTask(task),
     context: {
