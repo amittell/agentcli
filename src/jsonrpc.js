@@ -41,7 +41,8 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
     return responseError(null, -32600, 'Invalid Request');
   }
 
-  const { id = null, method, params = {} } = message;
+  const { id = null, method, params: rawParams } = message;
+  const params = (rawParams != null && typeof rawParams === 'object' && !Array.isArray(rawParams)) ? rawParams : {};
   if (message.jsonrpc !== '2.0' || typeof method !== 'string') {
     return responseError(id, -32600, 'Invalid Request');
   }

@@ -141,6 +141,8 @@ export function applyManifestToScheduler(
       if (existingJob) {
         action = 'adopted';
         existingId = existingJob.id;
+      } else if (existingById.has(job.id)) {
+        action = 'updated';
       } else {
         action = 'created';
       }

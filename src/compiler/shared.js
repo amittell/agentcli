@@ -50,8 +50,8 @@ export function taskInvocationForTask(task) {
       mode: 'trigger',
       parent: task.trigger.parent,
       on: task.trigger.on,
-      delay_s: task.trigger.delay_s || 0,
-      condition: task.trigger.condition || null,
+      delay_s: task.trigger.delay_s ?? 0,
+      condition: task.trigger.condition ?? null,
     };
   }
 

@@ -25,8 +25,8 @@ export function buildOnFailureTask(parentTask) {
     trigger: {
       parent: parentTask.id,
       on: 'failure',
-      delay_s: handler.delay_s || 0,
-      condition: handler.condition || null
+      delay_s: handler.delay_s ?? 0,
+      condition: handler.condition ?? null
     },
     ...(handler.delivery ? { delivery: structuredClone(handler.delivery) } : {}),
     ...(handler.reliability ? { reliability: structuredClone(handler.reliability) } : {}),
