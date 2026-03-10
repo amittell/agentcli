@@ -23,7 +23,7 @@ Commands:
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
   apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
-  serve [--stdio] [--db path]
+  serve [--db path]
 
 Flags:
   --json      Force JSON output
@@ -195,10 +195,8 @@ export async function runCli(
       return '';
     }
     case 'help':
-    case '--help':
-    case '-h':
     case undefined:
-      return usage().trim();
+      return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode });
     default:
       throw new Error(`Unknown command: ${command}`);
   }

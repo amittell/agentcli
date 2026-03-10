@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, relative, resolve } from 'path';
+import { isatty } from 'tty';
 import { resolveManifestCandidate } from './home.js';
 
 function looksLikeJsonLiteral(input) {
@@ -13,6 +14,9 @@ export function loadJsonInput(input, { cwd = process.cwd(), env = process.env } 
     throw new Error('Missing input. Pass a file path or JSON string.');
   }
   const resolvedPath = resolveManifestCandidate(input, { cwd, env });
+  if (input === '-' && isatty(0)) {
+    throw new Error('stdin is a TTY. Pipe JSON data or pass a file path.');
+  }
   const raw = input === '-'
     ? readFileSync(0, 'utf8')
     : resolvedPath

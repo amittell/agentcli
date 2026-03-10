@@ -313,6 +313,15 @@ This field is intended for backend execution controls like per-task run timeouts
 
 `approval.timeout_s`, if present, MUST be an integer greater than or equal to `1`.
 
+`approval.auto`, if present, MUST be one of:
+
+- `approve`
+- `reject`
+
+This field provides a direct override for the auto-resolution behavior when an approval gate times out. When `policy` is `auto-approve` or `auto-reject`, the corresponding `auto` value is implied. Explicit `auto` takes precedence over inference from `policy`.
+
+`approval.approver_scope`, if present, MUST be a restricted token identifying the scope or group that may approve the gate.
+
 `approval.required` is supported for compatibility, but `approval.policy` SHOULD be preferred in new manifests.
 
 ## Context

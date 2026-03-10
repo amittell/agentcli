@@ -28,4 +28,4 @@ Do not reimplement scheduler durability here. Runtime concerns belong in `opencl
 - `agentcli compile examples/hello-world.json --target standalone --explain`
 - `agentcli compile examples/hello-world.json --target openclaw-scheduler`
 - `agentcli inspect jobs --db /path/to/scheduler.sqlite --fields id,status`
-- `agentcli serve --stdio`
+- `agentcli serve`

@@ -108,7 +108,7 @@ agentcli validate <path-or-json|->
 agentcli compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
 agentcli apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain]
 agentcli inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
-agentcli serve [--stdio] [--db path]
+agentcli serve [--db path]
 ```
 
 ## Installation

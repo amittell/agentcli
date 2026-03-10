@@ -15,7 +15,7 @@ import { handleJsonRpcRequest } from '../src/jsonrpc.js';
 import { getAgentcliPaths } from '../src/home.js';
 
 function readExample(name) {
-  return JSON.parse(readFileSync(join(process.cwd(), 'examples', name), 'utf8'));
+  return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
 }
 
 const exampleManifest = readExample('hello-world.json');

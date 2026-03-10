@@ -46,9 +46,8 @@
             "condition": "contains:ALERT"
           },
           "approval": {
-            "required": true,
-            "timeout_s": 1800,
-            "auto": "reject"
+            "policy": "manual",
+            "timeout_s": 1800
           },
           "delivery": {
             "mode": "announce",

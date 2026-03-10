@@ -1,5 +1,5 @@
 import { validateManifest } from '../validate.js';
-import { normalizedTaskPlan } from './shared.js';
+import { normalizedTaskPlan, stableId } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 
 export function compileManifestToStandalone(manifest, { includeExplain = false } = {}) {
@@ -17,8 +17,7 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
   for (const workflow of expanded.workflows) {
     const taskIdToCompiledId = new Map();
     for (const task of workflow.tasks) {
-      const plan = normalizedTaskPlan(workflow, task, taskIdToCompiledId);
-      taskIdToCompiledId.set(task.id, plan.id);
+      taskIdToCompiledId.set(task.id, stableId(workflow.id, task.id));
     }
 
     const tasks = [];
