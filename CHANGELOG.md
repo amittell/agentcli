@@ -14,6 +14,11 @@ Includes:
 - stdio JSON-RPC
 - publication docs for spec, protocol, conformance, capabilities, versioning, and adoption
 - schema deduplication with shared field definitions
+- `--adopt-by name` for one-time migration of existing scheduler jobs to agentcli management
+- `--json` flag for structured JSON output from all commands including help
+- TTY detection on stdin to prevent interactive terminal hangs
+- `approval.auto` and `approval.approver_scope` documented in spec
+- JSON-RPC `agentcli.apply` supports `adoptBy` parameter
 
 Breaking changes from pre-release git snapshots:
 

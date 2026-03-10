@@ -66,18 +66,24 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
           }
         );
       }
-      case 'agentcli.apply':
+      case 'agentcli.apply': {
+        const adoptBy = params.adoptBy || 'id';
+        if (adoptBy !== 'id' && adoptBy !== 'name') {
+          return responseError(id, -32602, `Invalid adoptBy value: ${adoptBy}. Accepted values: id, name`);
+        }
         return responseResult(
           id,
           applyManifestToScheduler(params.manifest, {
             dryRun: Boolean(params.dryRun),
             includeExplain: Boolean(params.explain),
+            adoptBy,
             dbPath: params.dbPath || defaults.dbPath,
             schedulerPrefix: params.schedulerPrefix || defaults.schedulerPrefix || '',
             schedulerBin: params.schedulerBin || defaults.schedulerBin || '',
             runner: defaults.schedulerRunner || null
           })
         );
+      }
       case 'agentcli.inspect':
         return responseResult(
           id,

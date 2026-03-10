@@ -31,6 +31,8 @@ This is the lowest-friction entry point.
 
 ### Path 2: Existing Runtime Adapter
 
+If you already have scheduler jobs running outside agentcli, use `--adopt-by name` to migrate them without creating duplicates. The CLI and JSON-RPC `agentcli.apply` method both support this. See the [migration guide](../README.md#migrating-existing-scheduler-jobs-to-agentcli) in the README.
+
 Keep your current runtime and add a compiler target.
 
 You only need to map:

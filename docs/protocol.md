@@ -97,10 +97,11 @@ Params:
 - `schedulerBin`
 - `dryRun`
 - `explain`
+- `adoptBy` - `"id"` (default) or `"name"`. Use `"name"` for one-time migration of existing scheduler jobs to agentcli management. See README for the migration workflow.
 
 Result:
 
-- scheduler apply payload with create or update actions
+- scheduler apply payload with create, update, or adopted actions
 - intended for the `openclaw-scheduler` backend
 
 ### `agentcli.inspect`

@@ -106,7 +106,7 @@ agentcli paths
 agentcli init [--home path] [--force]
 agentcli validate <path-or-json|->
 agentcli compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
-agentcli apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain]
+agentcli apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name]
 agentcli inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
 agentcli serve [--db path]
 ```
@@ -124,7 +124,7 @@ After migration, future applies use the default `--adopt-by id` — no flag need
 
 **Migration workflow:**
 
-1. Write manifests whose task `name` values match your existing scheduler job names exactly (case-sensitive).
+1. Write manifests whose workflow and task names produce a composite name matching your existing scheduler job names exactly. agentcli compiles job names as `"Workflow Name: Task Name"`. For example, if a scheduler job is named `"Disk Health: Check Disk Space"`, set the workflow name to `"Disk Health"` and the task name to `"Check Disk Space"`.
 2. Validate the manifest:
    ```bash
    agentcli validate my-workflow.json
