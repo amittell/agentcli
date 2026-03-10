@@ -112,6 +112,7 @@ export async function runCli(
 ) {
   const { positionals, flags } = parseArgs(argv);
   const command = positionals[0];
+  const explicitJson = Boolean(flags.json || flags.ndjson || env.AGENTCLI_OUTPUT);
   const outputMode = flags.ndjson
     ? 'ndjson'
     : flags.json || env.AGENTCLI_OUTPUT === 'json'
@@ -204,7 +205,10 @@ export async function runCli(
     }
     case 'help':
     case undefined:
-      return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode });
+      if (explicitJson) {
+        return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode });
+      }
+      return usage().trim();
     default:
       throw new Error(`Unknown command: ${command}`);
   }
