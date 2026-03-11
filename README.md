@@ -114,7 +114,7 @@ agentcli serve [--db path]
 ## Migrating existing scheduler jobs to agentcli
 
 When you start using `agentcli apply` on top of an already-running scheduler, there is a stable ID gap:
-`agentcli` assigns each job a deterministic ID — `sha256(workflowId:taskId).slice(0, 32)` — but jobs
+`agentcli` assigns each job a deterministic ID — the first 32 hex characters of `sha256(workflowId:taskId)` — but jobs
 that were created outside agentcli carry random UUIDs. A plain `agentcli apply` will not find those
 jobs by ID and will create duplicates instead of updating the existing ones.
 
@@ -200,6 +200,7 @@ AGENTCLI_SCHEDULER_DB=~/.openclaw/scheduler/scheduler.db agentcli inspect jobs -
 
 Defaults:
 
+- home directory reads `AGENTCLI_HOME`, default `~/.agentcli`
 - output is JSON unless `AGENTCLI_OUTPUT=ndjson`
 - compile target defaults to `standalone` unless `AGENTCLI_TARGET` is set
 - scheduler inspection reads `AGENTCLI_SCHEDULER_DB` when present

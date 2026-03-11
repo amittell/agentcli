@@ -218,12 +218,14 @@ It MAY also contain:
 - `failure`
 - `complete`
 
-`trigger.parent` MUST reference another task id within the same workflow.
+`trigger.parent` MUST reference a different task id within the same workflow. Self-referential triggers are not permitted.
 
 `trigger.condition`, if present, MUST start with exactly one of:
 
 - `contains:`
 - `regex:`
+
+For `contains:` conditions, the suffix MUST be a non-empty string.
 
 For `regex:` conditions, the suffix MUST be a valid regular expression.
 
@@ -339,6 +341,16 @@ If both `context.limit` and `budgets.max_context_items` are present, implementat
 ## Session
 
 `session.preferred_key`, if present, MUST be a restricted token.
+
+## Delete After Run
+
+`delete_after_run`, if present, MUST be a boolean.
+
+When true, the compiled job is removed from the scheduler after its first successful execution. This field applies to both top-level tasks and `on_failure` handlers.
+
+## Definitions
+
+A **restricted token** is a string matching the pattern `^[A-Za-z0-9@:_./-]+$`. This covers file paths, model identifiers, agent IDs, delivery channels, and session keys without allowing shell metacharacters or control characters.
 
 ## Validation and Warnings
 

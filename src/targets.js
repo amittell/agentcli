@@ -5,7 +5,7 @@ export const TARGETS = {
   standalone: {
     name: 'standalone',
     description: 'Portable execution plan for authoring, validation, and protocol use without a bound runtime.',
-    capabilities: ['compile', 'describe', 'json-rpc'],
+    capabilities: ['schema', 'validate', 'compile', 'describe', 'json-rpc'],
     features: {
       approvals: 'intent-only',
       model_policy: 'portable',
@@ -20,7 +20,7 @@ export const TARGETS = {
   'openclaw-scheduler': {
     name: 'openclaw-scheduler',
     description: 'Compile manifest tasks into OpenClaw Scheduler job specs for the durable runtime.',
-    capabilities: ['compile', 'apply', 'inspect'],
+    capabilities: ['compile', 'apply', 'inspect', 'field-mask', 'sanitize-basic', 'ndjson'],
     features: {
       approvals: 'runtime',
       model_policy: 'model+thinking',

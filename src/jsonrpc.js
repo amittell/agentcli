@@ -88,7 +88,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
       case 'agentcli.inspect':
         return responseResult(
           id,
-          inspectSchedulerState({
+          await inspectSchedulerState({
             dbPath: params.dbPath || defaults.dbPath,
             entity: params.entity,
             limit: params.limit,

@@ -91,11 +91,14 @@ function pickSchema(name) {
 
 function formatOutput(payload, { mode = 'json' } = {}) {
   if (mode === 'ndjson') {
-    const items = payload?.items || (Array.isArray(payload) ? payload : []);
-    if (Array.isArray(items) && (payload?.items || Array.isArray(payload))) {
+    const items = payload?.items || (Array.isArray(payload) ? payload : null);
+    if (items) {
+      if (items.length === 0) {
+        return JSON.stringify({ ok: payload.ok ?? true, count: 0 });
+      }
       return items.map(item => JSON.stringify(item)).join('\n');
     }
-    return JSON.stringify(payload, null, 2);
+    return JSON.stringify(payload);
   }
 
   if (typeof payload === 'string') {
@@ -187,7 +190,7 @@ export async function runCli(
       if (!listInspectableEntities().includes(entity)) {
         throw new Error(`Unsupported inspect entity: ${entity}`);
       }
-      const payload = inspectSchedulerState({
+      const payload = await inspectSchedulerState({
         dbPath: flags.db || defaultDbPath,
         entity,
         limit: flags.limit,

@@ -819,7 +819,7 @@ test('cli falls back to json for non-streaming commands in ndjson mode', async (
   assert.equal(output.target, 'standalone');
 });
 
-test('inspect applies field masks and sanitization', (t) => {
+test('inspect applies field masks and sanitization', async (t) => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
   const dbPath = join(workdir, 'scheduler.sqlite');
   t.after(() => rmSync(workdir, { recursive: true, force: true }));
@@ -836,7 +836,7 @@ test('inspect applies field masks and sanitization', (t) => {
     .run('job-1', 'line one ```\u0007danger', '2026-03-06T12:00:00Z');
   db.close();
 
-  const result = inspectSchedulerState({
+  const result = await inspectSchedulerState({
     dbPath,
     entity: 'jobs',
     fields: ['id', 'payload_message'],

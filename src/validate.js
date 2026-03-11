@@ -433,7 +433,9 @@ export function validateManifest(manifest) {
       for (const [taskIndex, task] of workflow.tasks.entries()) {
         if (!isObject(task)) continue;
         if (isObject(task.trigger)) {
-          if (task.trigger.parent && !validTaskIds.has(task.trigger.parent)) {
+          if (task.trigger.parent === task.id) {
+            addError(errors, `${workflowPath}.tasks[${taskIndex}].trigger.parent`, 'must not reference its own task id');
+          } else if (task.trigger.parent && !validTaskIds.has(task.trigger.parent)) {
             addError(errors, `${workflowPath}.tasks[${taskIndex}].trigger.parent`, 'must reference another task id in the same workflow');
           }
         }

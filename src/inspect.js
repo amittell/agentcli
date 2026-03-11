@@ -1,5 +1,4 @@
 import { existsSync } from 'fs';
-import { DatabaseSync } from 'node:sqlite';
 import { applyFieldMask } from './fields.js';
 import { sanitizeForAgent } from './sanitize.js';
 
@@ -31,7 +30,18 @@ function integerFlag(value, fallback) {
   return parsed;
 }
 
-export function inspectSchedulerState({
+async function openDatabase(dbPath) {
+  try {
+    const { DatabaseSync } = await import('node:sqlite');
+    return new DatabaseSync(dbPath);
+  } catch {
+    throw new Error(
+      'node:sqlite is not available. The inspect command requires Node 23.4.0+ or Node 22.x with --experimental-sqlite.'
+    );
+  }
+}
+
+export async function inspectSchedulerState({
   dbPath,
   entity = 'jobs',
   limit = 20,
@@ -50,7 +60,7 @@ export function inspectSchedulerState({
     throw new Error(`Unsupported inspect entity: ${entity}`);
   }
 
-  const db = new DatabaseSync(dbPath);
+  const db = await openDatabase(dbPath);
   try {
     const rows = db.prepare(
       `SELECT * FROM ${target.table} ORDER BY ${target.orderBy} LIMIT ?`

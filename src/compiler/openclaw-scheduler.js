@@ -1,5 +1,5 @@
 import { validateManifest } from '../validate.js';
-import { approvalPolicyForTask, normalizedTaskPlan, payloadMessageForExecution, stableId } from './shared.js';
+import { normalizedTaskPlan, payloadMessageForExecution, stableId } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 
 function schedulerOutputPolicy(plan) {
@@ -38,7 +38,6 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
     for (const task of workflow.tasks) {
       const plan = normalizedTaskPlan(workflow, task, taskIdToJobId);
-      const approval = approvalPolicyForTask(task);
       const isTriggered = plan.invocation.mode === 'trigger';
       const outputPolicy = schedulerOutputPolicy(plan);
       jobs.push({
@@ -70,9 +69,9 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         trigger_on: isTriggered ? plan.invocation.on : null,
         trigger_delay_s: isTriggered ? plan.invocation.delay_s : null,
         trigger_condition: isTriggered ? plan.invocation.condition : null,
-        approval_required: approval.required,
-        approval_timeout_s: approval.timeout_s,
-        approval_auto: approval.auto,
+        approval_required: plan.approval.required,
+        approval_timeout_s: plan.approval.timeout_s,
+        approval_auto: plan.approval.auto,
         context_retrieval: plan.context.retrieval,
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
