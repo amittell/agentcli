@@ -120,7 +120,11 @@ function validateTargetLike(errors, path, target) {
     addError(errors, path, 'must be an object');
     return;
   }
-  checkEnum(errors, `${path}.session_target`, target.session_target, ['main', 'isolated', 'shell']);
+  if (target.session_target == null) {
+    addError(errors, `${path}.session_target`, 'is required');
+  } else {
+    checkEnum(errors, `${path}.session_target`, target.session_target, ['main', 'isolated', 'shell']);
+  }
   checkEnum(errors, `${path}.payload_kind`, target.payload_kind, ['systemEvent', 'agentTurn', 'shellCommand']);
   checkToken(errors, `${path}.agent_id`, target.agent_id, { required: false });
 }
@@ -427,9 +431,11 @@ export function validateManifest(manifest) {
       }
 
       for (const [taskIndex, task] of workflow.tasks.entries()) {
-        if (!isObject(task?.trigger)) continue;
-        if (task.trigger.parent && !validTaskIds.has(task.trigger.parent)) {
-          addError(errors, `${workflowPath}.tasks[${taskIndex}].trigger.parent`, 'must reference another task id in the same workflow');
+        if (!isObject(task)) continue;
+        if (isObject(task.trigger)) {
+          if (task.trigger.parent && !validTaskIds.has(task.trigger.parent)) {
+            addError(errors, `${workflowPath}.tasks[${taskIndex}].trigger.parent`, 'must reference another task id in the same workflow');
+          }
         }
         if (task.approval?.required && !task.trigger) {
           warnings.push({

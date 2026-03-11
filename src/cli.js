@@ -48,6 +48,10 @@ function parseArgs(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === '--') {
+      positionals.push(...argv.slice(index + 1));
+      break;
+    }
     if (!arg.startsWith('--')) {
       positionals.push(arg);
       continue;

@@ -100,7 +100,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
         return responseError(id, -32601, `Method not found: ${method}`);
     }
   } catch (err) {
-    return responseError(id, -32000, err.message);
+    return responseError(id, -32000, err.message, err.validation || undefined);
   }
 }
 

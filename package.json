@@ -18,7 +18,8 @@
     "./compile/shared": "./src/compiler/shared.js",
     "./apply": "./src/apply.js",
     "./shorthand": "./src/shorthand.js",
-    "./inspect": "./src/inspect.js"
+    "./inspect": "./src/inspect.js",
+    "./home": "./src/home.js"
   },
   "bin": {
     "agentcli": "bin/agentcli.js"

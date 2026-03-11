@@ -86,6 +86,31 @@ test('invalid enabled type fails validation', () => {
   assert.match(result.errors[0].message, /must be a boolean/);
 });
 
+test('missing target.session_target fails validation explicitly', () => {
+  const bad = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'missing-session-target',
+        name: 'Missing Session Target',
+        tasks: [
+          {
+            id: 't1',
+            name: 'Task',
+            prompt: 'hello',
+            target: {},
+            schedule: { cron: '0 1 * * *' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(bad);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => error.path.endsWith('.target.session_target') && /required/.test(error.message)));
+});
+
 test('invalid on_failure type fails validation', () => {
   const bad = structuredClone(publicFailureTriageManifest);
   bad.workflows[0].tasks[0].on_failure = 'diagnose it';
@@ -506,6 +531,12 @@ test('cli schema returns json', async () => {
   assert.equal(output.schema.type, 'object');
 });
 
+test('cli accepts -- as an argument terminator', async () => {
+  const output = JSON.parse(await runCli(['validate', '--', JSON.stringify(exampleManifest)]));
+  assert.equal(output.ok, true);
+  assert.deepEqual(output.errors, []);
+});
+
 test('cli compile writes safely inside cwd', async (t) => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
   t.after(() => rmSync(workdir, { recursive: true, force: true }));
@@ -834,6 +865,25 @@ test('json-rpc compile request returns compiled output', async () => {
   assert.equal(response.result.ok, true);
   assert.equal(response.result.output.target, 'standalone');
   assert.ok(Array.isArray(response.result.output.explain));
+});
+
+test('json-rpc compile errors include validation payload in error.data', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'compile-invalid',
+    method: 'agentcli.compile',
+    params: {
+      target: 'standalone',
+      manifest: { version: '0.1', workflows: [] }
+    }
+  });
+
+  assert.equal(response.jsonrpc, '2.0');
+  assert.equal(response.id, 'compile-invalid');
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.message, 'Manifest validation failed');
+  assert.equal(response.error.data.ok, false);
+  assert.ok(Array.isArray(response.error.data.errors));
 });
 
 test('json-rpc apply returns scheduler action plan', async () => {
