@@ -14,8 +14,16 @@ Rules:
 
 - each request MUST be a single JSON object on one line
 - each response MUST be a single JSON object on one line
-- notifications MAY be ignored
+- server startup notifications MAY be ignored by clients
 - parse failures return JSON-RPC parse errors when possible
+
+On startup, the server emits a readiness notification before processing requests:
+
+```json
+{"jsonrpc":"2.0","method":"agentcli.ready","params":{"ok":true,"manifest_version":"0.1"}}
+```
+
+Clients MAY ignore this notification, but it provides a clean synchronization point for process-spawn integrations.
 
 ## Envelope
 
@@ -124,6 +132,7 @@ Current error classes:
 
 - `-32700`: parse error
 - `-32600`: invalid request
+- `-32602`: invalid params
 - `-32601`: method not found
 - `-32000`: application error
 

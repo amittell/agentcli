@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline';
-import { MANIFEST_SCHEMA } from './schema.js';
+import { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 import { describeTarget } from './describe.js';
 import { validateManifest } from './validate.js';
 import { getTarget } from './targets.js';
@@ -100,7 +100,10 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
         return responseError(id, -32601, `Method not found: ${method}`);
     }
   } catch (err) {
-    return responseError(id, -32000, err.message, err.validation || undefined);
+    if (err.validation) {
+      return responseError(id, -32602, err.message, err.validation);
+    }
+    return responseError(id, -32000, err.message);
   }
 }
 
@@ -109,6 +112,15 @@ export async function serveJsonRpc({ input = process.stdin, output = process.std
     input,
     crlfDelay: Infinity
   });
+
+  output.write(`${JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'agentcli.ready',
+    params: {
+      ok: true,
+      manifest_version: MANIFEST_VERSION
+    }
+  })}\n`);
 
   for await (const line of lines) {
     if (!line.trim()) continue;

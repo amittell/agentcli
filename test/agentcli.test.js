@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { PassThrough } from 'stream';
 import { DatabaseSync } from 'node:sqlite';
-import { compileManifestToStandalone as compileStandaloneFromIndex, MANIFEST_VERSION } from '../src/index.js';
+import { compileManifestToStandalone as compileStandaloneFromIndex, MANIFEST_VERSION, serveJsonRpc } from '../src/index.js';
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
@@ -880,10 +881,40 @@ test('json-rpc compile errors include validation payload in error.data', async (
 
   assert.equal(response.jsonrpc, '2.0');
   assert.equal(response.id, 'compile-invalid');
-  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.code, -32602);
   assert.equal(response.error.message, 'Manifest validation failed');
   assert.equal(response.error.data.ok, false);
   assert.ok(Array.isArray(response.error.data.errors));
+});
+
+test('serveJsonRpc emits ready notification before responses', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const chunks = [];
+  output.on('data', chunk => chunks.push(String(chunk)));
+
+  const serving = serveJsonRpc({ input, output });
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'agentcli.ping' })}\n`);
+  input.end();
+  await serving;
+
+  const messages = chunks.join('').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(messages[0], {
+    jsonrpc: '2.0',
+    method: 'agentcli.ready',
+    params: {
+      ok: true,
+      manifest_version: MANIFEST_VERSION
+    }
+  });
+  assert.deepEqual(messages[1], {
+    jsonrpc: '2.0',
+    id: '1',
+    result: {
+      ok: true,
+      pong: true
+    }
+  });
 });
 
 test('json-rpc apply returns scheduler action plan', async () => {
