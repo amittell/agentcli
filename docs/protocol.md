@@ -24,6 +24,7 @@ On startup, the server emits a readiness notification before processing requests
 ```
 
 Clients MAY ignore this notification, but it provides a clean synchronization point for process-spawn integrations.
+Clients can discover the current method and notification surface programmatically with `agentcli.describe` and `target: "rpc"`.
 
 ## Envelope
 
@@ -72,6 +73,7 @@ Params:
 Result:
 
 - descriptive metadata for the requested topic
+- for `target: "rpc"`, returns separate `methods[]` and `notifications[]` arrays
 
 ### `agentcli.validate`
 
@@ -119,12 +121,26 @@ Params:
 - `dbPath`
 - `entity`
 - `limit`
-- `fields`
+- `fields` - array of field names, or a comma-delimited string for CLI-style parity
 - `sanitize`
 
 Result:
 
 - runtime inspection payload for scheduler-backed entities
+
+## Notifications
+
+### `agentcli.ready`
+
+Purpose:
+
+- announce that the server is ready to process requests
+- surface the current manifest contract version for clients that want to gate behavior
+
+Params:
+
+- `ok`
+- `manifest_version`
 
 ## Error Model
 
@@ -137,6 +153,7 @@ Current error classes:
 - `-32000`: application error
 
 Implementations SHOULD include machine-readable `data` for richer failures when available.
+Caller-fixable request shape and argument issues SHOULD use `-32602`, including unknown schema targets, unknown description topics, unsupported compile targets, and invalid inspect arguments.
 
 ## Stability
 

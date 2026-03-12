@@ -1,9 +1,11 @@
+import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 import { describeTarget } from './describe.js';
 import { validateManifest } from './validate.js';
 import { getTarget } from './targets.js';
-import { inspectSchedulerState } from './inspect.js';
+import { parseFieldMask } from './fields.js';
+import { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 import { applyManifestToScheduler } from './apply.js';
 
 function responseResult(id, result) {
@@ -22,6 +24,28 @@ function responseError(id, code, message, data) {
   };
 }
 
+class InvalidParamsError extends Error {
+  constructor(message, data) {
+    super(message);
+    this.name = 'InvalidParamsError';
+    this.data = data;
+  }
+}
+
+function invalidParams(message, data) {
+  return new InvalidParamsError(message, data);
+}
+
+function paramsObject(rawParams) {
+  if (rawParams == null) {
+    return {};
+  }
+  if (typeof rawParams !== 'object' || Array.isArray(rawParams)) {
+    throw invalidParams('Params must be an object');
+  }
+  return rawParams;
+}
+
 function schemaByName(name = 'manifest') {
   const aliases = {
     'scheduler-job': 'schedulerJob',
@@ -31,9 +55,85 @@ function schemaByName(name = 'manifest') {
   };
   const schema = MANIFEST_SCHEMA[aliases[name] || name];
   if (!schema) {
-    throw new Error(`Unknown schema target: ${name}`);
+    throw invalidParams(`Unknown schema target: ${name}`);
   }
   return schema;
+}
+
+function describedTarget(name = 'commands') {
+  try {
+    return describeTarget(name);
+  } catch (err) {
+    throw invalidParams(err.message);
+  }
+}
+
+function compileTarget(name) {
+  try {
+    return getTarget(name);
+  } catch (err) {
+    throw invalidParams(err.message);
+  }
+}
+
+function inspectFields(fields) {
+  if (fields == null) {
+    return null;
+  }
+  if (typeof fields === 'string') {
+    return parseFieldMask(fields);
+  }
+  if (!Array.isArray(fields)) {
+    throw invalidParams('inspect fields must be a comma-delimited string or an array of field names');
+  }
+
+  return fields.map((field, index) => {
+    if (typeof field !== 'string' || field.trim() === '') {
+      throw invalidParams(`inspect fields[${index}] must be a non-empty string`);
+    }
+    return field.trim();
+  });
+}
+
+function inspectLimit(limit) {
+  if (limit == null) {
+    return undefined;
+  }
+  if (typeof limit === 'number' && Number.isInteger(limit) && limit > 0) {
+    return limit;
+  }
+  if (typeof limit === 'string' && /^[1-9][0-9]*$/.test(limit)) {
+    return Number.parseInt(limit, 10);
+  }
+  throw invalidParams('inspect limit must be a positive integer');
+}
+
+function inspectParams(params, defaults) {
+  const entity = params.entity || 'jobs';
+  if (!listInspectableEntities().includes(entity)) {
+    throw invalidParams(`Unsupported inspect entity: ${entity}`);
+  }
+
+  const sanitize = params.sanitize || 'none';
+  if (sanitize !== 'none' && sanitize !== 'basic') {
+    throw invalidParams(`Unsupported sanitize mode: ${sanitize}`);
+  }
+
+  const dbPath = params.dbPath || defaults.dbPath;
+  if (!dbPath) {
+    throw invalidParams('Missing scheduler database path. Pass dbPath or configure a default.');
+  }
+  if (!existsSync(dbPath)) {
+    throw invalidParams(`Scheduler database not found: ${dbPath}`);
+  }
+
+  return {
+    dbPath,
+    entity,
+    limit: inspectLimit(params.limit),
+    fields: inspectFields(params.fields),
+    sanitize
+  };
 }
 
 export async function handleJsonRpcRequest(message, defaults = {}) {
@@ -42,23 +142,23 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
   }
 
   const { id = null, method, params: rawParams } = message;
-  const params = (rawParams != null && typeof rawParams === 'object' && !Array.isArray(rawParams)) ? rawParams : {};
   if (message.jsonrpc !== '2.0' || typeof method !== 'string') {
     return responseError(id, -32600, 'Invalid Request');
   }
 
   try {
+    const params = paramsObject(rawParams);
     switch (method) {
       case 'agentcli.ping':
         return responseResult(id, { ok: true, pong: true });
       case 'agentcli.schema':
         return responseResult(id, { ok: true, schema: schemaByName(params.target) });
       case 'agentcli.describe':
-        return responseResult(id, { ok: true, description: describeTarget(params.target) });
+        return responseResult(id, { ok: true, description: describedTarget(params.target) });
       case 'agentcli.validate':
         return responseResult(id, validateManifest(params.manifest));
       case 'agentcli.compile': {
-        const target = getTarget(params.target || defaults.target || 'standalone');
+        const target = compileTarget(params.target || defaults.target || 'standalone');
         return responseResult(
           id,
           {
@@ -88,18 +188,15 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
       case 'agentcli.inspect':
         return responseResult(
           id,
-          await inspectSchedulerState({
-            dbPath: params.dbPath || defaults.dbPath,
-            entity: params.entity,
-            limit: params.limit,
-            fields: params.fields || null,
-            sanitize: params.sanitize || 'none'
-          })
+          await inspectSchedulerState(inspectParams(params, defaults))
         );
       default:
         return responseError(id, -32601, `Method not found: ${method}`);
     }
   } catch (err) {
+    if (err instanceof InvalidParamsError) {
+      return responseError(id, -32602, err.message, err.data);
+    }
     if (err.validation) {
       return responseError(id, -32602, err.message, err.validation);
     }

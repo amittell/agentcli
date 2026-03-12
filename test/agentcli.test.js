@@ -78,6 +78,32 @@ test('invalid trigger conditions fail validation', () => {
   assert.match(result.errors[0].message, /must start with contains: or regex:/);
 });
 
+test('self-referential triggers fail validation explicitly', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'self-trigger-flow',
+        name: 'Self Trigger Flow',
+        tasks: [
+          {
+            id: 'loop',
+            name: 'Loop',
+            prompt: 'Check the current task state.',
+            target: { session_target: 'isolated' },
+            trigger: { parent: 'loop', on: 'failure' },
+            delivery: { mode: 'announce' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => error.path.endsWith('.trigger.parent') && /must not reference its own task id/.test(error.message)));
+});
+
 test('invalid enabled type fails validation', () => {
   const bad = structuredClone(exampleManifest);
   bad.workflows[0].tasks[0].enabled = 'false';
@@ -532,10 +558,33 @@ test('cli schema returns json', async () => {
   assert.equal(output.schema.type, 'object');
 });
 
+test('cli -h prints usage', async () => {
+  const output = await runCli(['-h']);
+  assert.match(output, /^agentcli <command> \[args\]/);
+});
+
 test('cli accepts -- as an argument terminator', async () => {
   const output = JSON.parse(await runCli(['validate', '--', JSON.stringify(exampleManifest)]));
   assert.equal(output.ok, true);
   assert.deepEqual(output.errors, []);
+});
+
+test('cli validate reads JSON from injected stdin for dash input', async () => {
+  const stdin = new PassThrough();
+  const outputPromise = runCli(['validate', '-'], { stdin });
+  stdin.end(JSON.stringify(exampleManifest));
+
+  const output = JSON.parse(await outputPromise);
+  assert.equal(output.ok, true);
+  assert.deepEqual(output.errors, []);
+});
+
+test('cli describe rpc exposes methods and startup notifications', async () => {
+  const output = JSON.parse(await runCli(['describe', 'rpc']));
+  assert.equal(output.ok, true);
+  assert.ok(Array.isArray(output.description.methods));
+  assert.ok(Array.isArray(output.description.notifications));
+  assert.equal(output.description.notifications[0].method, 'agentcli.ready');
 });
 
 test('cli compile writes safely inside cwd', async (t) => {
@@ -885,6 +934,65 @@ test('json-rpc compile errors include validation payload in error.data', async (
   assert.equal(response.error.message, 'Manifest validation failed');
   assert.equal(response.error.data.ok, false);
   assert.ok(Array.isArray(response.error.data.errors));
+});
+
+test('json-rpc caller-fixable parameter errors return invalid params', async () => {
+  const cases = [
+    {
+      request: {
+        jsonrpc: '2.0',
+        id: 'schema-invalid',
+        method: 'agentcli.schema',
+        params: { target: 'unknown-target' }
+      },
+      message: /Unknown schema target/
+    },
+    {
+      request: {
+        jsonrpc: '2.0',
+        id: 'describe-invalid',
+        method: 'agentcli.describe',
+        params: { target: 'unknown-topic' }
+      },
+      message: /Unknown description target/
+    },
+    {
+      request: {
+        jsonrpc: '2.0',
+        id: 'compile-invalid-target',
+        method: 'agentcli.compile',
+        params: {
+          target: 'not-a-target',
+          manifest: exampleManifest
+        }
+      },
+      message: /Unsupported compile target/
+    },
+    {
+      request: {
+        jsonrpc: '2.0',
+        id: 'inspect-invalid-entity',
+        method: 'agentcli.inspect',
+        params: { entity: 'widgets', dbPath: '/tmp/unused.sqlite' }
+      },
+      message: /Unsupported inspect entity/
+    },
+    {
+      request: {
+        jsonrpc: '2.0',
+        id: 'params-not-object',
+        method: 'agentcli.describe',
+        params: ['rpc']
+      },
+      message: /Params must be an object/
+    }
+  ];
+
+  for (const testCase of cases) {
+    const response = await handleJsonRpcRequest(testCase.request);
+    assert.equal(response.error.code, -32602, testCase.request.id);
+    assert.match(response.error.message, testCase.message, testCase.request.id);
+  }
 });
 
 test('serveJsonRpc emits ready notification before responses', async () => {

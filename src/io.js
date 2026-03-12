@@ -9,16 +9,19 @@ function looksLikeJsonLiteral(input) {
   return trimmed.startsWith('{') || trimmed.startsWith('[');
 }
 
-export function loadJsonInput(input, { cwd = process.cwd(), env = process.env } = {}) {
+export async function loadJsonInput(
+  input,
+  { cwd = process.cwd(), env = process.env, stdin = process.stdin } = {}
+) {
   if (!input) {
     throw new Error('Missing input. Pass a file path or JSON string.');
   }
   const resolvedPath = resolveManifestCandidate(input, { cwd, env });
-  if (input === '-' && isatty(0)) {
+  if (input === '-' && (stdin?.isTTY ?? isatty(0))) {
     throw new Error('stdin is a TTY. Pipe JSON data or pass a file path.');
   }
   const raw = input === '-'
-    ? readFileSync(0, 'utf8')
+    ? await readStdinText(stdin)
     : resolvedPath
       ? readFileSync(resolvedPath, 'utf8')
       : existsSync(input)
@@ -29,6 +32,18 @@ export function loadJsonInput(input, { cwd = process.cwd(), env = process.env } 
               throw new Error(`Input not found: ${input}. Pass a file path, a manifest name from AGENTCLI_HOME/manifests, or a JSON string.`);
             })();
   return JSON.parse(raw);
+}
+
+async function readStdinText(stream) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
+    throw new Error('stdin is not readable. Pipe JSON data or pass a file path.');
+  }
+
+  let raw = '';
+  for await (const chunk of stream) {
+    raw += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+  }
+  return raw;
 }
 
 export function resolveSafeOutputPath(outputPath, cwd = process.cwd()) {

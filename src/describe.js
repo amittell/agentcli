@@ -1,4 +1,5 @@
 import { listTargets } from './targets.js';
+import { MANIFEST_VERSION } from './schema.js';
 
 export const COMMAND_DESCRIPTIONS = [
   {
@@ -53,6 +54,17 @@ export const RPC_METHODS = [
   { method: 'agentcli.inspect', summary: 'Inspect a scheduler database when available.' }
 ];
 
+export const RPC_NOTIFICATIONS = [
+  {
+    method: 'agentcli.ready',
+    summary: 'Server startup notification emitted before request processing begins.',
+    params: {
+      ok: true,
+      manifest_version: MANIFEST_VERSION
+    }
+  }
+];
+
 const DESCRIPTIONS = {
   manifest: {
     name: 'manifest',
@@ -89,7 +101,8 @@ const DESCRIPTIONS = {
   rpc: {
     name: 'rpc',
     summary: 'Line-delimited JSON-RPC methods served over stdio.',
-    items: RPC_METHODS
+    methods: RPC_METHODS,
+    notifications: RPC_NOTIFICATIONS
   }
 };
 

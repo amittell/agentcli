@@ -148,11 +148,11 @@ export async function runCli(
         force: Boolean(flags.force)
       }), { mode: outputMode });
     case 'validate': {
-      const manifest = loadJsonInput(positionals[1], { cwd, env: derivedEnv });
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
       return formatOutput(validateManifest(manifest), { mode: outputMode });
     }
     case 'compile': {
-      const manifest = loadJsonInput(positionals[1], { cwd, env: derivedEnv });
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
       const target = getTarget(flags.target || defaultTarget);
       const compiled = target.compile(manifest, { includeExplain: Boolean(flags.explain) });
       const payload = {
@@ -168,7 +168,7 @@ export async function runCli(
       return formatOutput(payload, { mode: outputMode });
     }
     case 'apply': {
-      const manifest = loadJsonInput(positionals[1], { cwd, env: derivedEnv });
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
       const adoptBy = flags['adopt-by'] || 'id';
       if (adoptBy !== 'id' && adoptBy !== 'name') {
         throw new Error(`Invalid --adopt-by value: ${adoptBy}. Accepted values: id, name`);
@@ -211,6 +211,7 @@ export async function runCli(
       return '';
     }
     case 'help':
+    case '-h':
     case undefined:
       if (explicitJson) {
         return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode });

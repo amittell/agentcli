@@ -263,6 +263,8 @@ Serve JSON-RPC over stdio:
 agentcli serve
 ```
 
+For agent integrations, `agentcli describe rpc` returns the machine-readable JSON-RPC method and notification surface, including the startup `agentcli.ready` notification.
+
 ## Publication Docs
 
 - spec: [docs/spec.md](docs/spec.md)
