@@ -90,6 +90,28 @@ function resolveModelPolicy(workflow, task) {
   };
 }
 
+export function resolveIdentity(workflow, task) {
+  const workflowIdentity = workflow.identity || {};
+  const taskIdentity = task.identity || {};
+  return {
+    principal: taskIdentity.principal ?? workflowIdentity.principal ?? null,
+    run_as: taskIdentity.run_as ?? workflowIdentity.run_as ?? null,
+    attestation: taskIdentity.attestation ?? workflowIdentity.attestation ?? null,
+  };
+}
+
+export function resolveContract(workflow, task) {
+  const workflowContract = workflow.contract || {};
+  const taskContract = task.contract || {};
+  return {
+    sandbox: taskContract.sandbox ?? workflowContract.sandbox ?? null,
+    allowed_paths: taskContract.allowed_paths ?? workflowContract.allowed_paths ?? null,
+    network: taskContract.network ?? workflowContract.network ?? null,
+    max_cost_usd: taskContract.max_cost_usd ?? workflowContract.max_cost_usd ?? null,
+    audit: taskContract.audit ?? workflowContract.audit ?? null,
+  };
+}
+
 function resolveIntent(task) {
   if (!task.intent) {
     return { mode: 'execute', read_only: null };
@@ -120,6 +142,8 @@ function resolveBudgets(task) {
 
 export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
   const modelPolicy = resolveModelPolicy(workflow, task);
+  const identity = resolveIdentity(workflow, task);
+  const contract = resolveContract(workflow, task);
   const intent = resolveIntent(task);
   const output = resolveOutput(task);
   const budgets = resolveBudgets(task);
@@ -164,6 +188,8 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     session: {
       preferred_key: task.session?.preferred_key ?? null,
     },
+    identity,
+    contract,
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

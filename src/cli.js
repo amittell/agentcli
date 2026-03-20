@@ -8,7 +8,16 @@ import { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 import { parseFieldMask } from './fields.js';
 import { serveJsonRpc } from './jsonrpc.js';
 import { applyManifestToScheduler } from './apply.js';
+import { executeTask } from './exec.js';
+import { readAuditLog } from './audit.js';
+import { resolveProviderForMethod } from './signing/index.js';
+import './signing/ssh.js';
+import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
 import { ensureAgentcliHome, getAgentcliPaths } from './home.js';
+import { createManifestScaffold, writeManifest } from './init.js';
+import { listRegistry, addToRegistry, showRegistryEntry, removeFromRegistry } from './registry.js';
+import { importManifest } from './import.js';
+import { mergeManifests } from './merge.js';
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require('../package.json');
@@ -19,20 +28,31 @@ agentcli <command> [args]
 
 Commands:
   version
+  init [--tool program] [--output path] [--workflow-id id] [--task-id id]
   schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse|scheduler-job|standalone-plan|rpc-request|rpc-response]
   describe [manifest|workflow|task|targets|commands|rpc]
   targets
   paths
-  init [--home path] [--force]
   validate <path-or-json|->
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
   apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name]
+  exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh|none] [--signing-key path]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
+  audit [--limit n]
+  verify <execution-id> [--allowed-signers path]
+  registry list
+  registry add <path> [--name name]
+  registry show <name>
+  registry remove <name>
+  import <directory> [--name name]
+  merge <manifest1> <manifest2> [--output path]
+  skill-path
   serve [--db path]
 
 Flags:
   --version, -v  Show package and manifest spec version
   --json         Force JSON output
+  --pretty       Colorize JSON output for human readability
   --ndjson       Emit item streams as newline-delimited JSON
   --adopt-by     Strategy for matching existing jobs: id (default) or name.
                  Use --adopt-by name when migrating existing scheduler jobs
@@ -42,6 +62,8 @@ Environment:
   AGENTCLI_HOME=~/.agentcli
   AGENTCLI_OUTPUT=json|ndjson
   AGENTCLI_TARGET=standalone|openclaw-scheduler
+  AGENTCLI_SIGNER=ssh|none (default: ssh)
+  AGENTCLI_SIGNING_KEY=/path/to/ssh-private-key
   AGENTCLI_SCHEDULER_DB=/path/to/scheduler.sqlite
   AGENTCLI_SCHEDULER_PREFIX=/path/to/npm-prefix
   AGENTCLI_SCHEDULER_BIN=/path/to/openclaw-scheduler
@@ -98,7 +120,20 @@ function pickSchema(name) {
   return schema;
 }
 
-function formatOutput(payload, { mode = 'json' } = {}) {
+function colorizeJson(json) {
+  return json.replace(
+    /("(?:[^"\\]|\\.)*")(\s*:)?|(\b(?:true|false|null)\b)|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (match, str, colon, bool, num) => {
+      if (str && colon) return `\x1b[36m${str}\x1b[0m${colon}`;
+      if (str) return `\x1b[32m${str}\x1b[0m`;
+      if (bool) return `\x1b[33m${bool}\x1b[0m`;
+      if (num) return `\x1b[35m${num}\x1b[0m`;
+      return match;
+    }
+  );
+}
+
+function formatOutput(payload, { mode = 'json', pretty = false } = {}) {
   if (mode === 'ndjson') {
     const items = payload?.items || (Array.isArray(payload) ? payload : null);
     if (items) {
@@ -111,7 +146,8 @@ function formatOutput(payload, { mode = 'json' } = {}) {
     return payload;
   }
 
-  return JSON.stringify(payload, null, 2);
+  const json = JSON.stringify(payload, null, 2);
+  return pretty ? colorizeJson(json) : json;
 }
 
 export async function runCli(
@@ -137,6 +173,7 @@ export async function runCli(
     : flags.json ? 'json'
     : envOutput === 'ndjson' ? 'ndjson'
     : 'json';
+  const pretty = Boolean(flags.pretty);
   const defaultTarget = env.AGENTCLI_TARGET || 'standalone';
   const defaultDbPath = env.AGENTCLI_SCHEDULER_DB || null;
   const defaultSchedulerPrefix = env.AGENTCLI_SCHEDULER_PREFIX || '';
@@ -148,26 +185,44 @@ export async function runCli(
       ok: true,
       package_version: PACKAGE_VERSION,
       manifest_version: MANIFEST_VERSION
-    }, { mode: outputMode });
+    }, { mode: outputMode, pretty });
   }
 
   switch (command) {
     case 'schema':
-      return formatOutput({ ok: true, schema: pickSchema(positionals[1]) }, { mode: outputMode });
+      return formatOutput({ ok: true, schema: pickSchema(positionals[1]) }, { mode: outputMode, pretty });
     case 'describe':
-      return formatOutput({ ok: true, description: describeTarget(positionals[1]) }, { mode: outputMode });
+      return formatOutput({ ok: true, description: describeTarget(positionals[1]) }, { mode: outputMode, pretty });
     case 'targets':
-      return formatOutput({ ok: true, targets: listTargets() }, { mode: outputMode });
+      return formatOutput({ ok: true, targets: listTargets() }, { mode: outputMode, pretty });
     case 'paths':
-      return formatOutput({ ok: true, paths: getAgentcliPaths({ env: derivedEnv }) }, { mode: outputMode });
-    case 'init':
-      return formatOutput(ensureAgentcliHome({
-        env: derivedEnv,
-        force: Boolean(flags.force)
-      }), { mode: outputMode });
+      return formatOutput({ ok: true, paths: getAgentcliPaths({ env: derivedEnv }) }, { mode: outputMode, pretty });
+    case 'skill-path': {
+      const paths = getAgentcliPaths({ env: derivedEnv });
+      const bundledSkillPath = new URL('../skills/manifest-authoring/SKILL.md', import.meta.url).pathname;
+      return formatOutput({ ok: true, skill_path: bundledSkillPath, home_skill_path: paths.skill_path }, { mode: outputMode, pretty });
+    }
+    case 'init': {
+      const { manifest, warnings: initWarnings } = createManifestScaffold({
+        tool: flags.tool || undefined,
+        workflowId: flags['workflow-id'] || undefined,
+        taskId: flags['task-id'] || undefined,
+      });
+      const writtenTo = writeManifest(manifest, {
+        output: flags.output || undefined,
+        cwd,
+      });
+      ensureAgentcliHome({ env: derivedEnv });
+      return formatOutput({
+        ok: true,
+        written_to: writtenTo,
+        manifest,
+        warnings: initWarnings,
+      }, { mode: outputMode, pretty });
+    }
     case 'validate': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
-      return formatOutput(validateManifest(manifest), { mode: outputMode });
+      return formatOutput(validateManifest(manifest), { mode: outputMode, pretty });
     }
     case 'compile': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
@@ -183,7 +238,7 @@ export async function runCli(
         payload.written_to = writeJsonOutput(flags.write, compiled, { cwd });
       }
 
-      return formatOutput(payload, { mode: outputMode });
+      return formatOutput(payload, { mode: outputMode, pretty });
     }
     case 'apply': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
@@ -204,7 +259,7 @@ export async function runCli(
         cwd,
         env: derivedEnv
       });
-      return formatOutput(payload, { mode: outputMode });
+      return formatOutput(payload, { mode: outputMode, pretty });
     }
     case 'inspect': {
       const entity = positionals[1] || 'jobs';
@@ -235,7 +290,218 @@ export async function runCli(
         fields: parseFieldMask(flags.fields),
         sanitize
       });
-      return formatOutput(payload, { mode: outputMode });
+      return formatOutput(payload, { mode: outputMode, pretty });
+    }
+    case 'exec': {
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
+      const taskId = positionals[2];
+      if (!taskId) {
+        throw Object.assign(
+          new Error('Usage: agentcli exec <manifest> <task-id> [--workflow id] [--dry-run] [--timeout ms]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const rawTimeout = flags.timeout;
+      if (rawTimeout != null && (typeof rawTimeout !== 'string' || !/^[1-9][0-9]*$/.test(rawTimeout))) {
+        throw Object.assign(
+          new Error(`Invalid --timeout value: ${rawTimeout}. Must be a positive integer (milliseconds).`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const payload = executeTask(manifest, {
+        workflowId: flags.workflow || undefined,
+        taskId,
+        dryRun: Boolean(flags['dry-run']),
+        timeoutMs: rawTimeout ? Number(rawTimeout) : undefined,
+        signer: flags.signer || undefined,
+        signingKey: flags['signing-key'] || undefined,
+        cwd,
+        env: derivedEnv,
+      });
+      return formatOutput(payload, { mode: outputMode, pretty });
+    }
+    case 'audit': {
+      const paths = getAgentcliPaths({ env: derivedEnv });
+      const rawLimit = flags.limit;
+      if (rawLimit != null && (typeof rawLimit !== 'string' || !/^[1-9][0-9]*$/.test(rawLimit))) {
+        throw Object.assign(
+          new Error(`Invalid --limit value: ${rawLimit}. Must be a positive integer.`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const records = readAuditLog({
+        auditPath: paths.audit,
+        limit: rawLimit ? Number(rawLimit) : undefined,
+      });
+      return formatOutput({ ok: true, count: records.length, records }, { mode: outputMode, pretty });
+    }
+    case 'verify': {
+      const executionId = positionals[1];
+      if (!executionId) {
+        throw Object.assign(
+          new Error('Usage: agentcli verify <execution-id> [--allowed-signers path]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const paths = getAgentcliPaths({ env: derivedEnv });
+      const records = readAuditLog({ auditPath: paths.audit });
+      const record = records.find(r => r.execution_id === executionId);
+      if (!record) {
+        throw Object.assign(
+          new Error(`Execution not found in audit log: ${executionId}`),
+          { code: 'invalid_argument' }
+        );
+      }
+      if (!record.attestation) {
+        return formatOutput({
+          ok: true,
+          execution_id: executionId,
+          verified: false,
+          reason: record.attestation_note || 'no attestation present on this execution',
+        }, { mode: outputMode, pretty });
+      }
+      const principal = record.principal_used || record.identity?.principal;
+      if (!principal) {
+        return formatOutput({
+          ok: true,
+          execution_id: executionId,
+          verified: false,
+          reason: 'no principal recorded for this execution',
+        }, { mode: outputMode, pretty });
+      }
+
+      const method = record.attestation.method;
+      const provider = resolveProviderForMethod(method);
+      if (!provider) {
+        return formatOutput({
+          ok: true,
+          execution_id: executionId,
+          verified: false,
+          reason: `no provider registered for attestation method "${method}"`,
+        }, { mode: outputMode, pretty });
+      }
+
+      // SSH-specific: resolve allowed_signers file, auto-generate if missing
+      let verifyOptions = { principal };
+      if (method === 'ssh-signature') {
+        let allowedSignersPath = flags['allowed-signers']
+          || resolveAllowedSigners({ env: derivedEnv, statePath: paths.allowed_signers });
+        if (!allowedSignersPath) {
+          allowedSignersPath = generateAllowedSigners({
+            principal,
+            outputPath: paths.allowed_signers,
+          });
+          if (!allowedSignersPath) {
+            return formatOutput({
+              ok: true,
+              execution_id: executionId,
+              verified: false,
+              reason: 'no allowed_signers file and no SSH public keys found to generate one',
+            }, { mode: outputMode, pretty });
+          }
+        }
+        verifyOptions.allowedSignersPath = allowedSignersPath;
+      }
+
+      const verifyResult = provider.verify(record.attestation, verifyOptions);
+      return formatOutput({
+        ok: true,
+        execution_id: executionId,
+        verified: verifyResult.verified,
+        principal,
+        method,
+        key_fingerprint: record.attestation.key_fingerprint || null,
+        ...(verifyResult.reason ? { reason: verifyResult.reason } : {}),
+      }, { mode: outputMode, pretty });
+    }
+    case 'registry': {
+      const subcommand = positionals[1];
+      switch (subcommand) {
+        case 'list':
+          return formatOutput({
+            ok: true,
+            entries: listRegistry({ env: derivedEnv }),
+          }, { mode: outputMode, pretty });
+        case 'add': {
+          const addPath = positionals[2];
+          if (!addPath) {
+            throw Object.assign(
+              new Error('Usage: agentcli registry add <path> [--name name]'),
+              { code: 'invalid_argument' }
+            );
+          }
+          const addResult = addToRegistry(addPath, {
+            name: flags.name || undefined,
+            env: derivedEnv,
+            cwd,
+          });
+          return formatOutput({ ok: true, ...addResult }, { mode: outputMode, pretty });
+        }
+        case 'show': {
+          const showName = positionals[2];
+          if (!showName) {
+            throw Object.assign(
+              new Error('Usage: agentcli registry show <name>'),
+              { code: 'invalid_argument' }
+            );
+          }
+          const manifest = showRegistryEntry(showName, { env: derivedEnv });
+          return formatOutput({ ok: true, name: showName, manifest }, { mode: outputMode, pretty });
+        }
+        case 'remove': {
+          const removeName = positionals[2];
+          if (!removeName) {
+            throw Object.assign(
+              new Error('Usage: agentcli registry remove <name>'),
+              { code: 'invalid_argument' }
+            );
+          }
+          return formatOutput({
+            ok: true,
+            ...removeFromRegistry(removeName, { env: derivedEnv }),
+          }, { mode: outputMode, pretty });
+        }
+        default:
+          throw Object.assign(
+            new Error(`Unknown registry subcommand: ${subcommand}. Available: list, add, show, remove`),
+            { code: 'invalid_argument' }
+          );
+      }
+    }
+    case 'import': {
+      const importPath = positionals[1];
+      if (!importPath) {
+        throw Object.assign(
+          new Error('Usage: agentcli import <directory> [--name name]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const importResult = importManifest(importPath, {
+        name: flags.name || undefined,
+        env: derivedEnv,
+        cwd,
+      });
+      return formatOutput({ ok: true, ...importResult }, { mode: outputMode, pretty });
+    }
+    case 'merge': {
+      const mergePaths = positionals.slice(1);
+      if (mergePaths.length < 2) {
+        throw Object.assign(
+          new Error('Usage: agentcli merge <manifest1> <manifest2> [--output path]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const manifests = [];
+      for (const mp of mergePaths) {
+        manifests.push(await loadJsonInput(mp, { cwd, env: derivedEnv, stdin }));
+      }
+      const merged = mergeManifests(manifests);
+      const mergePayload = { ok: true, manifest: merged };
+      if (flags.output) {
+        const writtenTo = writeJsonOutput(flags.output, merged, { cwd });
+        mergePayload.written_to = writtenTo;
+      }
+      return formatOutput(mergePayload, { mode: outputMode, pretty });
     }
     case 'serve': {
       await serveJsonRpc({
@@ -254,7 +520,7 @@ export async function runCli(
     case '-h':
     case undefined:
       if (explicitJson) {
-        return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode });
+        return formatOutput({ ok: true, usage: usage().trim() }, { mode: outputMode, pretty });
       }
       return usage().trim();
     default:

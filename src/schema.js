@@ -39,7 +39,8 @@ const outputField = {
   fields: {
     preview_bytes: { type: 'integer', min: 64, nullable: true },
     offload: { type: 'string', enum: ['auto', 'always', 'never'], nullable: true },
-    retrieve: { type: 'string', enum: ['inline', 'on-demand'], nullable: true }
+    retrieve: { type: 'string', enum: ['inline', 'on-demand'], nullable: true },
+    format: { type: 'string', enum: ['json', 'ndjson', 'text'], nullable: true, note: 'Expected output format from the wrapped tool. When json or ndjson, exec parses stdout and includes structured result.' }
   }
 };
 
@@ -113,6 +114,28 @@ const sessionField = {
   }
 };
 
+const identityField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    principal: nullableToken,
+    run_as: nullableToken,
+    attestation: nullableString
+  }
+};
+
+const contractField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    sandbox: { type: 'string', enum: ['none', 'permissive', 'strict'], nullable: true },
+    allowed_paths: { type: 'array', nullable: true, items: { type: 'string' } },
+    network: { type: 'string', enum: ['unrestricted', 'restricted', 'none'], nullable: true },
+    max_cost_usd: { type: 'number', min: 0, nullable: true },
+    audit: { type: 'string', enum: ['none', 'on-failure', 'always'], nullable: true }
+  }
+};
+
 const shellField = {
   type: 'object',
   nullable: true,
@@ -156,6 +179,8 @@ const onFailureField = {
     approval: approvalField,
     context: contextField,
     session: sessionField,
+    identity: identityField,
+    contract: contractField,
     target: {
       type: 'object',
       nullable: true,
@@ -182,6 +207,8 @@ export const MANIFEST_SCHEMA = {
       id: { type: 'string' },
       name: { type: 'string' },
       model_policy: modelPolicyField,
+      identity: identityField,
+      contract: contractField,
       tasks: { type: 'array', minItems: 1 }
     }
   },
@@ -227,6 +254,8 @@ export const MANIFEST_SCHEMA = {
       approval: approvalField,
       context: contextField,
       session: sessionField,
+      identity: identityField,
+      contract: contractField,
       on_failure: onFailureField,
       delete_after_run: nullableBoolean
     }
@@ -278,6 +307,14 @@ export const MANIFEST_SCHEMA = {
       output_summary_limit_bytes: { type: 'integer', nullable: true },
       output_offload_threshold_bytes: { type: 'integer', nullable: true },
       preferred_session_key: nullableString,
+      identity_principal: nullableToken,
+      identity_run_as: nullableToken,
+      identity_attestation: nullableString,
+      contract_sandbox: nullableString,
+      contract_allowed_paths: nullableString,
+      contract_network: nullableString,
+      contract_max_cost_usd: { type: 'number', nullable: true },
+      contract_audit: nullableString,
       delete_after_run: { type: 'integer', nullable: true, note: '1 or 0' }
     }
   },
@@ -307,7 +344,7 @@ export const MANIFEST_SCHEMA = {
           fields: {
             id: { type: 'string' },
             name: { type: 'string' },
-            tasks: { type: 'array', note: 'normalizedTaskPlan objects with id, source, invocation, execution, intent, output, budgets, delivery, reliability, runtime, approval, context, session, delete_after_run, parent_compiled_id' },
+            tasks: { type: 'array', note: 'normalizedTaskPlan objects with id, source, invocation, execution, intent, output, budgets, delivery, reliability, runtime, approval, context, session, identity, contract, delete_after_run, parent_compiled_id' },
             edges: { type: 'array', note: 'trigger edges with from, to, on, condition, delay_s fields' }
           }
         }

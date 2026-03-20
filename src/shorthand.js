@@ -38,6 +38,8 @@ export function buildOnFailureTask(parentTask) {
     ...(handler.approval ? { approval: structuredClone(handler.approval) } : {}),
     ...(handler.context ? { context: structuredClone(handler.context) } : {}),
     ...(handler.session ? { session: structuredClone(handler.session) } : {}),
+    ...(handler.identity ? { identity: structuredClone(handler.identity) } : {}),
+    ...(handler.contract ? { contract: structuredClone(handler.contract) } : {}),
     ...(handler.delete_after_run != null ? { delete_after_run: handler.delete_after_run } : {})
   };
 }

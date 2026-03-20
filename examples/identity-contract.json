@@ -1,0 +1,63 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "secure-deploy",
+      "name": "Secure Deploy Pipeline",
+      "identity": {
+        "principal": "deploy-bot@infra.example.com",
+        "run_as": "ci-deployer"
+      },
+      "contract": {
+        "sandbox": "strict",
+        "network": "restricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "build",
+          "name": "Build Artifact",
+          "prompt": "Build the release artifact from the current main branch.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "schedule": {
+            "cron": "0 14 * * 1-5",
+            "tz": "UTC"
+          },
+          "contract": {
+            "allowed_paths": ["/workspace/build", "/tmp"],
+            "max_cost_usd": 2.50
+          }
+        },
+        {
+          "id": "deploy",
+          "name": "Deploy to Staging",
+          "prompt": "Deploy the built artifact to the staging environment.",
+          "target": {
+            "session_target": "isolated",
+            "agent_id": "main"
+          },
+          "trigger": {
+            "parent": "build",
+            "on": "success"
+          },
+          "identity": {
+            "attestation": "oidc:deploy-pipeline"
+          },
+          "contract": {
+            "network": "unrestricted",
+            "max_cost_usd": 10.00,
+            "audit": "always"
+          },
+          "approval": {
+            "policy": "manual",
+            "risk_level": "high",
+            "timeout_s": 3600
+          }
+        }
+      ]
+    }
+  ]
+}

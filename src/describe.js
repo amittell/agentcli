@@ -40,7 +40,35 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'init',
-    summary: 'Initialize the agentcli home directory with a starter manifest. Supports --force to overwrite.'
+    summary: 'Scaffold a new agentcli manifest in the current directory. Use --tool to wrap a specific CLI program.'
+  },
+  {
+    command: 'exec',
+    summary: 'Execute a shell-target task from a manifest with identity verification, contract enforcement, signing provider attestation, and audit logging. Use --signer to select a signing provider (ssh, none).'
+  },
+  {
+    command: 'audit',
+    summary: 'Read the local execution audit log.'
+  },
+  {
+    command: 'verify',
+    summary: 'Cryptographically verify an execution audit record. Dispatches to the signing provider that produced the attestation (e.g. ssh-signature dispatches to the ssh provider).'
+  },
+  {
+    command: 'skill-path',
+    summary: 'Print the resolved path to the bundled SKILL.md for agent auto-discovery.'
+  },
+  {
+    command: 'registry',
+    summary: 'Manage reusable manifest templates in ~/.agentcli/registry/. Subcommands: list, add, show, remove.'
+  },
+  {
+    command: 'import',
+    summary: 'Import a manifest from a tool directory. Looks for agentcli.json or package.json "agentcli" field and adds to registry.'
+  },
+  {
+    command: 'merge',
+    summary: 'Combine workflows from multiple manifests into one. Rejects duplicate workflow ids.'
   },
   {
     command: 'serve',

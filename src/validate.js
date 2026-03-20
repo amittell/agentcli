@@ -6,21 +6,21 @@ const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const KNOWN_WORKFLOW_KEYS = new Set([
-  'id', 'name', 'model_policy', 'tasks'
+  'id', 'name', 'model_policy', 'identity', 'contract', 'tasks'
 ]);
 
 const KNOWN_TASK_KEYS = new Set([
   'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
-  'on_failure', 'delete_after_run'
+  'identity', 'contract', 'on_failure', 'delete_after_run'
 ]);
 
 const KNOWN_ON_FAILURE_KEYS = new Set([
   'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
   'delay_s', 'condition', 'model_policy', 'intent', 'output', 'budgets',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
-  'delete_after_run'
+  'identity', 'contract', 'delete_after_run'
 ]);
 
 function isObject(value) {
@@ -245,6 +245,7 @@ function validateOutput(errors, path, value) {
   checkInteger(errors, `${path}.preview_bytes`, value.preview_bytes, 64);
   checkEnum(errors, `${path}.offload`, value.offload, ['auto', 'always', 'never']);
   checkEnum(errors, `${path}.retrieve`, value.retrieve, ['inline', 'on-demand']);
+  checkEnum(errors, `${path}.format`, value.format, ['json', 'ndjson', 'text']);
 }
 
 function validateBudgets(errors, path, value) {
@@ -257,6 +258,40 @@ function validateBudgets(errors, path, value) {
   checkInteger(errors, `${path}.max_context_items`, value.max_context_items, 1);
   checkInteger(errors, `${path}.max_pending_approvals`, value.max_pending_approvals, 1);
   checkInteger(errors, `${path}.max_queued_dispatches`, value.max_queued_dispatches, 1);
+}
+
+function validateIdentity(errors, path, value) {
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return;
+  }
+  checkToken(errors, `${path}.principal`, value.principal, { required: false });
+  checkToken(errors, `${path}.run_as`, value.run_as, { required: false });
+  checkString(errors, `${path}.attestation`, value.attestation, { required: false });
+}
+
+function validateContract(errors, path, value) {
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return;
+  }
+  checkEnum(errors, `${path}.sandbox`, value.sandbox, ['none', 'permissive', 'strict']);
+  if (value.allowed_paths != null) {
+    if (!Array.isArray(value.allowed_paths)) {
+      addError(errors, `${path}.allowed_paths`, 'must be an array');
+    } else {
+      for (const [index, p] of value.allowed_paths.entries()) {
+        checkString(errors, `${path}.allowed_paths[${index}]`, p);
+      }
+    }
+  }
+  checkEnum(errors, `${path}.network`, value.network, ['unrestricted', 'restricted', 'none']);
+  if (value.max_cost_usd != null) {
+    if (typeof value.max_cost_usd !== 'number' || value.max_cost_usd < 0) {
+      addError(errors, `${path}.max_cost_usd`, 'must be a number >= 0');
+    }
+  }
+  checkEnum(errors, `${path}.audit`, value.audit, ['none', 'on-failure', 'always']);
 }
 
 function checkOptionalObject(errors, path, value) {
@@ -331,6 +366,14 @@ function validateOptionalBlocks(errors, warnings, path, value) {
     checkToken(errors, `${path}.session.preferred_key`, value.session.preferred_key, { required: false });
   }
 
+  if (checkOptionalObject(errors, `${path}.identity`, value.identity)) {
+    validateIdentity(errors, `${path}.identity`, value.identity);
+  }
+
+  if (checkOptionalObject(errors, `${path}.contract`, value.contract)) {
+    validateContract(errors, `${path}.contract`, value.contract);
+  }
+
   checkBoolean(errors, `${path}.delete_after_run`, value.delete_after_run);
 }
 
@@ -385,6 +428,12 @@ export function validateManifest(manifest) {
       checkString(errors, `${workflowPath}.name`, workflow.name);
       if (checkOptionalObject(errors, `${workflowPath}.model_policy`, workflow.model_policy)) {
         validateModelPolicy(errors, `${workflowPath}.model_policy`, workflow.model_policy);
+      }
+      if (checkOptionalObject(errors, `${workflowPath}.identity`, workflow.identity)) {
+        validateIdentity(errors, `${workflowPath}.identity`, workflow.identity);
+      }
+      if (checkOptionalObject(errors, `${workflowPath}.contract`, workflow.contract)) {
+        validateContract(errors, `${workflowPath}.contract`, workflow.contract);
       }
       if (workflow.id) {
         if (workflowIds.has(workflow.id)) addError(errors, `${workflowPath}.id`, 'must be unique');

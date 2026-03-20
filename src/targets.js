@@ -34,6 +34,25 @@ export const TARGETS = {
   },
 };
 
+export function registerTarget(target) {
+  if (!target || typeof target.name !== 'string' || !target.name) {
+    throw new Error('Target must have a non-empty string name');
+  }
+  if (typeof target.compile !== 'function') {
+    throw new Error(`Target "${target.name}" must implement compile(manifest, options)`);
+  }
+  if (TARGETS[target.name]) {
+    throw new Error(`Target "${target.name}" is already registered`);
+  }
+  TARGETS[target.name] = {
+    name: target.name,
+    description: target.description || '',
+    capabilities: target.capabilities || [],
+    features: target.features || {},
+    compile: target.compile,
+  };
+}
+
 export function getTarget(name) {
   const target = TARGETS[name];
   if (!target) {

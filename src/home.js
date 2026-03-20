@@ -20,6 +20,10 @@ export function getAgentcliPaths({ env = process.env, homeDir = homedir() } = {}
     manifests: join(root, 'manifests'),
     output: join(root, 'output'),
     state: join(root, 'state'),
+    registry: join(root, 'registry'),
+    audit: join(root, 'state', 'audit.ndjson'),
+    allowed_signers: join(root, 'state', 'allowed_signers'),
+    skill_path: join(root, 'skills', 'manifest-authoring', 'SKILL.md'),
     readme: join(root, 'README.md'),
     sampleManifest: join(root, 'manifests', 'bot-health.json')
   };
@@ -31,7 +35,7 @@ function readBundledSample() {
 
 export function ensureAgentcliHome({ env = process.env, homeDir = homedir(), force = false } = {}) {
   const paths = getAgentcliPaths({ env, homeDir });
-  for (const dir of [paths.root, paths.manifests, paths.output, paths.state]) {
+  for (const dir of [paths.root, paths.manifests, paths.output, paths.state, paths.registry]) {
     mkdirSync(dir, { recursive: true });
   }
 

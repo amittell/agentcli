@@ -79,6 +79,14 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
         preferred_session_key: plan.session.preferred_key,
+        identity_principal: plan.identity.principal,
+        identity_run_as: plan.identity.run_as,
+        identity_attestation: plan.identity.attestation,
+        contract_sandbox: plan.contract.sandbox,
+        contract_allowed_paths: plan.contract.allowed_paths ? JSON.stringify(plan.contract.allowed_paths) : null,
+        contract_network: plan.contract.network,
+        contract_max_cost_usd: plan.contract.max_cost_usd,
+        contract_audit: plan.contract.audit,
         delete_after_run: plan.delete_after_run == null ? null : (plan.delete_after_run ? 1 : 0)
       });
 

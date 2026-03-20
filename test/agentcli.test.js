@@ -22,11 +22,27 @@ import { applyManifestToScheduler, resolveSchedulerInvocation } from '../src/app
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
-import { getAgentcliPaths } from '../src/home.js';
+import { ensureAgentcliHome } from '../src/home.js';
 import { stableId } from '../src/compiler/shared.js';
 import { applyFieldMask, parseFieldMask } from '../src/fields.js';
 import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
+import { executeTask } from '../src/exec.js';
+import { readAuditLog } from '../src/audit.js';
+import { buildAttestationPayload, commandHash } from '../src/attestation.js';
+import {
+  registerProvider,
+  getProvider,
+  listProviders,
+  resolveProvider,
+  resolveProviderForMethod,
+} from '../src/signing/index.js';
+import {
+  resolveSigningKey,
+  signPayload,
+  verifySignature,
+  generateAllowedSigners,
+} from '../src/signing/ssh.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -519,34 +535,50 @@ test('cli paths reports the default agentcli home layout', async () => {
   assert.equal(output.paths.manifests, join(homeRoot, 'manifests'));
 });
 
-test('cli init scaffolds a user home with a starter manifest', async (t) => {
+test('cli init creates a valid manifest in cwd', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-init-'));
   const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
-  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+  t.after(() => {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
 
   const output = JSON.parse(await runCli(['init'], {
-    env: {
-      ...process.env,
-      AGENTCLI_HOME: homeRoot
-    }
+    cwd: workdir,
+    env: { ...process.env, AGENTCLI_HOME: homeRoot }
   }));
 
   assert.equal(output.ok, true);
-  const paths = getAgentcliPaths({ env: { ...process.env, AGENTCLI_HOME: homeRoot } });
-  assert.equal(existsSync(paths.readme), true);
-  assert.equal(existsSync(paths.sampleManifest), true);
-  assert.ok(output.created.includes(paths.sampleManifest));
+  assert.ok(output.written_to.endsWith('agentcli.json'));
+  assert.equal(output.manifest.version, '0.1');
+  assert.equal(output.manifest.workflows.length, 1);
+
+  const written = JSON.parse(readFileSync(output.written_to, 'utf8'));
+  assert.deepEqual(written, output.manifest);
+});
+
+test('cli init --tool wraps a specific program', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-init-tool-'));
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
+  t.after(() => {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const output = JSON.parse(await runCli(['init', '--tool', 'echo'], {
+    cwd: workdir,
+    env: { ...process.env, AGENTCLI_HOME: homeRoot }
+  }));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.manifest.workflows[0].tasks[0].shell.program, 'echo');
 });
 
 test('load-by-name flow resolves manifests from AGENTCLI_HOME/manifests', async (t) => {
   const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
   t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
 
-  await runCli(['init'], {
-    env: {
-      ...process.env,
-      AGENTCLI_HOME: homeRoot
-    }
-  });
+  ensureAgentcliHome({ env: { ...process.env, AGENTCLI_HOME: homeRoot } });
 
   const output = JSON.parse(await runCli(['validate', 'bot-health'], {
     env: {
@@ -2230,15 +2262,21 @@ test('cli --json with no command returns JSON help', async () => {
   assert.ok(output.usage.length > 0);
 });
 
-test('cli init --force re-creates existing files', async (t) => {
+test('cli init rejects when agentcli.json already exists', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-init-dup-'));
   const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
-  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
-  const envOverride = { ...process.env, AGENTCLI_HOME: homeRoot };
+  t.after(() => {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
 
-  await runCli(['init'], { env: envOverride });
-  const output = JSON.parse(await runCli(['init', '--force'], { env: envOverride }));
-  assert.equal(output.ok, true);
-  assert.ok(output.created.length > 0, '--force should re-create files');
+  const envOverride = { ...process.env, AGENTCLI_HOME: homeRoot };
+  await runCli(['init'], { cwd: workdir, env: envOverride });
+
+  await assert.rejects(
+    runCli(['init'], { cwd: workdir, env: envOverride }),
+    /File already exists/
+  );
 });
 
 // --- Sweep 10 tests ---
@@ -2600,4 +2638,1730 @@ test('compile --explain to openclaw-scheduler includes model_policy in explain',
   assert.ok(Array.isArray(output.output.explain));
   assert.ok(output.output.explain[0].model_policy);
   assert.ok(output.output.explain[0].intent);
+});
+
+// --- Identity and Contract ---
+
+test('identity block validates valid fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'user@example.com', run_as: 'ci-bot' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+});
+
+test('identity block rejects non-object value', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: 'not-an-object',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('identity') && /must be an object/.test(e.message)));
+});
+
+test('contract block validates valid fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { sandbox: 'strict', network: 'restricted', max_cost_usd: 5.0, audit: 'always' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+});
+
+test('contract block rejects invalid sandbox enum', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { sandbox: 'ultra' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('sandbox') && /must be one of/.test(e.message)));
+});
+
+test('contract.allowed_paths rejects non-array value', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { allowed_paths: '/tmp' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('allowed_paths') && /must be an array/.test(e.message)));
+});
+
+test('contract.max_cost_usd rejects negative value', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { max_cost_usd: -1 },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('max_cost_usd') && /must be a number >= 0/.test(e.message)));
+});
+
+test('identity inherits from workflow to task in compiled plan', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'admin@co.com', run_as: 'deployer' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks[0];
+  assert.equal(task.identity.principal, 'admin@co.com');
+  assert.equal(task.identity.run_as, 'deployer');
+  assert.equal(task.identity.attestation, null);
+});
+
+test('task-level identity overrides workflow-level identity key by key', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'admin@co.com', run_as: 'deployer' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        identity: { run_as: 'builder' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks[0];
+  assert.equal(task.identity.principal, 'admin@co.com');
+  assert.equal(task.identity.run_as, 'builder');
+});
+
+test('contract inherits from workflow to task in compiled plan', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { sandbox: 'strict', network: 'none', audit: 'always' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks[0];
+  assert.equal(task.contract.sandbox, 'strict');
+  assert.equal(task.contract.network, 'none');
+  assert.equal(task.contract.audit, 'always');
+  assert.equal(task.contract.allowed_paths, null);
+  assert.equal(task.contract.max_cost_usd, null);
+});
+
+test('task-level contract overrides workflow-level contract key by key', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      contract: { sandbox: 'strict', network: 'none' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        contract: { network: 'unrestricted', max_cost_usd: 5 }
+      }]
+    }]
+  };
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks[0];
+  assert.equal(task.contract.sandbox, 'strict');
+  assert.equal(task.contract.network, 'unrestricted');
+  assert.equal(task.contract.max_cost_usd, 5);
+});
+
+test('scheduler compilation emits identity and contract fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'user@co.com' },
+      contract: { sandbox: 'permissive', allowed_paths: ['/tmp', '/data'], max_cost_usd: 10 },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.identity_principal, 'user@co.com');
+  assert.equal(job.identity_run_as, null);
+  assert.equal(job.identity_attestation, null);
+  assert.equal(job.contract_sandbox, 'permissive');
+  assert.equal(job.contract_allowed_paths, JSON.stringify(['/tmp', '/data']));
+  assert.equal(job.contract_max_cost_usd, 10);
+  assert.equal(job.contract_network, null);
+  assert.equal(job.contract_audit, null);
+});
+
+test('on_failure handler propagates identity and contract via shorthand expansion', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        on_failure: {
+          prompt: 'Handle failure',
+          identity: { principal: 'ops@co.com' },
+          contract: { audit: 'on-failure' }
+        }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  const expanded = expandManifestShorthands(manifest);
+  const failureTask = expanded.workflows[0].tasks.find(t => t.id === 't.failure');
+  assert.ok(failureTask);
+  assert.equal(failureTask.identity.principal, 'ops@co.com');
+  assert.equal(failureTask.contract.audit, 'on-failure');
+});
+
+test('standalone capabilities include identity and contracts', () => {
+  const compiled = compileManifestToStandalone(exampleManifest);
+  assert.equal(compiled.capabilities.identity, true);
+  assert.equal(compiled.capabilities.contracts, true);
+});
+
+// --- Skill Path ---
+
+test('cli skill-path returns bundled skill path', async () => {
+  const output = JSON.parse(await runCli(['skill-path']));
+  assert.equal(output.ok, true);
+  assert.ok(output.skill_path.endsWith('SKILL.md'));
+  assert.ok(output.home_skill_path);
+});
+
+// --- Pretty Output ---
+
+test('cli --pretty flag colorizes JSON output', async () => {
+  const output = await runCli(['version', '--pretty']);
+  assert.ok(output.includes('\x1b['), 'output should contain ANSI escape codes');
+  assert.ok(output.includes('package_version'));
+});
+
+// --- Registry and Paths ---
+
+test('paths output includes registry and skill_path', async () => {
+  const output = JSON.parse(await runCli(['paths']));
+  assert.equal(output.ok, true);
+  assert.ok(output.paths.registry);
+  assert.ok(output.paths.skill_path);
+});
+
+test('init creates registry directory', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-init-'));
+  const result = ensureAgentcliHome({ env: { AGENTCLI_HOME: workdir } });
+  assert.equal(result.ok, true);
+  assert.ok(existsSync(join(workdir, 'registry')));
+  rmSync(workdir, { recursive: true, force: true });
+});
+
+// --- Identity/Contract in known keys (no unknown-key warnings) ---
+
+test('identity and contract on workflow do not produce unknown-key warnings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'user@co.com' },
+      contract: { sandbox: 'none' },
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.equal(result.warnings.filter(w => w.message.includes('unknown key')).length, 0);
+});
+
+test('identity and contract on task do not produce unknown-key warnings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        identity: { run_as: 'bot' },
+        contract: { network: 'none' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.equal(result.warnings.filter(w => w.message.includes('unknown key')).length, 0);
+});
+
+test('identity and contract on on_failure do not produce unknown-key warnings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        on_failure: {
+          prompt: 'handle it',
+          identity: { principal: 'ops@co.com' },
+          contract: { audit: 'always' }
+        }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.equal(result.warnings.filter(w => w.message.includes('unknown key')).length, 0);
+});
+
+test('identity-contract example manifest validates and compiles', () => {
+  const manifest = readExample('identity-contract.json');
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  const standalone = compileManifestToStandalone(manifest);
+  assert.ok(standalone.workflows[0].tasks[0].identity.principal, 'deploy-bot@infra.example.com');
+  assert.ok(standalone.workflows[0].tasks[0].contract.sandbox, 'strict');
+  const scheduler = compileManifestToScheduler(manifest);
+  assert.ok(scheduler.jobs[0].identity_principal, 'deploy-bot@infra.example.com');
+  assert.ok(scheduler.jobs[0].contract_sandbox, 'strict');
+});
+
+// --- exec: direct task execution ---
+
+test('exec runs a shell task and returns structured result', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'echo-test', name: 'Echo Test',
+        shell: { program: 'echo', args: ['hello-agentcli'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 'echo-test' });
+  assert.equal(result.ok, true);
+  assert.equal(result.result.exit_code, 0);
+  assert.ok(result.result.stdout.includes('hello-agentcli'));
+  assert.ok(result.execution_id);
+  assert.equal(result.source.workflow_id, 'w');
+  assert.equal(result.source.task_id, 'echo-test');
+  assert.ok(result.result.output_hash.startsWith('sha256:'));
+  assert.equal(result.result.timed_out, false);
+});
+
+test('exec rejects non-shell tasks', () => {
+  assert.throws(
+    () => executeTask(exampleManifest, { taskId: 'collect' }),
+    /exec only supports shell-target tasks/
+  );
+});
+
+test('exec rejects missing taskId', () => {
+  assert.throws(
+    () => executeTask(shellManifest, {}),
+    /taskId is required/
+  );
+});
+
+test('exec rejects unknown task id', () => {
+  assert.throws(
+    () => executeTask(shellManifest, { taskId: 'nonexistent' }),
+    /Task not found: nonexistent/
+  );
+});
+
+test('exec rejects unknown workflow id', () => {
+  assert.throws(
+    () => executeTask(shellManifest, { workflowId: 'bad', taskId: 'check-space' }),
+    /Workflow not found: bad/
+  );
+});
+
+test('exec requires --workflow when multiple workflows present', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'w1', name: 'W1',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'echo' },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      },
+      {
+        id: 'w2', name: 'W2',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'echo' },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      }
+    ]
+  };
+  assert.throws(
+    () => executeTask(manifest, { taskId: 't' }),
+    /Multiple workflows found/
+  );
+  const result = executeTask(manifest, { workflowId: 'w1', taskId: 't', dryRun: true });
+  assert.equal(result.ok, true);
+});
+
+test('exec dry-run does not spawn a process', () => {
+  const result = executeTask(shellManifest, {
+    taskId: 'check-space',
+    dryRun: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.command.program, 'df');
+  assert.deepEqual(result.command.args, ['-h']);
+  assert.ok(!result.result);
+});
+
+test('exec resolves identity from workflow to task', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'admin@co.com', run_as: 'deployer' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hi'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { run_as: 'builder' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.equal(result.identity.principal, 'admin@co.com');
+  assert.equal(result.identity.run_as, 'builder');
+});
+
+test('exec enforces contract.allowed_paths against shell.cwd', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', cwd: '/usr/local/secret' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { allowed_paths: ['/tmp', '/data'] }
+      }]
+    }]
+  };
+  assert.throws(
+    () => executeTask(manifest, { taskId: 't' }),
+    /not under any allowed path/
+  );
+});
+
+test('exec allows cwd under an allowed path', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-cwd-'));
+  try {
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'echo', args: ['ok'], cwd: workdir },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { allowed_paths: [tmpdir()], audit: 'none' }
+        }]
+      }]
+    };
+    const result = executeTask(manifest, { taskId: 't' });
+    assert.equal(result.ok, true);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('exec returns advisory warnings for strict sandbox and network none', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hi'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { sandbox: 'strict', network: 'none', audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.ok(result.warnings.some(w => w.includes('sandbox')));
+  assert.ok(result.warnings.some(w => w.includes('network')));
+});
+
+test('exec writes audit record when contract.audit is always', (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['audited'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { AGENTCLI_HOME: workdir },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.audited, true);
+
+  const auditPath = join(workdir, 'state', 'audit.ndjson');
+  assert.ok(existsSync(auditPath));
+  const records = readAuditLog({ auditPath });
+  assert.equal(records.length, 1);
+  assert.equal(records[0].source.task_id, 't');
+  assert.equal(records[0].result.exit_code, 0);
+  assert.ok(records[0].execution_id);
+  assert.ok(records[0].timestamp);
+});
+
+test('exec skips audit when contract.audit is none', (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['silent'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { AGENTCLI_HOME: workdir },
+  });
+  assert.equal(result.audited, false);
+  assert.ok(!existsSync(join(workdir, 'state', 'audit.ndjson')));
+});
+
+test('exec audit on-failure only writes on non-zero exit', (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+  const auditPath = join(workdir, 'state', 'audit.ndjson');
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        {
+          id: 'ok', name: 'OK',
+          shell: { program: 'echo', args: ['pass'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'on-failure' }
+        },
+        {
+          id: 'fail', name: 'Fail',
+          shell: { program: 'false' },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'ok', on: 'failure' },
+          contract: { audit: 'on-failure' }
+        }
+      ]
+    }]
+  };
+
+  executeTask(manifest, { taskId: 'ok', env: { AGENTCLI_HOME: workdir } });
+  assert.ok(!existsSync(auditPath), 'audit should not exist after success');
+
+  executeTask(manifest, { taskId: 'fail', env: { AGENTCLI_HOME: workdir } });
+  assert.ok(existsSync(auditPath), 'audit should exist after failure');
+  const records = readAuditLog({ auditPath });
+  assert.equal(records.length, 1);
+  assert.notEqual(records[0].result.exit_code, 0);
+});
+
+test('exec captures non-zero exit code', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'false' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.equal(result.ok, false);
+  assert.notEqual(result.result.exit_code, 0);
+});
+
+test('exec respects timeout and reports timed_out', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'sleep', args: ['10'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        runtime: { timeout_ms: 100 },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.equal(result.ok, false);
+  assert.equal(result.result.timed_out, true);
+});
+
+test('exec with shell.env passes environment variables', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'sh', args: ['-c', 'echo $AGENTCLI_TEST_VAR'], env: { AGENTCLI_TEST_VAR: 'test-value-42' } },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.equal(result.ok, true);
+  assert.ok(result.result.stdout.includes('test-value-42'));
+});
+
+test('exec with shell.stdin pipes input to process', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'cat', stdin: 'hello from stdin' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.equal(result.ok, true);
+  assert.ok(result.result.stdout.includes('hello from stdin'));
+});
+
+test('exec on on_failure expanded task works', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'root', name: 'Root',
+        shell: { program: 'echo', args: ['root'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        on_failure: {
+          shell: { program: 'echo', args: ['failure-handler'] }
+        }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 'root.failure' });
+  assert.equal(result.ok, true);
+  assert.ok(result.result.stdout.includes('failure-handler'));
+});
+
+// --- CLI exec and audit commands ---
+
+test('cli exec runs a shell task from inline manifest', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['cli-exec-test'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const output = JSON.parse(await runCli(['exec', JSON.stringify(manifest), 't']));
+  assert.equal(output.ok, true);
+  assert.ok(output.result.stdout.includes('cli-exec-test'));
+});
+
+test('cli exec --dry-run does not execute', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['should-not-run'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const output = JSON.parse(await runCli(['exec', JSON.stringify(manifest), 't', '--dry-run']));
+  assert.equal(output.ok, true);
+  assert.equal(output.dry_run, true);
+  assert.ok(!output.result);
+});
+
+test('cli exec without task-id throws usage error', async () => {
+  await assert.rejects(
+    runCli(['exec', JSON.stringify(shellManifest)]),
+    /Usage: agentcli exec/
+  );
+});
+
+test('cli audit returns empty log when no executions', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-audit-'));
+  try {
+    const output = JSON.parse(await runCli(['audit'], { env: { ...process.env, AGENTCLI_HOME: workdir } }));
+    assert.equal(output.ok, true);
+    assert.equal(output.count, 0);
+    assert.deepEqual(output.records, []);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('cli audit --limit returns limited records', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-audit-'));
+  try {
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'echo', args: ['a'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'always' }
+        }]
+      }]
+    };
+    const testEnv = { ...process.env, AGENTCLI_HOME: workdir };
+    executeTask(manifest, { taskId: 't', env: testEnv });
+    executeTask(manifest, { taskId: 't', env: testEnv });
+    executeTask(manifest, { taskId: 't', env: testEnv });
+
+    const output = JSON.parse(await runCli(['audit', '--limit', '2'], { env: testEnv }));
+    assert.equal(output.ok, true);
+    assert.equal(output.count, 2);
+    assert.equal(output.records.length, 2);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('paths output includes audit path', async () => {
+  const output = JSON.parse(await runCli(['paths']));
+  assert.ok(output.paths.audit);
+  assert.ok(output.paths.audit.endsWith('audit.ndjson'));
+});
+
+test('paths output includes allowed_signers path', async () => {
+  const output = JSON.parse(await runCli(['paths']));
+  assert.ok(output.paths.allowed_signers);
+  assert.ok(output.paths.allowed_signers.endsWith('allowed_signers'));
+});
+
+// --- Attestation: SSH key signing ---
+
+test('resolveSigningKey finds SSH key from home directory', () => {
+  const key = resolveSigningKey();
+  // On this machine there is at least ~/.ssh/id_rsa
+  assert.ok(key === null || key.includes('.ssh/'));
+});
+
+test('resolveSigningKey respects AGENTCLI_SIGNING_KEY env', () => {
+  const key = resolveSigningKey({ env: { AGENTCLI_SIGNING_KEY: '/nonexistent/key' } });
+  assert.equal(key, null);
+});
+
+test('buildAttestationPayload produces deterministic canonical JSON', () => {
+  const fields = {
+    executionId: 'abc123',
+    timestamp: '2026-03-19T12:00:00Z',
+    source: { workflow_id: 'w', task_id: 't' },
+    commandHash: 'sha256:def456',
+    principal: 'user@host',
+  };
+  const p1 = buildAttestationPayload(fields);
+  const p2 = buildAttestationPayload(fields);
+  assert.equal(p1, p2);
+  const parsed = JSON.parse(p1);
+  assert.equal(parsed.v, 1);
+  assert.equal(parsed.execution_id, 'abc123');
+  assert.equal(parsed.principal, 'user@host');
+});
+
+test('commandHash is stable for same inputs', () => {
+  const shell = { program: 'echo', args: ['hello', 'world'], cwd: '/tmp' };
+  const h1 = commandHash(shell);
+  const h2 = commandHash(shell);
+  assert.equal(h1, h2);
+  assert.ok(h1.startsWith('sha256:'));
+});
+
+test('commandHash differs for different inputs', () => {
+  const h1 = commandHash({ program: 'echo', args: ['a'] });
+  const h2 = commandHash({ program: 'echo', args: ['b'] });
+  assert.notEqual(h1, h2);
+});
+
+test('signPayload returns signed false when no key', () => {
+  const result = signPayload('test payload', { keyPath: '/nonexistent/key' });
+  assert.equal(result.signed, false);
+  assert.ok(result.reason);
+});
+
+test('signPayload signs with a valid SSH key', () => {
+  const key = resolveSigningKey();
+  if (!key) return; // skip if no SSH key on this machine
+  const result = signPayload('test payload for signing', { keyPath: key });
+  assert.equal(result.signed, true);
+  assert.ok(result.attestation.signature.includes('BEGIN SSH SIGNATURE'));
+  assert.equal(result.attestation.method, 'ssh-signature');
+  assert.equal(result.attestation.namespace, 'agentcli');
+  assert.ok(result.attestation.key_fingerprint);
+  assert.ok(result.attestation.key_fingerprint.startsWith('SHA256:'));
+});
+
+test('sign and verify round-trip succeeds', (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-attest-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const payload = 'round-trip test payload';
+  const sigResult = signPayload(payload, { keyPath: key });
+  assert.equal(sigResult.signed, true);
+
+  const principal = `test@agentcli`;
+  const signersPath = join(workdir, 'allowed_signers');
+  generateAllowedSigners({ principal, outputPath: signersPath });
+
+  const verifyResult = verifySignature(sigResult.attestation, {
+    allowedSignersPath: signersPath,
+    principal,
+  });
+  assert.equal(verifyResult.verified, true);
+  assert.equal(verifyResult.principal, principal);
+});
+
+test('verifySignature rejects tampered payload', (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-tamper-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const sigResult = signPayload('original payload', { keyPath: key });
+  assert.equal(sigResult.signed, true);
+
+  const principal = `test@agentcli`;
+  const signersPath = join(workdir, 'allowed_signers');
+  generateAllowedSigners({ principal, outputPath: signersPath });
+
+  // Tamper: change the signed_payload
+  const tampered = { ...sigResult.attestation, signed_payload: 'tampered payload' };
+  const verifyResult = verifySignature(tampered, {
+    allowedSignersPath: signersPath,
+    principal,
+  });
+  assert.equal(verifyResult.verified, false);
+});
+
+test('verifySignature rejects wrong principal', (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-wrongp-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const sigResult = signPayload('principal test', { keyPath: key });
+  assert.equal(sigResult.signed, true);
+
+  const signersPath = join(workdir, 'allowed_signers');
+  generateAllowedSigners({ principal: 'real@user', outputPath: signersPath });
+
+  const verifyResult = verifySignature(sigResult.attestation, {
+    allowedSignersPath: signersPath,
+    principal: 'wrong@user',
+  });
+  assert.equal(verifyResult.verified, false);
+});
+
+test('verifySignature returns false for missing attestation', () => {
+  const result = verifySignature(null, { allowedSignersPath: '/tmp', principal: 'x' });
+  assert.equal(result.verified, false);
+});
+
+test('exec includes attestation when signing key is available', (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-attest-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'test@agentcli' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['attested'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { AGENTCLI_HOME: workdir },
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.attestation, 'attestation should be present');
+  assert.equal(result.attestation.method, 'ssh-signature');
+  assert.ok(result.attestation.key_fingerprint);
+
+  // Audit record should also have the full attestation
+  const records = readAuditLog({ auditPath: join(workdir, 'state', 'audit.ndjson') });
+  assert.equal(records.length, 1);
+  assert.ok(records[0].attestation);
+  assert.ok(records[0].attestation.signature.includes('BEGIN SSH SIGNATURE'));
+  assert.ok(records[0].attestation.signed_payload);
+  assert.ok(records[0].command_hash.startsWith('sha256:'));
+});
+
+test('exec with signer none skips attestation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['unsigned'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    signer: 'none',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.attestation, null);
+  assert.equal(result.signer, 'none');
+  assert.ok(result.attestation_note.includes('signing disabled'));
+});
+
+test('cli verify rejects missing execution-id', async () => {
+  await assert.rejects(
+    runCli(['verify']),
+    /Usage: agentcli verify/
+  );
+});
+
+test('cli verify rejects unknown execution-id', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-verify-'));
+  try {
+    await assert.rejects(
+      runCli(['verify', 'nonexistent-id'], { env: { ...process.env, AGENTCLI_HOME: workdir } }),
+      /Execution not found/
+    );
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('cli exec + verify end-to-end round-trip', async (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-e2e-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'e2e@agentcli' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['e2e'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' }
+      }]
+    }]
+  };
+
+  const testEnv = { ...process.env, AGENTCLI_HOME: workdir };
+
+  // Execute
+  const execOutput = JSON.parse(await runCli([
+    'exec', JSON.stringify(manifest), 't',
+  ], { env: testEnv }));
+  assert.equal(execOutput.ok, true);
+  assert.ok(execOutput.attestation);
+  const executionId = execOutput.execution_id;
+
+  // Verify
+  const verifyOutput = JSON.parse(await runCli([
+    'verify', executionId,
+  ], { env: testEnv }));
+  assert.equal(verifyOutput.ok, true);
+  assert.equal(verifyOutput.verified, true);
+  assert.equal(verifyOutput.execution_id, executionId);
+  assert.ok(verifyOutput.key_fingerprint);
+});
+
+// -- Signing provider registry tests --
+
+test('listProviders includes ssh and none', () => {
+  const providers = listProviders();
+  assert.ok(providers.includes('ssh'));
+  assert.ok(providers.includes('none'));
+});
+
+test('getProvider returns null for unknown provider', () => {
+  assert.equal(getProvider('nonexistent'), null);
+});
+
+test('getProvider returns ssh provider', () => {
+  const provider = getProvider('ssh');
+  assert.ok(provider);
+  assert.equal(provider.name, 'ssh');
+  assert.equal(typeof provider.resolve, 'function');
+  assert.equal(typeof provider.sign, 'function');
+  assert.equal(typeof provider.verify, 'function');
+});
+
+test('resolveProvider defaults to ssh', () => {
+  const provider = resolveProvider({ env: {} });
+  assert.equal(provider.name, 'ssh');
+});
+
+test('resolveProvider respects AGENTCLI_SIGNER env', () => {
+  const provider = resolveProvider({ env: { AGENTCLI_SIGNER: 'none' } });
+  assert.equal(provider.name, 'none');
+});
+
+test('resolveProvider respects explicit signer over env', () => {
+  const provider = resolveProvider({ signer: 'none', env: { AGENTCLI_SIGNER: 'ssh' } });
+  assert.equal(provider.name, 'none');
+});
+
+test('resolveProvider throws for unknown signer', () => {
+  assert.throws(
+    () => resolveProvider({ signer: 'magic' }),
+    /Unknown signing provider: "magic"/
+  );
+});
+
+test('none provider sign returns signed false', () => {
+  const provider = getProvider('none');
+  const result = provider.sign('test payload', {});
+  assert.equal(result.signed, false);
+  assert.ok(result.reason.includes('signing disabled'));
+});
+
+test('none provider verify returns verified false', () => {
+  const provider = getProvider('none');
+  const result = provider.verify({ method: 'none' }, {});
+  assert.equal(result.verified, false);
+});
+
+test('resolveProviderForMethod returns ssh for ssh-signature', () => {
+  const provider = resolveProviderForMethod('ssh-signature');
+  assert.ok(provider);
+  assert.equal(provider.name, 'ssh');
+});
+
+test('resolveProviderForMethod returns null for unknown method', () => {
+  assert.equal(resolveProviderForMethod('unknown-method'), null);
+  assert.equal(resolveProviderForMethod(null), null);
+});
+
+test('ssh provider resolve returns null when no key available', () => {
+  const provider = getProvider('ssh');
+  const config = provider.resolve({ homeDir: '/nonexistent-home-dir', env: {} });
+  assert.equal(config, null);
+});
+
+test('ssh provider sign returns signed false when config is null', () => {
+  const provider = getProvider('ssh');
+  const result = provider.sign('test', null);
+  assert.equal(result.signed, false);
+});
+
+test('registerProvider rejects provider without name', () => {
+  assert.throws(
+    () => registerProvider({}),
+    /must have a string name/
+  );
+});
+
+test('registerProvider rejects provider without resolve', () => {
+  assert.throws(
+    () => registerProvider({ name: 'bad', sign: () => {}, verify: () => {} }),
+    /must implement resolve/
+  );
+});
+
+test('registerProvider rejects provider without sign', () => {
+  assert.throws(
+    () => registerProvider({ name: 'bad', resolve: () => {}, verify: () => {} }),
+    /must implement sign/
+  );
+});
+
+test('registerProvider rejects provider without verify', () => {
+  assert.throws(
+    () => registerProvider({ name: 'bad', resolve: () => {}, sign: () => {} }),
+    /must implement verify/
+  );
+});
+
+test('exec output includes signer field', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['signer-test'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't', signer: 'none' });
+  assert.equal(result.signer, 'none');
+});
+
+test('exec with AGENTCLI_SIGNER=none skips attestation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['env-signer'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { ...process.env, AGENTCLI_SIGNER: 'none' },
+  });
+  assert.equal(result.signer, 'none');
+  assert.equal(result.attestation, null);
+});
+
+test('exec rejects unknown signer', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['bad'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  assert.throws(
+    () => executeTask(manifest, { taskId: 't', signer: 'imaginary' }),
+    /Unknown signing provider/
+  );
+});
+
+test('cli exec --signer none skips attestation', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['cli-signer'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const output = JSON.parse(await runCli([
+    'exec', JSON.stringify(manifest), 't', '--signer', 'none',
+  ]));
+  assert.equal(output.signer, 'none');
+  assert.equal(output.attestation, null);
+});
+
+test('verify output includes method field', async (t) => {
+  const key = resolveSigningKey();
+  if (!key) return;
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-verify-method-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { principal: 'method-test@agentcli' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['method'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' }
+      }]
+    }]
+  };
+
+  const testEnv = { ...process.env, AGENTCLI_HOME: workdir };
+
+  const execOutput = JSON.parse(await runCli([
+    'exec', JSON.stringify(manifest), 't',
+  ], { env: testEnv }));
+  assert.equal(execOutput.ok, true);
+
+  const verifyOutput = JSON.parse(await runCli([
+    'verify', execOutput.execution_id,
+  ], { env: testEnv }));
+  assert.equal(verifyOutput.verified, true);
+  assert.equal(verifyOutput.method, 'ssh-signature');
+});
+
+// -- registerTarget tests --
+
+import { registerTarget } from '../src/targets.js';
+
+test('registerTarget rejects target without name', () => {
+  assert.throws(() => registerTarget({}), /must have a non-empty string name/);
+});
+
+test('registerTarget rejects target without compile', () => {
+  assert.throws(
+    () => registerTarget({ name: 'test-no-compile' }),
+    /must implement compile/
+  );
+});
+
+test('registerTarget rejects duplicate target name', () => {
+  assert.throws(
+    () => registerTarget({ name: 'standalone', compile: () => {} }),
+    /already registered/
+  );
+});
+
+// -- init tests --
+
+import { createManifestScaffold } from '../src/init.js';
+
+test('createManifestScaffold produces a valid manifest', () => {
+  const { manifest, warnings } = createManifestScaffold();
+  const validation = validateManifest(manifest);
+  assert.equal(validation.ok, true);
+  assert.equal(manifest.workflows[0].tasks[0].shell.program, 'echo');
+  assert.deepEqual(warnings, []);
+});
+
+test('createManifestScaffold with --tool sets program', () => {
+  const { manifest } = createManifestScaffold({ tool: 'echo' });
+  assert.equal(manifest.workflows[0].tasks[0].shell.program, 'echo');
+  assert.deepEqual(manifest.workflows[0].tasks[0].shell.args, []);
+});
+
+test('createManifestScaffold with custom ids', () => {
+  const { manifest } = createManifestScaffold({
+    workflowId: 'deploy',
+    taskId: 'build',
+  });
+  assert.equal(manifest.workflows[0].id, 'deploy');
+  assert.equal(manifest.workflows[0].tasks[0].id, 'build');
+});
+
+test('createManifestScaffold warns for missing tool on PATH', () => {
+  const { warnings } = createManifestScaffold({ tool: 'nonexistent-binary-xyz' });
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes('not found on PATH'));
+});
+
+test('cli init with --output writes to custom path', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-init-out-'));
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
+  t.after(() => {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+
+  const customPath = join(workdir, 'custom.json');
+  const output = JSON.parse(await runCli([
+    'init', '--output', customPath,
+  ], { cwd: workdir, env: { ...process.env, AGENTCLI_HOME: homeRoot } }));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.written_to, customPath);
+  assert.ok(existsSync(customPath));
+});
+
+// -- registry tests --
+
+import { listRegistry, addToRegistry, showRegistryEntry, removeFromRegistry } from '../src/registry.js';
+
+test('registry list returns empty for fresh home', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-reg-'));
+  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+
+  const entries = listRegistry({ env: { AGENTCLI_HOME: homeRoot } });
+  assert.deepEqual(entries, []);
+});
+
+test('registry add/show/list/remove lifecycle', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-reg-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-reg-work-'));
+  t.after(() => {
+    rmSync(homeRoot, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'test-wf', name: 'Test',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+      }]
+    }]
+  };
+  const filePath = join(workdir, 'test.json');
+  writeFileSync(filePath, JSON.stringify(manifest));
+
+  const addResult = addToRegistry(filePath, { env: { AGENTCLI_HOME: homeRoot } });
+  assert.equal(addResult.name, 'test');
+
+  const entries = listRegistry({ env: { AGENTCLI_HOME: homeRoot } });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].name, 'test');
+  assert.equal(entries[0].workflows[0].id, 'test-wf');
+
+  const shown = showRegistryEntry('test', { env: { AGENTCLI_HOME: homeRoot } });
+  assert.deepEqual(shown, manifest);
+
+  const removed = removeFromRegistry('test', { env: { AGENTCLI_HOME: homeRoot } });
+  assert.equal(removed.removed, true);
+
+  assert.deepEqual(listRegistry({ env: { AGENTCLI_HOME: homeRoot } }), []);
+});
+
+test('registry add rejects invalid manifest', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-reg-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-reg-work-'));
+  t.after(() => {
+    rmSync(homeRoot, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  const filePath = join(workdir, 'bad.json');
+  writeFileSync(filePath, JSON.stringify({ version: '0.1' }));
+
+  assert.throws(
+    () => addToRegistry(filePath, { env: { AGENTCLI_HOME: homeRoot } }),
+    /validation failed/
+  );
+});
+
+test('registry show rejects missing entry', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-reg-'));
+  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+
+  assert.throws(
+    () => showRegistryEntry('nope', { env: { AGENTCLI_HOME: homeRoot } }),
+    /not found/
+  );
+});
+
+test('cli registry list returns entries', async (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-reg-cli-'));
+  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+
+  const output = JSON.parse(await runCli(['registry', 'list'], {
+    env: { ...process.env, AGENTCLI_HOME: homeRoot }
+  }));
+  assert.equal(output.ok, true);
+  assert.ok(Array.isArray(output.entries));
+});
+
+// -- import tests --
+
+import { importManifest } from '../src/import.js';
+
+test('import discovers agentcli.json in directory', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-imp-'));
+  const toolDir = mkdtempSync(join(tmpdir(), 'agentcli-tool-'));
+  t.after(() => {
+    rmSync(homeRoot, { recursive: true, force: true });
+    rmSync(toolDir, { recursive: true, force: true });
+  });
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'imported', name: 'Imported',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+      }]
+    }]
+  };
+  writeFileSync(join(toolDir, 'agentcli.json'), JSON.stringify(manifest));
+
+  const result = importManifest(toolDir, { env: { AGENTCLI_HOME: homeRoot } });
+  assert.ok(result.path);
+  assert.equal(result.discovery, 'agentcli.json');
+
+  const entries = listRegistry({ env: { AGENTCLI_HOME: homeRoot } });
+  assert.equal(entries.length, 1);
+});
+
+test('import discovers package.json agentcli field', (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-imp-'));
+  const toolDir = mkdtempSync(join(tmpdir(), 'agentcli-tool-'));
+  t.after(() => {
+    rmSync(homeRoot, { recursive: true, force: true });
+    rmSync(toolDir, { recursive: true, force: true });
+  });
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'pkg-tool', name: 'Pkg',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+      }]
+    }]
+  };
+  writeFileSync(join(toolDir, 'manifest.json'), JSON.stringify(manifest));
+  writeFileSync(join(toolDir, 'package.json'), JSON.stringify({ name: 'my-tool', agentcli: 'manifest.json' }));
+
+  const result = importManifest(toolDir, { env: { AGENTCLI_HOME: homeRoot } });
+  assert.ok(result.discovery.includes('package.json'));
+});
+
+test('import rejects directory without manifest', (t) => {
+  const toolDir = mkdtempSync(join(tmpdir(), 'agentcli-empty-'));
+  t.after(() => rmSync(toolDir, { recursive: true, force: true }));
+
+  assert.throws(
+    () => importManifest(toolDir, { env: { AGENTCLI_HOME: '/tmp' } }),
+    /No agentcli manifest found/
+  );
+});
+
+// -- merge tests --
+
+import { mergeManifests } from '../src/merge.js';
+
+test('mergeManifests combines two manifests', () => {
+  const a = {
+    version: '0.1',
+    workflows: [{
+      id: 'a', name: 'A',
+      tasks: [{ id: 't1', name: 'T1', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  const b = {
+    version: '0.1',
+    workflows: [{
+      id: 'b', name: 'B',
+      tasks: [{ id: 't2', name: 'T2', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  const merged = mergeManifests([a, b]);
+  assert.equal(merged.workflows.length, 2);
+  assert.equal(merged.workflows[0].id, 'a');
+  assert.equal(merged.workflows[1].id, 'b');
+});
+
+test('mergeManifests rejects duplicate workflow ids', () => {
+  const a = {
+    version: '0.1',
+    workflows: [{
+      id: 'dup', name: 'A',
+      tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  const b = {
+    version: '0.1',
+    workflows: [{
+      id: 'dup', name: 'B',
+      tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  assert.throws(
+    () => mergeManifests([a, b]),
+    /Duplicate workflow id "dup"/
+  );
+});
+
+test('mergeManifests requires at least two manifests', () => {
+  assert.throws(
+    () => mergeManifests([{ version: '0.1', workflows: [{ id: 'a', name: 'A', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }] }] }]),
+    /at least two manifests/
+  );
+});
+
+test('cli merge combines two manifests', async () => {
+  const a = { version: '0.1', workflows: [{ id: 'cli-a', name: 'A', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }] }] };
+  const b = { version: '0.1', workflows: [{ id: 'cli-b', name: 'B', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }] }] };
+
+  const output = JSON.parse(await runCli([
+    'merge', JSON.stringify(a), JSON.stringify(b),
+  ]));
+  assert.equal(output.ok, true);
+  assert.equal(output.manifest.workflows.length, 2);
+});
+
+// -- output.format structured results tests --
+
+test('output.format json in validation is accepted', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+        output: { format: 'json' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+});
+
+test('output.format invalid value is rejected', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+        output: { format: 'xml' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+});
+
+test('exec parses structured json output', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['{"status":"ok","count":42}'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        output: { format: 'json' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't', signer: 'none' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result.structured, { status: 'ok', count: 42 });
+});
+
+test('exec structured json parse failure is non-fatal', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['not json'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        output: { format: 'json' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't', signer: 'none' });
+  assert.equal(result.ok, true);
+  assert.equal(result.result.structured, null);
+  assert.ok(result.warnings.some(w => w.includes('not valid JSON')));
+});
+
+test('exec parses ndjson output', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'printf', args: ['{"a":1}\\n{"b":2}\\n'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        output: { format: 'ndjson' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't', signer: 'none' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result.structured, [{ a: 1 }, { b: 2 }]);
+});
+
+test('exec without output.format returns structured null', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['plain'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't', signer: 'none' });
+  assert.equal(result.result.structured, null);
 });

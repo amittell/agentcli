@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- signing provider abstraction (`src/signing/`) with pluggable provider interface (resolve, sign, verify)
+- `--signer` flag for `exec` command to select signing provider (`ssh`, `none`); `AGENTCLI_SIGNER` env var
+- `ssh` signing provider extracted from monolithic attestation module into `src/signing/ssh.js`
+- `none` signing provider for explicit opt-out (`--signer none`)
+- `verify` command dispatches verification to the provider that produced the attestation (by `method` field)
+- spec.md distinguishes manifest-time attestation (`identity.attestation`) from execution-time attestation (produced by `exec`)
+- `signer` field in exec output and audit records identifies which signing provider was used
+- `method` field in verify output identifies the attestation method that was verified
+- barrel export includes `registerProvider`, `getProvider`, `listProviders`, `resolveProvider`, `resolveProviderForMethod`
+- `registerTarget()` for library consumers to add custom compile targets without forking
+- `init` command scaffolds a valid manifest in cwd; `--tool <program>` wraps a specific CLI; `--output` for custom path; warns if tool not on PATH
+- `registry list|add|show|remove` commands for managing reusable manifest templates in `~/.agentcli/registry/`
+- `import <directory>` discovers `agentcli.json` or `package.json` `"agentcli"` field and adds to registry
+- `merge <manifest1> <manifest2>` combines workflows from multiple manifests; rejects duplicate workflow ids
+- `output.format` field (`json`, `ndjson`, `text`) on tasks; when `json` or `ndjson`, `exec` parses stdout and includes `result.structured`
+- structured parse failures are non-fatal (fall back to null, emit warning)
+- audit records include `result.structured_present` boolean (not content) when output.format is active
+- barrel export includes `createManifestScaffold`, `writeManifest`, `listRegistry`, `addToRegistry`, `showRegistryEntry`, `removeFromRegistry`, `importManifest`, `mergeManifests`, `registerTarget`
+- `identity` block on workflows, tasks, and `on_failure` handlers for chain-of-trust execution (principal, run_as, attestation)
+- `contract` block on workflows, tasks, and `on_failure` handlers for execution boundary declarations (sandbox, allowed_paths, network, max_cost_usd, audit)
+- identity and contract inherit from workflow to task level, with task-level key-by-key override (same pattern as model_policy)
+- `skill-path` CLI command prints the resolved path to the bundled SKILL.md for agent auto-discovery
+- `--pretty` flag for colorized JSON output across all commands
+- `registry` directory in agentcli home for reusable manifest templates
+- `skill_path` and `registry` included in `agentcli paths` output
+- standalone compile target declares `identity: true` and `contracts: true` capabilities
+- openclaw-scheduler compile target emits `identity_principal`, `identity_run_as`, `identity_attestation`, `contract_sandbox`, `contract_allowed_paths`, `contract_network`, `contract_max_cost_usd`, `contract_audit` fields
+- SKILL.md enhanced with discovery instructions, identity/contract guidance, and template registry documentation
+- `exec` CLI command executes shell-target tasks directly from a manifest with identity verification, contract enforcement, and audit logging -- works with or without a scheduler runtime
+- `audit` CLI command reads the local execution audit log with `--limit` support
+- `exec` pre-flight contract enforcement rejects `shell.cwd` outside declared `allowed_paths`
+- `exec` advisory warnings for sandbox and network contract constraints not yet enforced at OS level
+- `exec` writes append-only NDJSON audit records to `~/.agentcli/state/audit.ndjson` governed by `contract.audit` policy (always, on-failure, none)
+- `exec` output includes execution_id (SHA-256 derived), identity resolution, contract, timing, exit code, output hash, and audit status
+- `exec` supports `--dry-run` for contract pre-flight without spawning, `--timeout` override, `--workflow` for multi-workflow manifests
+- `exec` handles on_failure expanded tasks (e.g. `agentcli exec manifest.json root.failure`)
+- `exec` cryptographically signs every execution with the user's SSH key (`ssh-keygen -Y sign`), producing an attestation that ties the execution to the key holder
+- `exec` auto-discovers SSH signing keys from `~/.ssh/` (id_ed25519 > id_ecdsa > id_rsa) or explicit `AGENTCLI_SIGNING_KEY` / `--signing-key` path
+- `exec --signer none` disables attestation signing when not needed
+- `verify` CLI command cryptographically verifies an execution audit record against SSH key signatures using `ssh-keygen -Y verify`
+- `verify` auto-generates `allowed_signers` file from `~/.ssh/*.pub` when not present
+- attestation payload is canonical deterministic JSON covering execution_id, timestamp, source, command_hash, and principal
+- attestation in audit records includes method, key_fingerprint, namespace, signed_payload, and full SSH signature
+- `audit` and `allowed_signers` paths added to `agentcli paths` output
+- `resolveIdentity` and `resolveContract` exported from compiler/shared.js for library consumers
+- barrel export includes `executeTask`, `readAuditLog`, `writeAuditRecord`, `generateExecutionId`, `resolveIdentity`, `resolveContract`
+- spec.md documents Identity and Contract sections with inheritance and enforcement semantics
+- `identity-contract.json` example manifest demonstrating workflow/task-level identity and contract usage
 - `version` CLI command (`agentcli version`, `--version`, `-v`) returns package and manifest spec version as structured JSON
 - `agentcli.version` JSON-RPC method for agent version discovery
 - unknown-key warnings on workflows, tasks, and `on_failure` blocks to catch typos

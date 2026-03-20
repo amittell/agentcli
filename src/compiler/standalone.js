@@ -66,6 +66,8 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
       execution_intent: true,
       output_hints: true,
       budgets: true,
+      identity: true,
+      contracts: true,
     },
     workflows,
     ...(includeExplain ? { explain } : {})
