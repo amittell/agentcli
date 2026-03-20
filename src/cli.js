@@ -1,4 +1,5 @@
-import { MANIFEST_SCHEMA } from './schema.js';
+import { createRequire } from 'node:module';
+import { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 import { loadJsonInput, writeJsonOutput } from './io.js';
 import { validateManifest } from './validate.js';
 import { describeTarget } from './describe.js';
@@ -9,12 +10,16 @@ import { serveJsonRpc } from './jsonrpc.js';
 import { applyManifestToScheduler } from './apply.js';
 import { ensureAgentcliHome, getAgentcliPaths } from './home.js';
 
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require('../package.json');
+
 function usage() {
   return `
 agentcli <command> [args]
 
 Commands:
-  schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse]
+  version
+  schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse|scheduler-job|standalone-plan|rpc-request|rpc-response]
   describe [manifest|workflow|task|targets|commands|rpc]
   targets
   paths
@@ -26,6 +31,7 @@ Commands:
   serve [--db path]
 
 Flags:
+  --version, -v  Show package and manifest spec version
   --json         Force JSON output
   --ndjson       Emit item streams as newline-delimited JSON
   --adopt-by     Strategy for matching existing jobs: id (default) or name.
@@ -44,7 +50,7 @@ Environment:
 
 function parseArgs(argv) {
   const positionals = [];
-  const flags = {};
+  const flags = Object.create(null);
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -84,7 +90,10 @@ function pickSchema(name) {
   };
   const schema = MANIFEST_SCHEMA[aliases[name] || name || 'manifest'];
   if (!schema) {
-    throw new Error(`Unknown schema target: ${name}`);
+    throw Object.assign(
+      new Error(`Unknown schema target: ${name}`),
+      { code: 'invalid_argument' }
+    );
   }
   return schema;
 }
@@ -93,9 +102,6 @@ function formatOutput(payload, { mode = 'json' } = {}) {
   if (mode === 'ndjson') {
     const items = payload?.items || (Array.isArray(payload) ? payload : null);
     if (items) {
-      if (items.length === 0) {
-        return JSON.stringify({ ok: payload.ok ?? true, count: 0 });
-      }
       return items.map(item => JSON.stringify(item)).join('\n');
     }
     return JSON.stringify(payload);
@@ -119,19 +125,31 @@ export async function runCli(
 ) {
   const { positionals, flags } = parseArgs(argv);
   const command = positionals[0];
-  const explicitJson = Boolean(flags.json || flags.ndjson || env.AGENTCLI_OUTPUT);
-  const outputMode = flags.ndjson
-    ? 'ndjson'
-    : flags.json || env.AGENTCLI_OUTPUT === 'json'
-      ? 'json'
-      : env.AGENTCLI_OUTPUT === 'ndjson'
-        ? 'ndjson'
-        : 'json';
+  const envOutput = env.AGENTCLI_OUTPUT || '';
+  if (envOutput && envOutput !== 'json' && envOutput !== 'ndjson') {
+    throw Object.assign(
+      new Error(`Unknown AGENTCLI_OUTPUT value: ${envOutput}. Accepted values: json, ndjson`),
+      { code: 'invalid_argument' }
+    );
+  }
+  const explicitJson = Boolean(flags.json || flags.ndjson || envOutput);
+  const outputMode = flags.ndjson ? 'ndjson'
+    : flags.json ? 'json'
+    : envOutput === 'ndjson' ? 'ndjson'
+    : 'json';
   const defaultTarget = env.AGENTCLI_TARGET || 'standalone';
   const defaultDbPath = env.AGENTCLI_SCHEDULER_DB || null;
   const defaultSchedulerPrefix = env.AGENTCLI_SCHEDULER_PREFIX || '';
   const defaultSchedulerBin = env.AGENTCLI_SCHEDULER_BIN || '';
   const derivedEnv = flags.home ? { ...env, AGENTCLI_HOME: flags.home } : env;
+
+  if (flags.version || command === 'version' || command === '-v') {
+    return formatOutput({
+      ok: true,
+      package_version: PACKAGE_VERSION,
+      manifest_version: MANIFEST_VERSION
+    }, { mode: outputMode });
+  }
 
   switch (command) {
     case 'schema':
@@ -171,7 +189,10 @@ export async function runCli(
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
       const adoptBy = flags['adopt-by'] || 'id';
       if (adoptBy !== 'id' && adoptBy !== 'name') {
-        throw new Error(`Invalid --adopt-by value: ${adoptBy}. Accepted values: id, name`);
+        throw Object.assign(
+          new Error(`Invalid --adopt-by value: ${adoptBy}. Accepted values: id, name`),
+          { code: 'invalid_argument' }
+        );
       }
       const payload = applyManifestToScheduler(manifest, {
         dryRun: Boolean(flags['dry-run']),
@@ -188,14 +209,31 @@ export async function runCli(
     case 'inspect': {
       const entity = positionals[1] || 'jobs';
       if (!listInspectableEntities().includes(entity)) {
-        throw new Error(`Unsupported inspect entity: ${entity}`);
+        throw Object.assign(
+          new Error(`Unsupported inspect entity: ${entity}`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const sanitize = flags.sanitize || 'none';
+      if (sanitize !== 'none' && sanitize !== 'basic') {
+        throw Object.assign(
+          new Error(`Unsupported sanitize mode: ${sanitize}. Accepted values: none, basic`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const rawLimit = flags.limit;
+      if (rawLimit != null && (typeof rawLimit !== 'string' || !/^[1-9][0-9]*$/.test(rawLimit))) {
+        throw Object.assign(
+          new Error(`Invalid --limit value: ${rawLimit}. Must be a positive integer.`),
+          { code: 'invalid_argument' }
+        );
       }
       const payload = await inspectSchedulerState({
         dbPath: flags.db || defaultDbPath,
         entity,
-        limit: flags.limit,
+        limit: rawLimit,
         fields: parseFieldMask(flags.fields),
-        sanitize: flags.sanitize || 'none'
+        sanitize
       });
       return formatOutput(payload, { mode: outputMode });
     }
@@ -205,7 +243,9 @@ export async function runCli(
         output: stdout,
         defaults: {
           dbPath: flags.db || defaultDbPath,
-          target: defaultTarget
+          target: defaultTarget,
+          schedulerPrefix: defaultSchedulerPrefix,
+          schedulerBin: defaultSchedulerBin
         }
       });
       return '';
@@ -218,6 +258,9 @@ export async function runCli(
       }
       return usage().trim();
     default:
-      throw new Error(`Unknown command: ${command}`);
+      throw Object.assign(
+        new Error(`Unknown command: ${command}`),
+        { code: 'unknown_command' }
+      );
   }
 }

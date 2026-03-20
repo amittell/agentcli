@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
-import { dirname, join, resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 function expandLeadingTilde(input, homeDir) {
   if (typeof input !== 'string') return input;
@@ -58,7 +58,6 @@ Typical flow:
   }
 
   if (force || !existsSync(paths.sampleManifest)) {
-    mkdirSync(dirname(paths.sampleManifest), { recursive: true });
     writeFileSync(paths.sampleManifest, `${readBundledSample().trim()}\n`, 'utf8');
     created.push(paths.sampleManifest);
   }
@@ -72,11 +71,8 @@ Typical flow:
 
 export function resolveManifestCandidate(input, { cwd = process.cwd(), env = process.env, homeDir = homedir() } = {}) {
   if (!input || input === '-') return null;
-  const expanded = resolve(expandLeadingTilde(input, homeDir));
+  const expanded = resolve(cwd, expandLeadingTilde(input, homeDir));
   if (existsSync(expanded)) return expanded;
-
-  const relativeToCwd = resolve(cwd, expandLeadingTilde(input, homeDir));
-  if (existsSync(relativeToCwd)) return relativeToCwd;
 
   const homePaths = getAgentcliPaths({ env, homeDir });
   const homeCandidates = [

@@ -5,12 +5,39 @@ const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+const KNOWN_WORKFLOW_KEYS = new Set([
+  'id', 'name', 'model_policy', 'tasks'
+]);
+
+const KNOWN_TASK_KEYS = new Set([
+  'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
+  'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
+  'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
+  'on_failure', 'delete_after_run'
+]);
+
+const KNOWN_ON_FAILURE_KEYS = new Set([
+  'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
+  'delay_s', 'condition', 'model_policy', 'intent', 'output', 'budgets',
+  'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
+  'delete_after_run'
+]);
+
 function isObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function addError(errors, path, message) {
   errors.push({ path, message });
+}
+
+function checkUnknownKeys(warnings, path, value, knownKeys) {
+  if (!isObject(value)) return;
+  for (const key of Object.keys(value)) {
+    if (!knownKeys.has(key)) {
+      warnings.push({ path: `${path}.${key}`, message: `unknown key "${key}"` });
+    }
+  }
 }
 
 function hasUnsupportedControlChars(value) {
@@ -95,7 +122,7 @@ function validateTriggerCondition(errors, path, value) {
   checkString(errors, path, value);
   if (typeof value !== 'string') return;
   if (value.startsWith('regex:')) {
-    if (!value.slice('regex:'.length)) {
+    if (!value.slice('regex:'.length).trim()) {
       addError(errors, path, 'regex trigger condition cannot be empty');
       return;
     }
@@ -107,7 +134,7 @@ function validateTriggerCondition(errors, path, value) {
     return;
   }
   if (value.startsWith('contains:')) {
-    if (!value.slice('contains:'.length)) {
+    if (!value.slice('contains:'.length).trim()) {
       addError(errors, path, 'contains trigger condition cannot be empty');
     }
     return;
@@ -232,40 +259,49 @@ function validateBudgets(errors, path, value) {
   checkInteger(errors, `${path}.max_queued_dispatches`, value.max_queued_dispatches, 1);
 }
 
+function checkOptionalObject(errors, path, value) {
+  if (value == null) return false;
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return false;
+  }
+  return true;
+}
+
 function validateOptionalBlocks(errors, warnings, path, value) {
-  if (isObject(value.model_policy)) {
+  if (checkOptionalObject(errors, `${path}.model_policy`, value.model_policy)) {
     validateModelPolicy(errors, `${path}.model_policy`, value.model_policy);
   }
 
-  if (isObject(value.intent)) {
+  if (checkOptionalObject(errors, `${path}.intent`, value.intent)) {
     validateIntent(errors, `${path}.intent`, value.intent);
   }
 
-  if (isObject(value.output)) {
+  if (checkOptionalObject(errors, `${path}.output`, value.output)) {
     validateOutput(errors, `${path}.output`, value.output);
   }
 
-  if (isObject(value.budgets)) {
+  if (checkOptionalObject(errors, `${path}.budgets`, value.budgets)) {
     validateBudgets(errors, `${path}.budgets`, value.budgets);
   }
 
-  if (isObject(value.delivery)) {
+  if (checkOptionalObject(errors, `${path}.delivery`, value.delivery)) {
     checkEnum(errors, `${path}.delivery.mode`, value.delivery.mode, ['announce', 'announce-always', 'none']);
     checkToken(errors, `${path}.delivery.channel`, value.delivery.channel, { required: false });
     checkToken(errors, `${path}.delivery.to`, value.delivery.to, { required: false });
   }
 
-  if (isObject(value.reliability)) {
+  if (checkOptionalObject(errors, `${path}.reliability`, value.reliability)) {
     checkEnum(errors, `${path}.reliability.guarantee`, value.reliability.guarantee, ['at-most-once', 'at-least-once']);
     checkEnum(errors, `${path}.reliability.overlap_policy`, value.reliability.overlap_policy, ['skip', 'allow', 'queue']);
     checkInteger(errors, `${path}.reliability.max_retries`, value.reliability.max_retries, 0);
   }
 
-  if (isObject(value.runtime)) {
+  if (checkOptionalObject(errors, `${path}.runtime`, value.runtime)) {
     checkInteger(errors, `${path}.runtime.timeout_ms`, value.runtime.timeout_ms, 1);
   }
 
-  if (isObject(value.approval)) {
+  if (checkOptionalObject(errors, `${path}.approval`, value.approval)) {
     checkBoolean(errors, `${path}.approval.required`, value.approval.required);
     checkEnum(errors, `${path}.approval.policy`, value.approval.policy, ['manual', 'auto-approve', 'auto-reject']);
     checkEnum(errors, `${path}.approval.risk_level`, value.approval.risk_level, ['low', 'medium', 'high']);
@@ -280,7 +316,7 @@ function validateOptionalBlocks(errors, warnings, path, value) {
     }
   }
 
-  if (isObject(value.context)) {
+  if (checkOptionalObject(errors, `${path}.context`, value.context)) {
     checkEnum(errors, `${path}.context.retrieval`, value.context.retrieval, ['none', 'recent', 'hybrid']);
     checkInteger(errors, `${path}.context.limit`, value.context.limit, 1);
     if (value.budgets?.max_context_items != null && value.context.limit != null && value.budgets.max_context_items !== value.context.limit) {
@@ -291,7 +327,7 @@ function validateOptionalBlocks(errors, warnings, path, value) {
     }
   }
 
-  if (isObject(value.session)) {
+  if (checkOptionalObject(errors, `${path}.session`, value.session)) {
     checkToken(errors, `${path}.session.preferred_key`, value.session.preferred_key, { required: false });
   }
 
@@ -306,6 +342,7 @@ function validateOnFailure(errors, warnings, path, task) {
   }
 
   const handler = task.on_failure;
+  checkUnknownKeys(warnings, path, handler, KNOWN_ON_FAILURE_KEYS);
   checkIdentifier(errors, `${path}.id`, handler.id, { required: false });
   checkString(errors, `${path}.name`, handler.name, { required: false });
   checkBoolean(errors, `${path}.enabled`, handler.enabled);
@@ -343,9 +380,10 @@ export function validateManifest(manifest) {
         addError(errors, workflowPath, 'must be an object');
         continue;
       }
+      checkUnknownKeys(warnings, workflowPath, workflow, KNOWN_WORKFLOW_KEYS);
       checkIdentifier(errors, `${workflowPath}.id`, workflow.id);
       checkString(errors, `${workflowPath}.name`, workflow.name);
-      if (isObject(workflow.model_policy)) {
+      if (checkOptionalObject(errors, `${workflowPath}.model_policy`, workflow.model_policy)) {
         validateModelPolicy(errors, `${workflowPath}.model_policy`, workflow.model_policy);
       }
       if (workflow.id) {
@@ -365,6 +403,7 @@ export function validateManifest(manifest) {
           continue;
         }
 
+        checkUnknownKeys(warnings, taskPath, task, KNOWN_TASK_KEYS);
         checkIdentifier(errors, `${taskPath}.id`, task.id);
         checkString(errors, `${taskPath}.name`, task.name);
         checkBoolean(errors, `${taskPath}.enabled`, task.enabled);
@@ -381,9 +420,17 @@ export function validateManifest(manifest) {
 
         validateExecutionSurface(errors, taskPath, task, task.target?.session_target);
 
+        const scheduleTypeError = task.schedule != null && !isObject(task.schedule);
+        const triggerTypeError = task.trigger != null && !isObject(task.trigger);
+        if (scheduleTypeError) {
+          addError(errors, `${taskPath}.schedule`, 'must be an object');
+        }
+        if (triggerTypeError) {
+          addError(errors, `${taskPath}.trigger`, 'must be an object');
+        }
         const hasSchedule = isObject(task.schedule);
         const hasTrigger = isObject(task.trigger);
-        if (hasSchedule === hasTrigger) {
+        if (!scheduleTypeError && !triggerTypeError && hasSchedule === hasTrigger) {
           addError(errors, taskPath, 'must define exactly one of schedule or trigger');
         }
 
@@ -394,7 +441,11 @@ export function validateManifest(manifest) {
 
         if (hasTrigger) {
           checkString(errors, `${taskPath}.trigger.parent`, task.trigger.parent);
-          checkEnum(errors, `${taskPath}.trigger.on`, task.trigger.on, ['success', 'failure', 'complete']);
+          if (task.trigger.on == null) {
+            addError(errors, `${taskPath}.trigger.on`, 'is required');
+          } else {
+            checkEnum(errors, `${taskPath}.trigger.on`, task.trigger.on, ['success', 'failure', 'complete']);
+          }
           checkInteger(errors, `${taskPath}.trigger.delay_s`, task.trigger.delay_s, 0);
           validateTriggerCondition(errors, `${taskPath}.trigger.condition`, task.trigger.condition);
         }

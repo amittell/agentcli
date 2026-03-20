@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash } from 'node:crypto';
 import { normalizeShellExecution, renderShellExecution } from '../shell.js';
 
 export function stableId(workflowId, taskId) {
@@ -24,23 +24,36 @@ export function payloadMessageForExecution(execution) {
 
 export function approvalPolicyForTask(task) {
   const approval = task.approval || null;
-  const policy = approval?.policy || (approval?.required ? 'manual' : null);
+  if (!approval) {
+    return {
+      required: 0,
+      timeout_s: null,
+      auto: null,
+      policy: 'none',
+      risk_level: null,
+      approver_scope: null,
+    };
+  }
+
+  const policy = approval.policy || (approval.required ? 'manual' : null);
   const required = policy === 'manual'
-    ? Number(approval?.required ?? true)
-    : Number(approval?.required ?? false);
+    ? 1
+    : Number(Boolean(approval.required ?? false));
   const auto = policy === 'auto-approve'
     ? 'approve'
     : policy === 'auto-reject'
       ? 'reject'
-      : approval?.auto || 'reject';
+      : policy === 'manual'
+        ? (approval.auto ?? 'reject')
+        : approval.auto ?? null;
 
   return {
     required,
-    timeout_s: approval?.timeout_s || 3600,
+    timeout_s: approval.timeout_s ?? 3600,
     auto,
     policy: policy || 'none',
-    risk_level: approval?.risk_level || 'medium',
-    approver_scope: approval?.approver_scope || null,
+    risk_level: approval.risk_level ?? 'medium',
+    approver_scope: approval.approver_scope ?? null,
   };
 }
 
@@ -58,7 +71,7 @@ export function taskInvocationForTask(task) {
   return {
     mode: 'schedule',
     cron: task.schedule.cron,
-    tz: task.schedule.tz || 'UTC',
+    tz: task.schedule.tz ?? 'UTC',
   };
 }
 
@@ -73,22 +86,25 @@ function resolveModelPolicy(workflow, task) {
     provider,
     model,
     thinking,
-    scheduler_model: schedulerModel || null,
+    scheduler_model: schedulerModel ?? null,
   };
 }
 
 function resolveIntent(task) {
+  if (!task.intent) {
+    return { mode: 'execute', read_only: null };
+  }
   return {
-    mode: task.intent?.mode || 'execute',
-    read_only: Boolean(task.intent?.read_only),
+    mode: task.intent.mode ?? 'execute',
+    read_only: task.intent.read_only != null ? Boolean(task.intent.read_only) : null,
   };
 }
 
 function resolveOutput(task) {
   return {
     preview_bytes: task.output?.preview_bytes ?? 2000,
-    offload: task.output?.offload || 'auto',
-    retrieve: task.output?.retrieve || 'on-demand',
+    offload: task.output?.offload ?? 'auto',
+    retrieve: task.output?.retrieve ?? 'on-demand',
   };
 }
 
@@ -119,7 +135,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     invocation: taskInvocationForTask(task),
     execution: {
       session_target: task.target.session_target,
-      agent_id: task.target.agent_id || 'main',
+      agent_id: task.target.agent_id ?? 'main',
       payload_kind: payloadKindForTask(task),
       payload: payloadForTask(task),
       model_policy: modelPolicy,
@@ -128,13 +144,13 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     output,
     budgets,
     delivery: {
-      mode: task.delivery?.mode || 'none',
-      channel: task.delivery?.channel || null,
-      to: task.delivery?.to || null,
+      mode: task.delivery?.mode ?? 'none',
+      channel: task.delivery?.channel ?? null,
+      to: task.delivery?.to ?? null,
     },
     reliability: {
-      guarantee: task.reliability?.guarantee || 'at-most-once',
-      overlap_policy: task.reliability?.overlap_policy || 'skip',
+      guarantee: task.reliability?.guarantee ?? 'at-most-once',
+      overlap_policy: task.reliability?.overlap_policy ?? 'skip',
       max_retries: task.reliability?.max_retries ?? 0,
     },
     runtime: {
@@ -142,13 +158,13 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     },
     approval: approvalPolicyForTask(task),
     context: {
-      retrieval: task.context?.retrieval || 'none',
-      limit: task.context?.limit || budgets.max_context_items || 5,
+      retrieval: task.context?.retrieval ?? 'none',
+      limit: task.context?.limit ?? budgets.max_context_items ?? 5,
     },
     session: {
-      preferred_key: task.session?.preferred_key || null,
+      preferred_key: task.session?.preferred_key ?? null,
     },
-    delete_after_run: Boolean(task.delete_after_run),
+    delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };
 }

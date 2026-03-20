@@ -37,7 +37,9 @@ Must implement everything in Profile B and also:
 
 - expose JSON-RPC `2.0`
 - implement `agentcli.ping`
+- implement `agentcli.version`
 - implement `agentcli.schema`
+- implement `agentcli.describe`
 - implement `agentcli.validate`
 - implement `agentcli.compile`
 

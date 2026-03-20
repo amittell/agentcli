@@ -1,5 +1,5 @@
-import { spawnSync } from 'child_process';
-import process from 'process';
+import { spawnSync } from 'node:child_process';
+import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
 
 function npmCommandForPlatform(platform = process.platform) {
@@ -47,12 +47,18 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
   });
 
   if (result.error) {
-    throw new Error(`Failed to execute scheduler command: ${formatCommand(invocation, ['--json', ...args])}: ${result.error.message}`);
+    throw Object.assign(
+      new Error(`Failed to execute scheduler command: ${formatCommand(invocation, ['--json', ...args])}: ${result.error.message}`),
+      { code: 'scheduler_error' }
+    );
   }
 
   if (typeof result.status === 'number' && result.status !== 0) {
     const stderr = String(result.stderr || '').trim();
-    throw new Error(stderr || `Scheduler command failed (${result.status}): ${formatCommand(invocation, ['--json', ...args])}`);
+    throw Object.assign(
+      new Error(stderr || `Scheduler command failed (${result.status}): ${formatCommand(invocation, ['--json', ...args])}`),
+      { code: 'scheduler_error' }
+    );
   }
 
   const stdout = String(result.stdout || '').trim();
@@ -61,7 +67,10 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
   try {
     return JSON.parse(stdout);
   } catch (err) {
-    throw new Error(`Scheduler command returned invalid JSON: ${formatCommand(invocation, ['--json', ...args])}`, { cause: err });
+    throw Object.assign(
+      new Error(`Scheduler command returned invalid JSON: ${formatCommand(invocation, ['--json', ...args])}`),
+      { code: 'parse_error', cause: err }
+    );
   }
 }
 

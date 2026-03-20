@@ -37,7 +37,10 @@ export const TARGETS = {
 export function getTarget(name) {
   const target = TARGETS[name];
   if (!target) {
-    throw new Error(`Unsupported compile target: ${name}`);
+    throw Object.assign(
+      new Error(`Unsupported compile target: ${name}`),
+      { code: 'invalid_argument' }
+    );
   }
   return target;
 }

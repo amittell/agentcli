@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
 import { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 import { describeTarget } from './describe.js';
@@ -7,6 +8,9 @@ import { getTarget } from './targets.js';
 import { parseFieldMask } from './fields.js';
 import { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 import { applyManifestToScheduler } from './apply.js';
+
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require('../package.json');
 
 function responseResult(id, result) {
   return { jsonrpc: '2.0', id, result };
@@ -137,7 +141,10 @@ function inspectParams(params, defaults) {
 }
 
 export async function handleJsonRpcRequest(message, defaults = {}) {
-  if (!message || typeof message !== 'object' || Array.isArray(message)) {
+  if (Array.isArray(message)) {
+    return responseError(null, -32600, 'Batch requests are not supported');
+  }
+  if (!message || typeof message !== 'object') {
     return responseError(null, -32600, 'Invalid Request');
   }
 
@@ -151,6 +158,12 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
     switch (method) {
       case 'agentcli.ping':
         return responseResult(id, { ok: true, pong: true });
+      case 'agentcli.version':
+        return responseResult(id, {
+          ok: true,
+          package_version: PACKAGE_VERSION,
+          manifest_version: MANIFEST_VERSION
+        });
       case 'agentcli.schema':
         return responseResult(id, { ok: true, schema: schemaByName(params.target) });
       case 'agentcli.describe':
@@ -163,6 +176,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
           id,
           {
             ok: true,
+            target: target.name,
             output: target.compile(params.manifest, { includeExplain: Boolean(params.explain) })
           }
         );
@@ -170,7 +184,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
       case 'agentcli.apply': {
         const adoptBy = params.adoptBy || 'id';
         if (adoptBy !== 'id' && adoptBy !== 'name') {
-          return responseError(id, -32602, `Invalid adoptBy value: ${adoptBy}. Accepted values: id, name`);
+          throw invalidParams(`Invalid adoptBy value: ${adoptBy}. Accepted values: id, name`);
         }
         return responseResult(
           id,
@@ -200,7 +214,17 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
     if (err.validation) {
       return responseError(id, -32602, err.message, err.validation);
     }
-    return responseError(id, -32000, err.message);
+    return responseError(id, -32000, err?.message || 'Internal error');
+  }
+}
+
+function safeLine(stream, data) {
+  if (stream.writable !== false) {
+    try {
+      stream.write(`${JSON.stringify(data)}\n`);
+    } catch {
+      // stream destroyed mid-write; ignore
+    }
   }
 }
 
@@ -210,14 +234,16 @@ export async function serveJsonRpc({ input = process.stdin, output = process.std
     crlfDelay: Infinity
   });
 
-  output.write(`${JSON.stringify({
+  output.on('error', () => {});
+
+  safeLine(output, {
     jsonrpc: '2.0',
     method: 'agentcli.ready',
     params: {
       ok: true,
       manifest_version: MANIFEST_VERSION
     }
-  })}\n`);
+  });
 
   for await (const line of lines) {
     if (!line.trim()) continue;
@@ -226,7 +252,7 @@ export async function serveJsonRpc({ input = process.stdin, output = process.std
     try {
       parsed = JSON.parse(line);
     } catch (err) {
-      output.write(`${JSON.stringify(responseError(null, -32700, 'Parse error', err.message))}\n`);
+      safeLine(output, responseError(null, -32700, 'Parse error', err.message));
       continue;
     }
 
@@ -234,7 +260,7 @@ export async function serveJsonRpc({ input = process.stdin, output = process.std
     const response = await handleJsonRpcRequest(parsed, defaults);
 
     if (!isNotification) {
-      output.write(`${JSON.stringify(response)}\n`);
+      safeLine(output, response);
     }
   }
 }

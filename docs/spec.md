@@ -218,6 +218,8 @@ It MAY also contain:
 - `failure`
 - `complete`
 
+`trigger.delay_s`, if present, MUST be an integer greater than or equal to `0`.
+
 `trigger.parent` MUST reference a different task id within the same workflow. Self-referential triggers are not permitted.
 
 `trigger.condition`, if present, MUST start with exactly one of:
@@ -240,10 +242,13 @@ It is a control-plane shorthand for synthesizing a triggered child task with:
 
 `on_failure.id`, if present, MUST be unique within the workflow after shorthand expansion.
 
-If `on_failure.id` is omitted, implementations MAY synthesize one from the parent task id.
+If `on_failure.id` is omitted, implementations SHOULD synthesize `<parent_task_id>.failure`.
+
+If `on_failure.name` is omitted, implementations SHOULD synthesize `<parent_task_name> Failure Handler`.
 
 `on_failure` MAY define:
 
+- `id`
 - `name`
 - `enabled`
 - `prompt` or `shell`
@@ -262,7 +267,11 @@ If `on_failure.id` is omitted, implementations MAY synthesize one from the paren
 - `session`
 - `delete_after_run`
 
-If `on_failure.target.session_target` is `shell`, `on_failure.shell` MUST be present.
+`on_failure.delay_s`, if present, MUST be an integer greater than or equal to `0`.
+
+If `on_failure.target` is omitted, the session target is inferred: `shell` when `on_failure.shell` is present, `isolated` otherwise. The `agent_id` is inherited from the parent task's target when not explicitly set.
+
+If the inferred or explicit `session_target` is `shell`, `on_failure.shell` MUST be present.
 
 Otherwise, `on_failure.prompt` MUST be present.
 

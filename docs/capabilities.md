@@ -39,6 +39,15 @@ Runtime capabilities:
 - `delivery`
 - `lineage`
 
+## Programmatic Discovery
+
+`agentcli targets` returns structured data for each target with two fields:
+
+- `capabilities`: a string array of active capability identifiers (matching the control-plane and inspection groups above, using dash-delimited names like `field-mask`)
+- `features`: a keyed object where each key corresponds to an execution-shape or runtime capability (using underscore-delimited names like `model_policy`, `execution_intent`) and each value describes the support level. Valid values: `"portable"`, `"runtime"`, `"model+thinking"`, `"intent-only"`, `true`, or `false`. The `"model+thinking"` value indicates the target compiles model policy into separate model and thinking fields for the backend. `true` indicates full runtime support; `false` indicates the feature is not supported.
+
+Feature keys: `approvals`, `model_policy`, `execution_intent`, `output_hints`, `timeout_support`, `context_retrieval`, `runtime_execution`.
+
 ## Current Target Matrix
 
 ### `standalone`

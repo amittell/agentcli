@@ -26,6 +26,12 @@ function setPathValue(target, segments, value) {
 
 export function parseFieldMask(rawValue) {
   if (!rawValue) return null;
+  if (typeof rawValue !== 'string') {
+    throw Object.assign(
+      new Error('--fields requires a comma-delimited string of field names'),
+      { code: 'invalid_argument' }
+    );
+  }
   const fields = rawValue
     .split(',')
     .map(field => field.trim())

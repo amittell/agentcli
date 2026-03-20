@@ -12,14 +12,16 @@
     "./targets": "./src/targets.js",
     "./shell": "./src/shell.js",
     "./validate": "./src/validate.js",
-    "./compile": "./src/compile.js",
     "./compile/standalone": "./src/compiler/standalone.js",
     "./compile/openclaw-scheduler": "./src/compiler/openclaw-scheduler.js",
-    "./compile/shared": "./src/compiler/shared.js",
     "./apply": "./src/apply.js",
     "./shorthand": "./src/shorthand.js",
     "./inspect": "./src/inspect.js",
-    "./home": "./src/home.js"
+    "./home": "./src/home.js",
+    "./describe": "./src/describe.js",
+    "./sanitize": "./src/sanitize.js",
+    "./fields": "./src/fields.js",
+    "./io": "./src/io.js"
   },
   "bin": {
     "agentcli": "bin/agentcli.js"

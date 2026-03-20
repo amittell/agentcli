@@ -14,6 +14,7 @@ Rules:
 
 - each request MUST be a single JSON object on one line
 - each response MUST be a single JSON object on one line
+- batch requests (JSON arrays) are not supported and return an error
 - server startup notifications MAY be ignored by clients
 - parse failures return JSON-RPC parse errors when possible
 
@@ -54,26 +55,36 @@ Result:
 
 - `{ "ok": true, "pong": true }`
 
+### `agentcli.version`
+
+Purpose:
+
+- version discovery for agent integrations
+
+Result:
+
+- `{ "ok": true, "package_version": "0.1.0", "manifest_version": "0.1" }`
+
 ### `agentcli.schema`
 
 Params:
 
-- `target`
+- `target` - defaults to `"manifest"` when omitted. Valid targets: `manifest`, `workflow`, `task`, `schedulerJob`, `standalonePlan`, `rpcRequest`, `rpcResponse`. Also accepts kebab-case aliases: `scheduler-job`, `standalone-plan`, `rpc-request`, `rpc-response`.
 
 Result:
 
-- schema fragment for the requested target
+- `{ "ok": true, "schema": <schema-fragment> }`
 
 ### `agentcli.describe`
 
 Params:
 
-- `target`
+- `target` - defaults to `"commands"` when omitted. Valid targets: `manifest`, `workflow`, `task`, `targets`, `commands`, `rpc`.
 
 Result:
 
-- descriptive metadata for the requested topic
-- for `target: "rpc"`, returns separate `methods[]` and `notifications[]` arrays
+- `{ "ok": true, "description": <metadata> }`
+- for `target: "rpc"`, description contains separate `methods[]` and `notifications[]` arrays
 
 ### `agentcli.validate`
 
@@ -83,7 +94,8 @@ Params:
 
 Result:
 
-- the same validation payload returned by CLI validation
+- `{ "ok": <boolean>, "errors": [...], "warnings": [...] }`
+- validation failures are returned in `result`, not as JSON-RPC errors
 
 ### `agentcli.compile`
 
@@ -95,7 +107,8 @@ Params:
 
 Result:
 
-- target-specific compiled artifact
+- `{ "ok": true, "target": "<target-name>", "output": <compiled-artifact> }`
+- `output` includes an `explain` array when the `explain` param is `true`
 
 ### `agentcli.apply`
 
@@ -105,13 +118,14 @@ Params:
 - `dbPath`
 - `schedulerPrefix`
 - `schedulerBin`
-- `dryRun`
+- `dryRun` - boolean, defaults to `false`. When `true`, no scheduler writes are executed (preview mode).
 - `explain`
 - `adoptBy` - `"id"` (default) or `"name"`. Use `"name"` for one-time migration of existing scheduler jobs to agentcli management. See README for the migration workflow.
 
 Result:
 
-- scheduler apply payload with create, update, or adopted actions
+- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "name": "...", "invocation_mode": "schedule|trigger" }], "explain": [...] }`
+- `explain` is present only when the `explain` param is `true`
 - intended for the `openclaw-scheduler` backend
 
 ### `agentcli.inspect`
@@ -126,7 +140,7 @@ Params:
 
 Result:
 
-- runtime inspection payload for scheduler-backed entities
+- `{ "ok": true, "target": "openclaw-scheduler", "entity": "...", "count": <int>, "items": [...] }`
 
 ## Notifications
 

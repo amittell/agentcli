@@ -1,4 +1,4 @@
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
 import { applyFieldMask } from './fields.js';
 import { sanitizeForAgent } from './sanitize.js';
 
@@ -49,15 +49,24 @@ export async function inspectSchedulerState({
   sanitize = 'none'
 }) {
   if (!dbPath) {
-    throw new Error('Missing scheduler database path. Pass --db or set AGENTCLI_SCHEDULER_DB.');
+    throw Object.assign(
+      new Error('Missing scheduler database path. Pass --db or set AGENTCLI_SCHEDULER_DB.'),
+      { code: 'invalid_argument' }
+    );
   }
   if (!existsSync(dbPath)) {
-    throw new Error(`Scheduler database not found: ${dbPath}`);
+    throw Object.assign(
+      new Error(`Scheduler database not found: ${dbPath}`),
+      { code: 'invalid_argument' }
+    );
   }
 
   const target = INSPECT_ENTITIES[entity];
   if (!target) {
-    throw new Error(`Unsupported inspect entity: ${entity}`);
+    throw Object.assign(
+      new Error(`Unsupported inspect entity: ${entity}`),
+      { code: 'invalid_argument' }
+    );
   }
 
   const db = await openDatabase(dbPath);

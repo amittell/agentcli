@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, relative, resolve } from 'path';
-import { isatty } from 'tty';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, relative, resolve } from 'node:path';
+import { isatty } from 'node:tty';
 import { resolveManifestCandidate } from './home.js';
 
 function looksLikeJsonLiteral(input) {
@@ -24,14 +24,20 @@ export async function loadJsonInput(
     ? await readStdinText(stdin)
     : resolvedPath
       ? readFileSync(resolvedPath, 'utf8')
-      : existsSync(input)
-        ? readFileSync(input, 'utf8')
-        : looksLikeJsonLiteral(input)
-          ? input
-          : (() => {
-              throw new Error(`Input not found: ${input}. Pass a file path, a manifest name from AGENTCLI_HOME/manifests, or a JSON string.`);
-            })();
-  return JSON.parse(raw);
+      : looksLikeJsonLiteral(input)
+        ? input
+        : (() => {
+            throw new Error(`Input not found: ${input}. Pass a file path, a manifest name from AGENTCLI_HOME/manifests, or a JSON string.`);
+          })();
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    const source = input === '-' ? 'stdin' : resolvedPath || input;
+    throw Object.assign(
+      new Error(`Invalid JSON from ${source}: ${err.message}`),
+      { code: 'parse_error' }
+    );
+  }
 }
 
 async function readStdinText(stream) {

@@ -8,9 +8,11 @@ try {
     process.stdout.write(`${output}\n`);
   }
 } catch (err) {
+  const errorType = err.validation ? 'validation_error' : (err.code || 'internal_error');
   process.stderr.write(JSON.stringify({
     ok: false,
     error: err.message,
+    error_type: errorType,
     ...(err.validation ? { validation: err.validation } : {})
   }, null, 2) + '\n');
   process.exit(1);

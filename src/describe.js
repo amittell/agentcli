@@ -3,6 +3,10 @@ import { MANIFEST_VERSION } from './schema.js';
 
 export const COMMAND_DESCRIPTIONS = [
   {
+    command: 'version',
+    summary: 'Return package version and manifest spec version.'
+  },
+  {
     command: 'schema',
     summary: 'Emit machine-readable schema fragments for manifests, tasks, targets, and RPC payloads.'
   },
@@ -46,6 +50,7 @@ export const COMMAND_DESCRIPTIONS = [
 
 export const RPC_METHODS = [
   { method: 'agentcli.ping', summary: 'Health check for JSON-RPC clients.' },
+  { method: 'agentcli.version', summary: 'Return package and manifest spec version.' },
   { method: 'agentcli.schema', summary: 'Return a schema fragment by name.' },
   { method: 'agentcli.describe', summary: 'Return descriptive metadata by topic.' },
   { method: 'agentcli.validate', summary: 'Validate a manifest object.' },
@@ -109,7 +114,10 @@ const DESCRIPTIONS = {
 export function describeTarget(name = 'commands') {
   const description = DESCRIPTIONS[name];
   if (!description) {
-    throw new Error(`Unknown description target: ${name}`);
+    throw Object.assign(
+      new Error(`Unknown description target: ${name}`),
+      { code: 'invalid_argument' }
+    );
   }
   return description;
 }

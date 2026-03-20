@@ -2,6 +2,9 @@ import { validateManifest } from '../validate.js';
 import { normalizedTaskPlan, payloadMessageForExecution, stableId } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 
+const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
+const TRIGGERED_SENTINEL_TZ = 'UTC';
+
 function schedulerOutputPolicy(plan) {
   const previewBytes = Math.max(64, plan.output.preview_bytes ?? 2000);
   const outputStoreLimit = plan.output.retrieve === 'inline'
@@ -45,8 +48,8 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         source: plan.source,
         name: plan.name,
         enabled: plan.enabled ? 1 : 0,
-        schedule_cron: isTriggered ? '0 0 31 2 *' : plan.invocation.cron,
-        schedule_tz: isTriggered ? 'UTC' : plan.invocation.tz,
+        schedule_cron: isTriggered ? TRIGGERED_SENTINEL_CRON : plan.invocation.cron,
+        schedule_tz: isTriggered ? TRIGGERED_SENTINEL_TZ : plan.invocation.tz,
         session_target: plan.execution.session_target,
         agent_id: plan.execution.agent_id,
         payload_kind: plan.execution.payload_kind,
@@ -54,7 +57,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         payload_model: plan.execution.model_policy.scheduler_model,
         payload_thinking: plan.execution.model_policy.thinking,
         execution_intent: plan.intent.mode,
-        execution_read_only: plan.intent.read_only ? 1 : 0,
+        execution_read_only: plan.intent.read_only == null ? null : (plan.intent.read_only ? 1 : 0),
         run_timeout_ms: plan.runtime.timeout_ms,
         overlap_policy: plan.reliability.overlap_policy,
         max_retries: plan.reliability.max_retries,
@@ -76,7 +79,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
         preferred_session_key: plan.session.preferred_key,
-        delete_after_run: plan.delete_after_run ? 1 : 0
+        delete_after_run: plan.delete_after_run == null ? null : (plan.delete_after_run ? 1 : 0)
       });
 
       explain.push({

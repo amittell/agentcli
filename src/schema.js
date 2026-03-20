@@ -1,6 +1,7 @@
 export const MANIFEST_VERSION = '0.1';
 
 const nullableString = { type: 'string', nullable: true };
+const nullableToken = { type: 'string', nullable: true, format: 'token', note: 'restricted to /^[A-Za-z0-9@:_./-]+$/' };
 const nullableBoolean = { type: 'boolean', nullable: true };
 
 const targetField = {
@@ -8,7 +9,7 @@ const targetField = {
   required: ['session_target'],
   fields: {
     session_target: { type: 'string', enum: ['main', 'isolated', 'shell'] },
-    agent_id: nullableString,
+    agent_id: nullableToken,
     payload_kind: { type: 'string', enum: ['systemEvent', 'agentTurn', 'shellCommand'], nullable: true }
   }
 };
@@ -17,9 +18,9 @@ const modelPolicyField = {
   type: 'object',
   nullable: true,
   fields: {
-    provider: nullableString,
-    model: nullableString,
-    thinking: nullableString
+    provider: nullableToken,
+    model: nullableToken,
+    thinking: nullableToken
   }
 };
 
@@ -58,9 +59,9 @@ const deliveryField = {
   type: 'object',
   nullable: true,
   fields: {
-    mode: { type: 'string', enum: ['announce', 'announce-always', 'none'] },
-    channel: nullableString,
-    to: nullableString
+    mode: { type: 'string', enum: ['announce', 'announce-always', 'none'], nullable: true },
+    channel: nullableToken,
+    to: nullableToken
   }
 };
 
@@ -89,7 +90,7 @@ const approvalField = {
     required: nullableBoolean,
     policy: { type: 'string', enum: ['manual', 'auto-approve', 'auto-reject'], nullable: true },
     risk_level: { type: 'string', enum: ['low', 'medium', 'high'], nullable: true },
-    approver_scope: nullableString,
+    approver_scope: nullableToken,
     timeout_s: { type: 'integer', min: 1, nullable: true },
     auto: { type: 'string', enum: ['approve', 'reject'], nullable: true }
   }
@@ -108,7 +109,7 @@ const sessionField = {
   type: 'object',
   nullable: true,
   fields: {
-    preferred_key: nullableString
+    preferred_key: nullableToken
   }
 };
 
@@ -117,7 +118,7 @@ const shellField = {
   nullable: true,
   required: ['program'],
   fields: {
-    program: { type: 'string' },
+    program: { type: 'string', format: 'token', note: 'restricted to /^[A-Za-z0-9@:_./-]+$/' },
     args: {
       type: 'array',
       nullable: true,
@@ -187,6 +188,7 @@ export const MANIFEST_SCHEMA = {
   task: {
     type: 'object',
     required: ['id', 'name', 'target'],
+    note: 'Exactly one of schedule or trigger must be present.',
     fields: {
       id: { type: 'string' },
       name: { type: 'string' },
@@ -202,6 +204,7 @@ export const MANIFEST_SCHEMA = {
       schedule: {
         type: 'object',
         nullable: true,
+        required: ['cron'],
         fields: {
           cron: { type: 'string' },
           tz: nullableString
@@ -210,6 +213,7 @@ export const MANIFEST_SCHEMA = {
       trigger: {
         type: 'object',
         nullable: true,
+        required: ['parent', 'on'],
         fields: {
           parent: { type: 'string' },
           on: { type: 'string', enum: ['success', 'failure', 'complete'] },
@@ -230,7 +234,7 @@ export const MANIFEST_SCHEMA = {
   schedulerJob: {
     type: 'object',
     fields: {
-      id: { type: 'string' },
+      id: { type: 'string', note: 'sha256(workflowId:taskId) truncated to 32 hex chars' },
       source: {
         type: 'object',
         fields: {
@@ -281,8 +285,34 @@ export const MANIFEST_SCHEMA = {
     type: 'object',
     fields: {
       target: { type: 'string', const: 'standalone' },
-      version: { type: 'string' },
-      workflows: { type: 'array', minItems: 1 }
+      version: { type: 'string', const: '0.2' },
+      capabilities: {
+        type: 'object',
+        fields: {
+          authoring: { type: 'boolean' },
+          planning: { type: 'boolean' },
+          runtime_execution: { type: 'boolean' },
+          rpc: { type: 'boolean' },
+          model_policy: { type: 'boolean' },
+          execution_intent: { type: 'boolean' },
+          output_hints: { type: 'boolean' },
+          budgets: { type: 'boolean' }
+        }
+      },
+      workflows: {
+        type: 'array',
+        minItems: 1,
+        items: {
+          type: 'object',
+          fields: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            tasks: { type: 'array', note: 'normalizedTaskPlan objects with id, source, invocation, execution, intent, output, budgets, delivery, reliability, runtime, approval, context, session, delete_after_run, parent_compiled_id' },
+            edges: { type: 'array', note: 'trigger edges with from, to, on, condition, delay_s fields' }
+          }
+        }
+      },
+      explain: { type: 'array', nullable: true, note: 'present when includeExplain is true' }
     }
   },
   rpcRequest: {
@@ -290,7 +320,7 @@ export const MANIFEST_SCHEMA = {
     required: ['jsonrpc', 'method'],
     fields: {
       jsonrpc: { type: 'string', const: '2.0' },
-      id: nullableString,
+      id: { type: ['string', 'number'], nullable: true, note: 'JSON-RPC 2.0 allows string or integer IDs' },
       method: { type: 'string' },
       params: { type: 'object', nullable: true }
     }
@@ -300,7 +330,7 @@ export const MANIFEST_SCHEMA = {
     required: ['jsonrpc'],
     fields: {
       jsonrpc: { type: 'string', const: '2.0' },
-      id: nullableString,
+      id: { type: ['string', 'number'], nullable: true, note: 'JSON-RPC 2.0 allows string or integer IDs' },
       result: { type: 'object', nullable: true },
       error: { type: 'object', nullable: true }
     }

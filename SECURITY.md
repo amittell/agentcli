@@ -2,7 +2,7 @@
 
 ## Reporting
 
-For now, report security issues privately to the maintainers instead of opening a public issue.
+Report security issues privately using [GitHub Security Advisories](https://github.com/amittell/agentcli/security/advisories/new) instead of opening a public issue.
 
 Include:
 

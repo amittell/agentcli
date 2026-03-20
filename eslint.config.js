@@ -20,7 +20,12 @@ export default [
       },
     },
     rules: {
-      'no-unused-vars': 'off',
+      'no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+        destructuredArrayIgnorePattern: '^_',
+        ignoreRestSiblings: true
+      }],
       'no-empty': 'off',
       'no-constant-condition': 'off',
     },

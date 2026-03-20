@@ -99,6 +99,7 @@ The target model is defined in [src/targets.js](src/targets.js).
 ## Commands
 
 ```bash
+agentcli version
 agentcli schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse]
 agentcli describe [manifest|workflow|task|targets|commands|rpc]
 agentcli targets

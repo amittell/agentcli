@@ -1,11 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { PassThrough } from 'stream';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { PassThrough } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
-import { compileManifestToStandalone as compileStandaloneFromIndex, MANIFEST_VERSION, serveJsonRpc } from '../src/index.js';
+import {
+  compileManifestToStandalone as compileStandaloneFromIndex,
+  describeTarget,
+  expandManifestShorthands,
+  inspectSchedulerState as inspectFromIndex,
+  MANIFEST_VERSION,
+  resolveManifestCandidate,
+  sanitizeForAgent,
+  serveJsonRpc
+} from '../src/index.js';
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
@@ -14,6 +23,10 @@ import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
 import { getAgentcliPaths } from '../src/home.js';
+import { stableId } from '../src/compiler/shared.js';
+import { applyFieldMask, parseFieldMask } from '../src/fields.js';
+import { resolveSafeOutputPath } from '../src/io.js';
+import { buildOnFailureTask } from '../src/shorthand.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -713,7 +726,6 @@ test('applyManifestToScheduler converts enabled flags to booleans for scheduler 
 });
 
 test('cli apply supports dry-run without invoking scheduler writes', () => {
-  const compiled = compileManifestToScheduler(exampleManifest);
   const runner = {
     invocation: { label: 'dry-run-scheduler' },
     listJobs() {
@@ -1054,4 +1066,1538 @@ test('json-rpc apply returns scheduler action plan', async () => {
   assert.equal(response.id, 'apply-1');
   assert.equal(response.result.ok, true);
   assert.deepEqual(response.result.actions.map(action => action.action), ['updated', 'created']);
+});
+
+test('cli version returns package and manifest version', async () => {
+  const output = JSON.parse(await runCli(['version']));
+  assert.equal(output.ok, true);
+  assert.equal(typeof output.package_version, 'string');
+  assert.match(output.package_version, /^\d+\.\d+\.\d+/);
+  assert.equal(output.manifest_version, MANIFEST_VERSION);
+});
+
+test('cli --version flag returns version', async () => {
+  const output = JSON.parse(await runCli(['--version']));
+  assert.equal(output.ok, true);
+  assert.equal(output.manifest_version, MANIFEST_VERSION);
+});
+
+test('cli -v flag returns version', async () => {
+  const output = JSON.parse(await runCli(['-v']));
+  assert.equal(output.ok, true);
+  assert.equal(output.manifest_version, MANIFEST_VERSION);
+});
+
+test('json-rpc agentcli.version returns version info', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'ver-1',
+    method: 'agentcli.version'
+  });
+
+  assert.equal(response.jsonrpc, '2.0');
+  assert.equal(response.id, 'ver-1');
+  assert.equal(response.result.ok, true);
+  assert.equal(typeof response.result.package_version, 'string');
+  assert.equal(response.result.manifest_version, MANIFEST_VERSION);
+});
+
+test('json-rpc batch request returns clear error', async () => {
+  const response = await handleJsonRpcRequest([
+    { jsonrpc: '2.0', id: '1', method: 'agentcli.ping' },
+    { jsonrpc: '2.0', id: '2', method: 'agentcli.ping' }
+  ]);
+
+  assert.equal(response.error.code, -32600);
+  assert.match(response.error.message, /Batch requests are not supported/);
+});
+
+test('non-object optional blocks fail validation', () => {
+  const bad = structuredClone(exampleManifest);
+  bad.workflows[0].tasks[0].model_policy = 'fast';
+  bad.workflows[0].tasks[0].intent = 42;
+  bad.workflows[0].tasks[0].delivery = ['announce'];
+
+  const result = validateManifest(bad);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.model_policy') && /must be an object/.test(e.message)));
+  assert.ok(result.errors.some(e => e.path.endsWith('.intent') && /must be an object/.test(e.message)));
+  assert.ok(result.errors.some(e => e.path.endsWith('.delivery') && /must be an object/.test(e.message)));
+});
+
+test('non-object workflow model_policy fails validation', () => {
+  const bad = structuredClone(exampleManifest);
+  bad.workflows[0].model_policy = 'fast';
+
+  const result = validateManifest(bad);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.model_policy') && /must be an object/.test(e.message)));
+});
+
+test('unknown keys on tasks and workflows emit warnings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'warn-flow',
+        name: 'Warn Flow',
+        typo_field: true,
+        tasks: [
+          {
+            id: 't1',
+            name: 'Task One',
+            prompt: 'hello',
+            target: { session_target: 'isolated' },
+            schedule: { cron: '0 * * * *' },
+            deliveri: { mode: 'announce' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /unknown key "typo_field"/.test(w.message)));
+  assert.ok(result.warnings.some(w => /unknown key "deliveri"/.test(w.message)));
+});
+
+test('unknown keys on on_failure emit warnings', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'onfail-warn',
+        name: 'OnFail Warn',
+        tasks: [
+          {
+            id: 'root',
+            name: 'Root',
+            shell: { program: 'check.sh' },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            delivery: { mode: 'none' },
+            on_failure: {
+              prompt: 'Diagnose',
+              unknown_block: true
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /unknown key "unknown_block"/.test(w.message)));
+});
+
+test('cli unknown command returns error', async () => {
+  await assert.rejects(
+    runCli(['nonexistent-command']),
+    /Unknown command: nonexistent-command/
+  );
+});
+
+test('cli inspect rejects invalid sanitize mode', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
+  const dbPath = join(workdir, 'scheduler.sqlite');
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const db = new DatabaseSync(dbPath);
+  db.exec('CREATE TABLE jobs (id TEXT, created_at TEXT);');
+  db.close();
+
+  await assert.rejects(
+    runCli(['inspect', 'jobs', '--db', dbPath, '--sanitize', 'full']),
+    /Unsupported sanitize mode/
+  );
+});
+
+test('barrel export includes new public APIs', () => {
+  assert.equal(typeof inspectFromIndex, 'function');
+  assert.equal(typeof describeTarget, 'function');
+  assert.equal(typeof sanitizeForAgent, 'function');
+  assert.equal(typeof expandManifestShorthands, 'function');
+});
+
+test('cli describe commands includes version command', async () => {
+  const output = JSON.parse(await runCli(['describe', 'commands']));
+  assert.equal(output.ok, true);
+  assert.ok(output.description.items.some(item => item.command === 'version'));
+});
+
+test('cli describe rpc includes version method', async () => {
+  const output = JSON.parse(await runCli(['describe', 'rpc']));
+  assert.equal(output.ok, true);
+  assert.ok(output.description.methods.some(m => m.method === 'agentcli.version'));
+});
+
+test('invalid AGENTCLI_OUTPUT value throws', async () => {
+  await assert.rejects(
+    runCli(['version'], { env: { ...process.env, AGENTCLI_OUTPUT: 'yaml' } }),
+    /Unknown AGENTCLI_OUTPUT value: yaml/
+  );
+});
+
+test('ndjson empty items returns empty string', async () => {
+  const output = await runCli(['compile', JSON.stringify(exampleManifest)], {
+    env: { ...process.env, AGENTCLI_OUTPUT: 'ndjson' }
+  });
+  // compile output has no items, so ndjson falls through to single JSON line
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.ok, true);
+});
+
+test('tasks without approval block compile with null approval fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'no-approval-flow',
+        name: 'No Approval Flow',
+        tasks: [
+          {
+            id: 'basic-task',
+            name: 'Basic Task',
+            prompt: 'Run a basic check.',
+            target: { session_target: 'isolated' },
+            schedule: { cron: '0 * * * *' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_auto, null);
+  assert.equal(job.approval_timeout_s, null);
+  assert.equal(job.approval_required, 0);
+});
+
+test('tasks without intent block compile with null execution_read_only', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'no-intent-flow',
+        name: 'No Intent Flow',
+        tasks: [
+          {
+            id: 'basic-task',
+            name: 'Basic Task',
+            prompt: 'Run a basic check.',
+            target: { session_target: 'isolated' },
+            schedule: { cron: '0 * * * *' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.execution_read_only, null);
+  assert.equal(job.delete_after_run, null);
+});
+
+test('tasks with explicit intent compile with integer execution_read_only', () => {
+  const compiled = compileManifestToScheduler(publicFailureTriageManifest);
+  const triage = compiled.jobs.find(j => j.source.task_id === 'triage-failure');
+  assert.equal(triage.execution_read_only, 1);
+});
+
+test('json-rpc apply adoptBy validation uses invalidParams error path', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'adopt-invalid',
+    method: 'agentcli.apply',
+    params: {
+      manifest: exampleManifest,
+      adoptBy: 'uuid'
+    }
+  }, {
+    schedulerRunner: {
+      invocation: { label: 'fake' },
+      listJobs() { return []; },
+      addJob() { return { ok: true }; },
+      updateJob() { return { ok: true }; }
+    }
+  });
+
+  assert.equal(response.error.code, -32602);
+  assert.match(response.error.message, /Invalid adoptBy value/);
+});
+
+test('malformed JSON input produces contextual parse error', async () => {
+  await assert.rejects(
+    runCli(['validate', '{not-json}']),
+    /Invalid JSON from.*not-json/
+  );
+});
+
+test('schema task has required fields on schedule and trigger', async () => {
+  const output = JSON.parse(await runCli(['schema', 'task']));
+  assert.deepEqual(output.schema.fields.schedule.required, ['cron']);
+  assert.deepEqual(output.schema.fields.trigger.required, ['parent', 'on']);
+});
+
+test('schema task has mutual exclusion note', async () => {
+  const output = JSON.parse(await runCli(['schema', 'task']));
+  assert.match(output.schema.note, /Exactly one of schedule or trigger/);
+});
+
+test('barrel export includes resolveManifestCandidate', () => {
+  assert.equal(typeof resolveManifestCandidate, 'function');
+});
+
+test('serveJsonRpc suppresses output for notifications (no id)', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const chunks = [];
+  output.on('data', chunk => chunks.push(String(chunk)));
+
+  const serving = serveJsonRpc({ input, output });
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'agentcli.ping' })}\n`);
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'agentcli.ping' })}\n`);
+  input.end();
+  await serving;
+
+  const messages = chunks.join('').trim().split('\n').map(line => JSON.parse(line));
+  // Should have ready notification + response to id:1, but NOT a response for the notification
+  assert.equal(messages[0].method, 'agentcli.ready');
+  assert.equal(messages[1].id, '1');
+  assert.equal(messages.length, 2);
+});
+
+test('cli --home flag overrides AGENTCLI_HOME for paths command', async () => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
+  const output = JSON.parse(await runCli(['paths', '--home', homeRoot]));
+  assert.equal(output.ok, true);
+  assert.equal(output.paths.root, homeRoot);
+});
+
+test('intent with mode but no read_only compiles with null execution_read_only', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'partial-intent-flow',
+        name: 'Partial Intent Flow',
+        tasks: [
+          {
+            id: 'plan-task',
+            name: 'Plan Task',
+            prompt: 'Plan a check.',
+            target: { session_target: 'isolated' },
+            intent: { mode: 'plan' },
+            schedule: { cron: '0 * * * *' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.execution_intent, 'plan');
+  assert.equal(job.execution_read_only, null);
+});
+
+test('cli schema with unknown target produces invalid_argument error', async () => {
+  await assert.rejects(
+    runCli(['schema', 'nonexistent']),
+    (err) => {
+      assert.match(err.message, /Unknown schema target/);
+      assert.equal(err.code, 'invalid_argument');
+      return true;
+    }
+  );
+});
+
+test('cli describe with unknown target produces invalid_argument error', async () => {
+  await assert.rejects(
+    runCli(['describe', 'nonexistent']),
+    (err) => {
+      assert.match(err.message, /Unknown description target/);
+      assert.equal(err.code, 'invalid_argument');
+      return true;
+    }
+  );
+});
+
+test('whitespace-only trigger condition suffix fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'whitespace-cond',
+        name: 'Whitespace Condition',
+        tasks: [
+          {
+            id: 'root',
+            name: 'Root',
+            prompt: 'check',
+            target: { session_target: 'isolated' },
+            schedule: { cron: '0 * * * *' }
+          },
+          {
+            id: 'child',
+            name: 'Child',
+            prompt: 'follow up',
+            target: { session_target: 'isolated' },
+            trigger: { parent: 'root', on: 'success', condition: 'contains:   ' }
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /contains trigger condition cannot be empty/.test(e.message)));
+});
+
+test('non-object schedule produces type error before mutual exclusion check', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'bad-schedule-type',
+        name: 'Bad Schedule Type',
+        tasks: [
+          {
+            id: 't1',
+            name: 'Task',
+            prompt: 'hello',
+            target: { session_target: 'isolated' },
+            schedule: '0 * * * *'
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.schedule') && /must be an object/.test(e.message)));
+});
+
+test('json-rpc compile includes target name in result', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'compile-target',
+    method: 'agentcli.compile',
+    params: {
+      target: 'standalone',
+      manifest: exampleManifest
+    }
+  });
+
+  assert.equal(response.result.ok, true);
+  assert.equal(response.result.target, 'standalone');
+  assert.equal(response.result.output.target, 'standalone');
+});
+
+test('standalone plan schema includes capabilities field', async () => {
+  const output = JSON.parse(await runCli(['schema', 'standalonePlan']));
+  assert.ok(output.schema.fields.capabilities);
+  assert.equal(output.schema.fields.capabilities.type, 'object');
+  assert.ok(output.schema.fields.capabilities.fields.authoring);
+});
+
+test('rpcRequest schema allows string or number id', async () => {
+  const output = JSON.parse(await runCli(['schema', 'rpc-request']));
+  assert.deepEqual(output.schema.fields.id.type, ['string', 'number']);
+});
+
+test('json-rpc handles integer request ids', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 42,
+    method: 'agentcli.ping'
+  });
+
+  assert.equal(response.id, 42);
+  assert.equal(response.result.ok, true);
+});
+
+test('delivery block without mode passes validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'empty-delivery',
+        name: 'Empty Delivery',
+        tasks: [
+          {
+            id: 't1',
+            name: 'Task',
+            prompt: 'hello',
+            target: { session_target: 'isolated' },
+            schedule: { cron: '0 * * * *' },
+            delivery: {}
+          }
+        ]
+      }
+    ]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+});
+
+test('cli --fields without a value produces structured error', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
+  const dbPath = join(workdir, 'scheduler.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec('CREATE TABLE jobs (id TEXT, created_at TEXT);');
+  db.close();
+
+  await assert.rejects(
+    runCli(['inspect', 'jobs', '--db', dbPath, '--fields']),
+    (err) => {
+      assert.match(err.message, /--fields requires/);
+      assert.equal(err.code, 'invalid_argument');
+      return true;
+    }
+  );
+  rmSync(workdir, { recursive: true, force: true });
+});
+
+test('rpcResponse schema allows string or number id', async () => {
+  const output = JSON.parse(await runCli(['schema', 'rpc-response']));
+  assert.deepEqual(output.schema.fields.id.type, ['string', 'number']);
+});
+
+test('trigger with missing on field fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        {
+          id: 'root', name: 'Root',
+          prompt: 'do something',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '0 * * * *' }
+        },
+        {
+          id: 'child', name: 'Child',
+          prompt: 'follow up',
+          target: { session_target: 'isolated' },
+          trigger: { parent: 'root' }
+        }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  const onError = result.errors.find(e => e.path.includes('trigger.on'));
+  assert.ok(onError, 'should have an error for missing trigger.on');
+  assert.ok(onError.message.includes('required'));
+});
+
+test('empty approval block compiles with null auto field', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: {}
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_auto, null, 'empty approval block should produce null auto');
+  assert.equal(job.approval_timeout_s, 3600, 'empty approval block should use default timeout');
+  assert.equal(job.approval_required, 0, 'empty approval block with no policy defaults required to 0');
+});
+
+test('approval with manual policy defaults auto to reject', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { policy: 'manual' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_auto, 'reject');
+  assert.equal(job.approval_required, 1);
+});
+
+test('barrel export includes io utilities', async () => {
+  const mod = await import('../src/index.js');
+  assert.equal(typeof mod.loadJsonInput, 'function');
+  assert.equal(typeof mod.writeJsonOutput, 'function');
+  assert.equal(typeof mod.resolveSafeOutputPath, 'function');
+});
+
+test('standalonePlan schema version has const constraint', async () => {
+  const output = JSON.parse(await runCli(['schema', 'standalone-plan']));
+  assert.equal(output.schema.fields.version.const, '0.2');
+});
+
+test('json-rpc internal error uses fallback message', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'err-test',
+    method: 'agentcli.compile',
+    params: { manifest: null, target: 'standalone' }
+  });
+  assert.equal(response.jsonrpc, '2.0');
+  assert.ok(response.error);
+  assert.equal(typeof response.error.message, 'string');
+  assert.ok(response.error.message.length > 0, 'error message should not be empty');
+});
+
+test('trigger.on with invalid value fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        {
+          id: 'root', name: 'Root', prompt: 'go',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '0 * * * *' }
+        },
+        {
+          id: 'child', name: 'Child', prompt: 'follow',
+          target: { session_target: 'isolated' },
+          trigger: { parent: 'root', on: 'always' }
+        }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('trigger.on') && /must be one of/.test(e.message)));
+});
+
+test('trigger.parent referencing non-existent task fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        {
+          id: 'root', name: 'Root', prompt: 'go',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '0 * * * *' }
+        },
+        {
+          id: 'child', name: 'Child', prompt: 'follow',
+          target: { session_target: 'isolated' },
+          trigger: { parent: 'nonexistent', on: 'success' }
+        }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e =>
+    e.path.includes('trigger.parent') && /must reference another task id/.test(e.message)
+  ));
+});
+
+test('auto-approve policy compiles with correct approval fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { policy: 'auto-approve', risk_level: 'low' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_auto, 'approve');
+  assert.equal(job.approval_required, 0);
+});
+
+test('delete_after_run true compiles to integer 1', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delete_after_run: true
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].delete_after_run, 1);
+});
+
+test('json-rpc validate returns validation result directly', async () => {
+  const valid = await handleJsonRpcRequest({
+    jsonrpc: '2.0', id: 'v1',
+    method: 'agentcli.validate',
+    params: { manifest: { version: '0.1', workflows: [{ id: 'w', name: 'W', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '* * * * *' } }] }] } }
+  });
+  assert.equal(valid.result.ok, true);
+  assert.deepEqual(valid.result.errors, []);
+
+  const invalid = await handleJsonRpcRequest({
+    jsonrpc: '2.0', id: 'v2',
+    method: 'agentcli.validate',
+    params: { manifest: { version: 'bad' } }
+  });
+  assert.equal(invalid.result.ok, false);
+  assert.ok(invalid.result.errors.length > 0);
+  assert.equal(invalid.error, undefined, 'validation failures return result, not error');
+});
+
+test('serveJsonRpc emits parse error for malformed JSON', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines = [];
+  output.on('data', chunk => lines.push(chunk.toString()));
+
+  const done = serveJsonRpc({ input, output, defaults: {} });
+  input.write('not valid json\n');
+  input.write('{"jsonrpc":"2.0","id":"after","method":"agentcli.ping"}\n');
+  input.end();
+  await done;
+
+  const responses = lines.join('').trim().split('\n').map(l => JSON.parse(l));
+  const ready = responses.find(r => r.method === 'agentcli.ready');
+  assert.ok(ready);
+  const parseErr = responses.find(r => r.error?.code === -32700);
+  assert.ok(parseErr, 'should emit -32700 parse error');
+  const pong = responses.find(r => r.id === 'after');
+  assert.ok(pong, 'should continue processing after parse error');
+});
+
+test('cli --limit without value produces structured error', async () => {
+  await assert.rejects(
+    () => runCli(['inspect', 'jobs', '--db', '/tmp/unused.sqlite', '--limit']),
+    err => err.code === 'invalid_argument' && /--limit/.test(err.message)
+  );
+});
+
+test('non-object schedule does not produce redundant mutual exclusion error', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: '0 * * * *'
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.schedule') && /must be an object/.test(e.message)));
+  assert.ok(!result.errors.some(e => /must define exactly one/.test(e.message)),
+    'should not emit mutual exclusion error when type error already covers the problem');
+});
+
+test('schema exposes token format on validated fields', async () => {
+  const output = JSON.parse(await runCli(['schema', 'task']));
+  assert.equal(output.schema.fields.target.fields.agent_id.format, 'token');
+  assert.equal(output.schema.fields.delivery.fields.channel.format, 'token');
+  assert.equal(output.schema.fields.session.fields.preferred_key.format, 'token');
+  assert.equal(output.schema.fields.model_policy.fields.model.format, 'token');
+  assert.equal(output.schema.fields.shell.fields.program.format, 'token');
+});
+
+test('workflow-level model_policy inherits to tasks and is overridden by task-level policy', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'inherit-flow', name: 'Inherit Flow',
+      model_policy: { provider: 'anthropic', model: 'claude-sonnet-4-6', thinking: 'high' },
+      tasks: [
+        {
+          id: 'inherits', name: 'Inherits',
+          prompt: 'check',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '0 * * * *' }
+        },
+        {
+          id: 'overrides', name: 'Overrides',
+          prompt: 'check',
+          target: { session_target: 'isolated' },
+          model_policy: { model: 'claude-opus-4-6' },
+          trigger: { parent: 'inherits', on: 'success' }
+        }
+      ]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const inherits = compiled.jobs.find(j => j.source.task_id === 'inherits');
+  const overrides = compiled.jobs.find(j => j.source.task_id === 'overrides');
+
+  assert.equal(inherits.payload_model, 'anthropic/claude-sonnet-4-6');
+  assert.equal(inherits.payload_thinking, 'high');
+  assert.equal(overrides.payload_model, 'anthropic/claude-opus-4-6');
+  assert.equal(overrides.payload_thinking, 'high');
+});
+
+test('stableId is deterministic and consistent across calls', () => {
+  const id1 = stableId('workflow-a', 'task-1');
+  const id2 = stableId('workflow-a', 'task-1');
+  const id3 = stableId('workflow-a', 'task-2');
+
+  assert.equal(id1, id2, 'same inputs must produce the same id');
+  assert.notEqual(id1, id3, 'different inputs must produce different ids');
+  assert.equal(id1.length, 32, 'id must be 32 hex characters');
+  assert.match(id1, /^[0-9a-f]{32}$/, 'id must be lowercase hex');
+});
+
+test('POSIX shell rendering escapes single-quotes in args', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'quote-flow', name: 'Quote Flow',
+      tasks: [{
+        id: 'quoted', name: 'Quoted',
+        shell: {
+          program: 'echo',
+          args: ["it's", "don't stop"]
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+
+  const compiled = compileManifestToScheduler(manifest);
+  const msg = compiled.jobs[0].payload_message;
+  assert.ok(!msg.includes("it's"), 'raw single-quote must not appear unescaped');
+  assert.ok(msg.includes("'echo'"), 'program must be quoted');
+  assert.ok(msg.includes("'\"'\"'"), 'single-quotes must be escaped via quote-break pattern');
+});
+
+test('on_failure handler inherits enabled: false from parent task', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'disabled-parent', name: 'Disabled Parent',
+      tasks: [{
+        id: 'root', name: 'Root',
+        enabled: false,
+        shell: { program: 'check.sh' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' },
+        on_failure: {
+          prompt: 'Diagnose the failure.',
+          delivery: { mode: 'announce' }
+        }
+      }]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs.length, 2);
+  const handler = compiled.jobs.find(j => j.source.task_id === 'root.failure');
+  assert.ok(handler);
+  assert.equal(handler.enabled, 0, 'on_failure handler should inherit disabled state');
+});
+
+test('adopt-by-name falls back to id match when name does not match', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const existing = [{ ...compiled.jobs[0], name: 'Renamed Job' }];
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() { return existing; },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      calls.push({ action: 'update', id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.actions[0].action, 'updated', 'should fall back to id match when name does not match');
+  assert.equal(calls[0].action, 'update');
+  assert.equal(calls[0].id, compiled.jobs[0].id);
+});
+
+test('json-rpc compile uses defaults.target when no target is specified', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'default-target',
+    method: 'agentcli.compile',
+    params: {
+      manifest: exampleManifest
+    }
+  }, { target: 'openclaw-scheduler' });
+
+  assert.equal(response.result.ok, true);
+  assert.equal(response.result.target, 'openclaw-scheduler');
+  assert.ok(Array.isArray(response.result.output.jobs));
+});
+
+test('resolveManifestCandidate uses injected cwd for relative paths', (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-resolve-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const result = resolveManifestCandidate('nonexistent.json', { cwd: workdir });
+  assert.equal(result, null, 'should not find a nonexistent file');
+
+  const testFile = join(workdir, 'test-manifest.json');
+  writeFileSync(testFile, '{}');
+  const resolved = resolveManifestCandidate('test-manifest.json', { cwd: workdir });
+  assert.equal(resolved, testFile, 'should resolve relative path against injected cwd');
+});
+
+test('json-rpc unknown method returns -32601', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'unknown-method',
+    method: 'agentcli.nonexistent'
+  });
+
+  assert.equal(response.error.code, -32601);
+  assert.match(response.error.message, /Method not found/);
+});
+
+test('invalid regex trigger condition fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 'root', name: 'Root', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        { id: 'child', name: 'Child', prompt: 'follow', target: { session_target: 'isolated' }, trigger: { parent: 'root', on: 'success', condition: 'regex:[unclosed' } }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /invalid regex/.test(e.message) || /Invalid regular expression/.test(e.message)));
+});
+
+test('whitespace-only regex trigger condition suffix fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 'root', name: 'Root', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        { id: 'child', name: 'Child', prompt: 'follow', target: { session_target: 'isolated' }, trigger: { parent: 'root', on: 'success', condition: 'regex:   ' } }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /regex trigger condition cannot be empty/.test(e.message)));
+});
+
+test('auto-reject policy compiles with correct approval fields', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { policy: 'auto-reject' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_auto, 'reject');
+  assert.equal(job.approval_required, 0);
+});
+
+test('manual policy with explicit required:false still compiles required to 1', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { policy: 'manual', required: false }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_required, 1, 'manual policy always implies required=1');
+  assert.equal(job.approval_auto, 'reject');
+});
+
+test('output offload always sets threshold to 128', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        output: { offload: 'always' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].output_offload_threshold_bytes, 128);
+});
+
+test('output retrieve inline increases store limit', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        output: { retrieve: 'inline', preview_bytes: 20000 }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].output_store_limit_bytes, 80000);
+});
+
+test('resolveSchedulerInvocation with .js suffix uses node execPath', () => {
+  const invocation = resolveSchedulerInvocation({ schedulerBin: '/opt/scheduler.js' });
+  assert.equal(invocation.command, process.execPath);
+  assert.deepEqual(invocation.prefixArgs, ['/opt/scheduler.js']);
+});
+
+test('resolveSchedulerInvocation with plain binary uses it directly', () => {
+  const invocation = resolveSchedulerInvocation({ schedulerBin: 'openclaw-scheduler' });
+  assert.equal(invocation.command, 'openclaw-scheduler');
+  assert.deepEqual(invocation.prefixArgs, []);
+});
+
+test('on_failure inherits agent_id from parent target', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'inherit-agent', name: 'Inherit Agent',
+      tasks: [{
+        id: 'root', name: 'Root',
+        prompt: 'check',
+        target: { session_target: 'isolated', agent_id: 'bot-agent' },
+        schedule: { cron: '0 * * * *' },
+        on_failure: {
+          prompt: 'Diagnose.',
+          delivery: { mode: 'announce' }
+        }
+      }]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const handler = compiled.jobs.find(j => j.source.task_id === 'root.failure');
+  assert.ok(handler);
+  assert.equal(handler.agent_id, 'bot-agent');
+});
+
+test('resolveAgentcliHome expands bare tilde to home directory', async () => {
+  const { resolveAgentcliHome } = await import('../src/home.js');
+  const result = resolveAgentcliHome({ env: { AGENTCLI_HOME: '~' }, homeDir: '/home/test' });
+  assert.equal(result, '/home/test');
+});
+
+test('shell task with program only and no args renders correctly', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'minimal-shell', name: 'Minimal Shell',
+      tasks: [{
+        id: 'run', name: 'Run',
+        shell: { program: 'uptime' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].payload_message, "'uptime'");
+});
+
+test('trigger delay_s flows through to compiled scheduler job', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 'root', name: 'Root', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        { id: 'delayed', name: 'Delayed', prompt: 'follow', target: { session_target: 'isolated' }, trigger: { parent: 'root', on: 'success', delay_s: 300 } }
+      ]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const delayed = compiled.jobs.find(j => j.source.task_id === 'delayed');
+  assert.equal(delayed.trigger_delay_s, 300);
+});
+
+test('duplicate workflow ids fail validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      { id: 'same', name: 'First', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } }] },
+      { id: 'same', name: 'Second', tasks: [{ id: 't', name: 'T', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } }] }
+    ]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /unique/.test(e.message)));
+});
+
+test('duplicate task ids within a workflow fail validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 'dup', name: 'First', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        { id: 'dup', name: 'Second', prompt: 'follow', target: { session_target: 'isolated' }, trigger: { parent: 'dup', on: 'success' } }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => /unique/.test(e.message)));
+});
+
+test('json-rpc non-object message returns -32600', async () => {
+  const response = await handleJsonRpcRequest('hello');
+  assert.equal(response.error.code, -32600);
+});
+
+test('json-rpc wrong jsonrpc version returns -32600', async () => {
+  const response = await handleJsonRpcRequest({ jsonrpc: '1.0', id: 'x', method: 'agentcli.ping' });
+  assert.equal(response.error.code, -32600);
+});
+
+test('AGENTCLI_TARGET env var selects compile target', async () => {
+  const output = JSON.parse(await runCli(['compile', JSON.stringify(exampleManifest)], {
+    env: { ...process.env, AGENTCLI_TARGET: 'openclaw-scheduler' }
+  }));
+  assert.equal(output.ok, true);
+  assert.equal(output.target, 'openclaw-scheduler');
+  assert.ok(Array.isArray(output.output.jobs));
+});
+
+test('cli --json with no command returns JSON help', async () => {
+  const output = JSON.parse(await runCli(['--json']));
+  assert.equal(output.ok, true);
+  assert.ok(typeof output.usage === 'string');
+  assert.ok(output.usage.length > 0);
+});
+
+test('cli init --force re-creates existing files', async (t) => {
+  const homeRoot = mkdtempSync(join(tmpdir(), 'agentcli-home-'));
+  t.after(() => rmSync(homeRoot, { recursive: true, force: true }));
+  const envOverride = { ...process.env, AGENTCLI_HOME: homeRoot };
+
+  await runCli(['init'], { env: envOverride });
+  const output = JSON.parse(await runCli(['init', '--force'], { env: envOverride }));
+  assert.equal(output.ok, true);
+  assert.ok(output.created.length > 0, '--force should re-create files');
+});
+
+// --- Sweep 10 tests ---
+
+test('approval.required on scheduled task emits warning', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { required: true }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /approval_required.*root scheduled/.test(w.message)));
+});
+
+test('approval.policy + approval.required conflict emits warning', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 'root', name: 'Root', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        {
+          id: 'child', name: 'Child', prompt: 'follow',
+          target: { session_target: 'isolated' },
+          trigger: { parent: 'root', on: 'success' },
+          approval: { policy: 'manual', required: false }
+        }
+      ]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /policy takes precedence/.test(w.message)));
+});
+
+test('context.limit vs budgets.max_context_items conflict emits warning', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        budgets: { max_context_items: 10 },
+        context: { limit: 5 }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /context\.limit takes precedence/.test(w.message)));
+});
+
+test('shell target with plan intent emits advisory warning', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'check.sh' },
+        target: { session_target: 'shell' },
+        intent: { mode: 'plan' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(w => /shell targets.*intent may be advisory/.test(w.message)));
+});
+
+test('sanitizeForAgent strips ANSI escape sequences', () => {
+  const input = '\x1b[31mred text\x1b[0m';
+  const result = sanitizeForAgent(input);
+  assert.equal(result, 'red text');
+});
+
+test('sanitizeForAgent recurses into arrays', () => {
+  const input = ['\x1b[1mbold\x1b[0m', 'plain'];
+  const result = sanitizeForAgent(input);
+  assert.deepEqual(result, ['bold', 'plain']);
+});
+
+test('sanitizeForAgent passes through primitives', () => {
+  assert.equal(sanitizeForAgent(42), 42);
+  assert.equal(sanitizeForAgent(true), true);
+  assert.equal(sanitizeForAgent(null), null);
+});
+
+test('applyFieldMask supports dot-notation nested paths', () => {
+  const item = { source: { workflow_id: 'w1', task_id: 't1' }, name: 'Job' };
+  const result = applyFieldMask(item, ['source.task_id', 'name']);
+  assert.deepEqual(result, { source: { task_id: 't1' }, name: 'Job' });
+});
+
+test('parseFieldMask returns null for empty/whitespace-only input', () => {
+  assert.equal(parseFieldMask(''), null);
+  assert.equal(parseFieldMask(' , , '), null);
+  assert.equal(parseFieldMask(null), null);
+  assert.equal(parseFieldMask(undefined), null);
+});
+
+test('parseFieldMask rejects non-string input', () => {
+  assert.throws(() => parseFieldMask(123), /--fields requires/);
+  assert.throws(() => parseFieldMask(true), /--fields requires/);
+});
+
+test('resolveSafeOutputPath rejects dot path', () => {
+  assert.throws(() => resolveSafeOutputPath('.'), /must point to a file/);
+});
+
+test('loadJsonInput rejects falsy input', async () => {
+  await assert.rejects(
+    () => import('../src/io.js').then(m => m.loadJsonInput(null)),
+    /Missing input/
+  );
+  await assert.rejects(
+    () => import('../src/io.js').then(m => m.loadJsonInput('')),
+    /Missing input/
+  );
+});
+
+test('on_failure with shell and no explicit target infers shell session_target', () => {
+  const task = {
+    id: 'root', name: 'Root',
+    prompt: 'check',
+    target: { session_target: 'isolated', agent_id: 'bot' },
+    on_failure: {
+      shell: { program: 'notify.sh', args: ['--alert'] }
+    }
+  };
+  const handler = buildOnFailureTask(task);
+  assert.equal(handler.target.session_target, 'shell');
+  assert.equal(handler.target.agent_id, 'bot');
+  assert.ok(handler.shell);
+  assert.equal(handler.shell.program, 'notify.sh');
+});
+
+test('on_failure with explicit target overrides inference', () => {
+  const task = {
+    id: 'root', name: 'Root',
+    prompt: 'check',
+    target: { session_target: 'isolated', agent_id: 'bot' },
+    on_failure: {
+      prompt: 'Diagnose failure.',
+      target: { session_target: 'main', agent_id: 'ops' }
+    }
+  };
+  const handler = buildOnFailureTask(task);
+  assert.equal(handler.target.session_target, 'main');
+  assert.equal(handler.target.agent_id, 'ops');
+});
+
+test('cli schema accepts kebab-case aliases', async () => {
+  const output = JSON.parse(await runCli(['schema', 'scheduler-job']));
+  assert.equal(output.ok, true);
+  assert.ok(output.schema.fields.id);
+});
+
+test('subpath exports resolve correctly', async () => {
+  const describe = await import('../src/describe.js');
+  assert.equal(typeof describe.describeTarget, 'function');
+  const sanitize = await import('../src/sanitize.js');
+  assert.equal(typeof sanitize.sanitizeForAgent, 'function');
+  const fields = await import('../src/fields.js');
+  assert.equal(typeof fields.parseFieldMask, 'function');
+  assert.equal(typeof fields.applyFieldMask, 'function');
+  const io = await import('../src/io.js');
+  assert.equal(typeof io.loadJsonInput, 'function');
+  assert.equal(typeof io.resolveSafeOutputPath, 'function');
+});
+
+// --- Sweep 11 tests ---
+
+test('invalid token characters in agent_id fail validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated', agent_id: 'bad<agent>' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('agent_id') && /token/.test(e.message)));
+});
+
+test('sanitizeForAgent recurses into nested objects', () => {
+  const input = { outer: { inner: '\x1b[32mgreen\x1b[0m' }, plain: 'ok' };
+  const result = sanitizeForAgent(input);
+  assert.equal(result.outer.inner, 'green');
+  assert.equal(result.plain, 'ok');
+});
+
+test('sanitizeForAgent with unsupported mode throws', () => {
+  assert.throws(() => sanitizeForAgent('test', 'full'), /Unsupported sanitize mode/);
+});
+
+test('sanitizeForAgent with mode none returns value unchanged', () => {
+  const input = '\x1b[31mred\x1b[0m';
+  assert.equal(sanitizeForAgent(input, 'none'), input);
+  assert.equal(sanitizeForAgent(input, null), input);
+});
+
+test('on_failure defaults agent_id to main when parent has no agent_id', () => {
+  const task = {
+    id: 'root', name: 'Root',
+    prompt: 'check',
+    target: { session_target: 'isolated' },
+    on_failure: { prompt: 'Diagnose.' }
+  };
+  const handler = buildOnFailureTask(task);
+  assert.equal(handler.target.agent_id, 'main');
+});
+
+test('expandManifestShorthands passes through tasks without on_failure unchanged', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [
+        { id: 't1', name: 'T1', prompt: 'go', target: { session_target: 'isolated' }, schedule: { cron: '0 * * * *' } },
+        { id: 't2', name: 'T2', prompt: 'follow', target: { session_target: 'isolated' }, trigger: { parent: 't1', on: 'success' } }
+      ]
+    }]
+  };
+  const expanded = expandManifestShorthands(manifest);
+  assert.equal(expanded.workflows[0].tasks.length, 2);
+  assert.equal(expanded.workflows[0].tasks[0].id, 't1');
+  assert.equal(expanded.workflows[0].tasks[1].id, 't2');
+});
+
+test('intent with explicit read_only false compiles to 0', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        intent: { mode: 'execute', read_only: false }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].execution_read_only, 0);
+  assert.equal(compiled.jobs[0].execution_intent, 'execute');
+});
+
+test('shell env validation rejects non-object env', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', env: 'FOO=bar' },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('.env') && /must be an object/.test(e.message)));
+});
+
+test('approval required false with no policy compiles to required 0', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        approval: { required: false }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.equal(job.approval_required, 0);
+  assert.equal(job.approval_auto, null);
+});
+
+test('json-rpc describe rpc target returns methods and notifications', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0', id: 'desc-rpc',
+    method: 'agentcli.describe',
+    params: { target: 'rpc' }
+  });
+  assert.equal(response.result.ok, true);
+  assert.ok(Array.isArray(response.result.description.methods));
+  assert.ok(Array.isArray(response.result.description.notifications));
+  assert.ok(response.result.description.methods.some(m => m.method === 'agentcli.ping'));
+});
+
+test('json-rpc describe with invalid target returns -32602', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0', id: 'desc-bad',
+    method: 'agentcli.describe',
+    params: { target: 'nonexistent' }
+  });
+  assert.equal(response.error.code, -32602);
+  assert.match(response.error.message, /Unknown description target/);
+});
+
+test('json-rpc schema with invalid target returns -32602', async () => {
+  const response = await handleJsonRpcRequest({
+    jsonrpc: '2.0', id: 'schema-bad',
+    method: 'agentcli.schema',
+    params: { target: 'nonexistent' }
+  });
+  assert.equal(response.error.code, -32602);
+  assert.match(response.error.message, /Unknown schema target/);
+});
+
+test('loadJsonInput with non-existent file path throws', async () => {
+  const { loadJsonInput } = await import('../src/io.js');
+  await assert.rejects(
+    () => loadJsonInput('/tmp/agentcli-nonexistent-file-12345.json'),
+    /Input not found/
+  );
+});
+
+test('compile --explain includes explain in output', async () => {
+  const output = JSON.parse(await runCli(['compile', JSON.stringify(exampleManifest), '--explain']));
+  assert.equal(output.ok, true);
+  assert.ok(Array.isArray(output.output.explain));
+  assert.ok(output.output.explain.length > 0);
+  assert.ok(output.output.explain[0].compiled_id);
+  assert.ok(output.output.explain[0].notes);
+});
+
+test('compile --explain to openclaw-scheduler includes model_policy in explain', async () => {
+  const output = JSON.parse(await runCli([
+    'compile', JSON.stringify(exampleManifest),
+    '--target', 'openclaw-scheduler', '--explain'
+  ]));
+  assert.equal(output.ok, true);
+  assert.ok(Array.isArray(output.output.explain));
+  assert.ok(output.output.explain[0].model_policy);
+  assert.ok(output.output.explain[0].intent);
 });
