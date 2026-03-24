@@ -270,11 +270,102 @@ function validateBudgets(errors, path, value) {
   checkInteger(errors, `${path}.max_queued_dispatches`, value.max_queued_dispatches, 1);
 }
 
+function validateSubject(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkEnum(errors, `${path}.kind`, value.kind, ['agent', 'service', 'workload', 'user', 'composite', 'delegated-agent', 'unknown']);
+  checkString(errors, `${path}.principal`, value.principal, { required: false });
+  checkString(errors, `${path}.display_name`, value.display_name, { required: false });
+  checkToken(errors, `${path}.run_as`, value.run_as, { required: false });
+  checkString(errors, `${path}.issuer`, value.issuer, { required: false });
+  checkEnum(errors, `${path}.delegation_mode`, value.delegation_mode, ['none', 'on-behalf-of', 'impersonation']);
+}
+
+function validateDelegationPolicy(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkInteger(errors, `${path}.max_depth`, value.max_depth, 1);
+  if (value.allowed_delegators != null && !Array.isArray(value.allowed_delegators)) {
+    addError(errors, `${path}.allowed_delegators`, 'must be an array');
+  }
+  checkBoolean(errors, `${path}.require_grant_per_hop`, value.require_grant_per_hop);
+}
+
+function validateAuth(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkEnum(errors, `${path}.mode`, value.mode, ['none', 'service', 'delegated', 'on-behalf-of', 'impersonation', 'exchange']);
+  if (value.scopes != null && !Array.isArray(value.scopes)) {
+    addError(errors, `${path}.scopes`, 'must be an array');
+  }
+  checkString(errors, `${path}.audience`, value.audience, { required: false });
+  checkString(errors, `${path}.resource`, value.resource, { required: false });
+  checkEnum(errors, `${path}.cache`, value.cache, ['none', 'memory', 'state']);
+  checkEnum(errors, `${path}.refresh`, value.refresh, ['never', 'manual', 'auto']);
+  checkBoolean(errors, `${path}.required`, value.required);
+  if (checkOptionalObject(errors, `${path}.delegation_policy`, value.delegation_policy)) {
+    validateDelegationPolicy(errors, `${path}.delegation_policy`, value.delegation_policy);
+  }
+}
+
+function validateTrust(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkEnum(errors, `${path}.level`, value.level, ['untrusted', 'restricted', 'supervised', 'autonomous']);
+  if (checkOptionalObject(errors, `${path}.constraints`, value.constraints)) {
+    checkEnum(errors, `${path}.constraints.escalation`, value.constraints.escalation, ['fail', 'human-approval', 'log-and-proceed']);
+    checkEnum(errors, `${path}.constraints.max_autonomy`, value.constraints.max_autonomy, ['untrusted', 'restricted', 'supervised', 'autonomous']);
+    checkString(errors, `${path}.constraints.escalation_timeout`, value.constraints.escalation_timeout, { required: false });
+    checkBoolean(errors, `${path}.constraints.require_justification`, value.constraints.require_justification);
+  }
+}
+
+function validatePresentation(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkEnum(errors, `${path}.handoff`, value.handoff, ['none', 'downscope', 'transaction-token']);
+  checkEnum(errors, `${path}.cleanup`, value.cleanup, ['always', 'on-success', 'on-failure', 'never']);
+  checkBoolean(errors, `${path}.default_redaction`, value.default_redaction);
+  if (value.bindings != null) {
+    if (!Array.isArray(value.bindings)) {
+      addError(errors, `${path}.bindings`, 'must be an array');
+    } else {
+      for (const [i, binding] of value.bindings.entries()) {
+        const bp = `${path}.bindings[${i}]`;
+        if (!isObject(binding)) { addError(errors, bp, 'must be an object'); continue; }
+        checkString(errors, `${bp}.source`, binding.source);
+        if (checkOptionalObject(errors, `${bp}.target`, binding.target)) {
+          checkEnum(errors, `${bp}.target.kind`, binding.target.kind, ['env', 'file', 'stdin', 'none']);
+          checkString(errors, `${bp}.target.name`, binding.target.name, { required: false });
+        }
+        checkBoolean(errors, `${bp}.required`, binding.required);
+        checkBoolean(errors, `${bp}.redact`, binding.redact);
+        checkEnum(errors, `${bp}.format`, binding.format, ['raw', 'json', 'base64']);
+      }
+    }
+  }
+}
+
 function validateIdentity(errors, path, value) {
   if (!isObject(value)) {
     addError(errors, path, 'must be an object');
     return;
   }
+
+  // v0.2 identity (has ref or subject)
+  if (value.ref != null || value.subject != null || value.auth != null || value.trust != null || value.presentation != null) {
+    checkString(errors, `${path}.ref`, value.ref, { required: false });
+    if (checkOptionalObject(errors, `${path}.subject`, value.subject)) {
+      validateSubject(errors, `${path}.subject`, value.subject);
+    }
+    if (checkOptionalObject(errors, `${path}.auth`, value.auth)) {
+      validateAuth(errors, `${path}.auth`, value.auth);
+    }
+    if (checkOptionalObject(errors, `${path}.trust`, value.trust)) {
+      validateTrust(errors, `${path}.trust`, value.trust);
+    }
+    if (checkOptionalObject(errors, `${path}.presentation`, value.presentation)) {
+      validatePresentation(errors, `${path}.presentation`, value.presentation);
+    }
+    return;
+  }
+
+  // v0.1 identity (flat fields)
   checkToken(errors, `${path}.principal`, value.principal, { required: false });
   checkToken(errors, `${path}.run_as`, value.run_as, { required: false });
   checkString(errors, `${path}.attestation`, value.attestation, { required: false });
@@ -427,6 +518,105 @@ export function validateManifest(manifest) {
 
   checkUnknownKeys(warnings, '$', manifest, KNOWN_MANIFEST_KEYS);
 
+  // Validate v0.2 profile arrays
+  if (manifest.identity_profiles != null) {
+    if (!Array.isArray(manifest.identity_profiles)) {
+      addError(errors, '$.identity_profiles', 'must be an array');
+    } else {
+      const profileIds = new Set();
+      for (const [i, profile] of manifest.identity_profiles.entries()) {
+        const pp = `$.identity_profiles[${i}]`;
+        if (!isObject(profile)) { addError(errors, pp, 'must be an object'); continue; }
+        checkIdentifier(errors, `${pp}.id`, profile.id);
+        checkString(errors, `${pp}.provider`, profile.provider);
+        if (profile.id) {
+          if (profileIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
+          profileIds.add(profile.id);
+        }
+        if (checkOptionalObject(errors, `${pp}.subject`, profile.subject)) {
+          validateSubject(errors, `${pp}.subject`, profile.subject);
+        }
+        if (checkOptionalObject(errors, `${pp}.auth`, profile.auth)) {
+          validateAuth(errors, `${pp}.auth`, profile.auth);
+        }
+        if (checkOptionalObject(errors, `${pp}.trust`, profile.trust)) {
+          validateTrust(errors, `${pp}.trust`, profile.trust);
+        }
+        if (checkOptionalObject(errors, `${pp}.presentation`, profile.presentation)) {
+          validatePresentation(errors, `${pp}.presentation`, profile.presentation);
+        }
+      }
+    }
+  }
+
+  if (manifest.authorization_proof_profiles != null) {
+    if (!Array.isArray(manifest.authorization_proof_profiles)) {
+      addError(errors, '$.authorization_proof_profiles', 'must be an array');
+    } else {
+      const proofIds = new Set();
+      for (const [i, profile] of manifest.authorization_proof_profiles.entries()) {
+        const pp = `$.authorization_proof_profiles[${i}]`;
+        if (!isObject(profile)) { addError(errors, pp, 'must be an object'); continue; }
+        checkIdentifier(errors, `${pp}.id`, profile.id);
+        checkEnum(errors, `${pp}.method`, profile.method, ['jwt', 'detached-signature', 'certificate', 'none']);
+        if (profile.id) {
+          if (proofIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
+          proofIds.add(profile.id);
+        }
+        checkString(errors, `${pp}.issuer`, profile.issuer, { required: false });
+        if (checkOptionalObject(errors, `${pp}.verify`, profile.verify)) {
+          checkBoolean(errors, `${pp}.verify.required`, profile.verify.required);
+        }
+      }
+    }
+  }
+
+  if (manifest.authorization_profiles != null) {
+    if (!Array.isArray(manifest.authorization_profiles)) {
+      addError(errors, '$.authorization_profiles', 'must be an array');
+    } else {
+      const authzIds = new Set();
+      for (const [i, profile] of manifest.authorization_profiles.entries()) {
+        const pp = `$.authorization_profiles[${i}]`;
+        if (!isObject(profile)) { addError(errors, pp, 'must be an object'); continue; }
+        checkIdentifier(errors, `${pp}.id`, profile.id);
+        checkString(errors, `${pp}.provider`, profile.provider);
+        if (profile.id) {
+          if (authzIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
+          authzIds.add(profile.id);
+        }
+        checkEnum(errors, `${pp}.on_error`, profile.on_error, ['deny', 'warn']);
+      }
+    }
+  }
+
+  if (manifest.evidence_profiles != null) {
+    if (!Array.isArray(manifest.evidence_profiles)) {
+      addError(errors, '$.evidence_profiles', 'must be an array');
+    } else {
+      const evidIds = new Set();
+      for (const [i, profile] of manifest.evidence_profiles.entries()) {
+        const pp = `$.evidence_profiles[${i}]`;
+        if (!isObject(profile)) { addError(errors, pp, 'must be an object'); continue; }
+        checkIdentifier(errors, `${pp}.id`, profile.id);
+        checkString(errors, `${pp}.provider`, profile.provider);
+        if (profile.id) {
+          if (evidIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
+          evidIds.add(profile.id);
+        }
+        if (checkOptionalObject(errors, `${pp}.payload`, profile.payload)) {
+          if (profile.payload.bind != null && !Array.isArray(profile.payload.bind)) {
+            addError(errors, `${pp}.payload.bind`, 'must be an array');
+          }
+          checkEnum(errors, `${pp}.payload.format`, profile.payload.format, ['canonical-json', 'json']);
+        }
+        if (checkOptionalObject(errors, `${pp}.verify`, profile.verify)) {
+          checkBoolean(errors, `${pp}.verify.required`, profile.verify.required);
+        }
+      }
+    }
+  }
+
   if (!Array.isArray(manifest.workflows) || manifest.workflows.length === 0) {
     addError(errors, '$.workflows', 'must be a non-empty array');
   } else {
@@ -559,6 +749,37 @@ export function validateManifest(manifest) {
             message: 'approval_required is most useful on triggered tasks; root scheduled tasks usually should not block on approval'
           });
         }
+      }
+    }
+  }
+
+  // Cross-reference validation: verify ref targets exist in profile arrays
+  const identityProfileIds = new Set((manifest.identity_profiles || []).filter(p => p.id).map(p => p.id));
+  const proofProfileIds = new Set((manifest.authorization_proof_profiles || []).filter(p => p.id).map(p => p.id));
+  const authzProfileIds = new Set((manifest.authorization_profiles || []).filter(p => p.id).map(p => p.id));
+  const evidProfileIds = new Set((manifest.evidence_profiles || []).filter(p => p.id).map(p => p.id));
+
+  function checkRef(refPath, ref, profileSet, profileType) {
+    if (ref != null && typeof ref === 'string' && !profileSet.has(ref)) {
+      addError(errors, refPath, `references unknown ${profileType} profile "${ref}"`);
+    }
+  }
+
+  if (Array.isArray(manifest.workflows)) {
+    for (const [wi, wf] of manifest.workflows.entries()) {
+      if (!isObject(wf)) continue;
+      const wp = `$.workflows[${wi}]`;
+      if (wf.identity?.ref) checkRef(`${wp}.identity.ref`, wf.identity.ref, identityProfileIds, 'identity');
+      if (wf.authorization_proof?.ref) checkRef(`${wp}.authorization_proof.ref`, wf.authorization_proof.ref, proofProfileIds, 'authorization_proof');
+      if (wf.authorization?.ref) checkRef(`${wp}.authorization.ref`, wf.authorization.ref, authzProfileIds, 'authorization');
+      if (wf.evidence?.ref) checkRef(`${wp}.evidence.ref`, wf.evidence.ref, evidProfileIds, 'evidence');
+      for (const [ti, task] of (wf.tasks || []).entries()) {
+        if (!isObject(task)) continue;
+        const tp = `${wp}.tasks[${ti}]`;
+        if (task.identity?.ref) checkRef(`${tp}.identity.ref`, task.identity.ref, identityProfileIds, 'identity');
+        if (task.authorization_proof?.ref) checkRef(`${tp}.authorization_proof.ref`, task.authorization_proof.ref, proofProfileIds, 'authorization_proof');
+        if (task.authorization?.ref) checkRef(`${tp}.authorization.ref`, task.authorization.ref, authzProfileIds, 'authorization');
+        if (task.evidence?.ref) checkRef(`${tp}.evidence.ref`, task.evidence.ref, evidProfileIds, 'evidence');
       }
     }
   }

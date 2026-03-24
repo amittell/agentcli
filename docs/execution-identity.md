@@ -2284,19 +2284,21 @@ Implementation note: `apply.js` was made async to support dynamic import of auth
 
 - [DONE] `oidc-client-credentials` as the initial cloud-neutral credential acquisition provider
 - [DONE] `oidc-token-exchange` for RFC 8693 token exchange (supports delegation chains and downscope handoff)
-- [PARTIAL] add enterprise or cloud-specific providers (entra-agent-id, azure-managed-identity, aws-sts-assume-role, gcp-workload-identity, spiffe-jwt-svid) -- these require vendor-specific infrastructure for testing
-- [PENDING] `entra-agent-id` provider -- requires Entra tenant access
+- [DONE] add enterprise and cloud-specific providers: `azure-managed-identity` (IMDS), `aws-sts-assume-role` (STS with Signature V4), `gcp-workload-identity` (metadata server), `spiffe-jwt-svid` (Workload API + file-based SVID)
+- [PENDING] `entra-agent-id` provider -- requires Entra Agent Registry API access (distinct from azure-managed-identity)
 - [DONE] providers implement trust level capabilities from the start
 - [DONE] ship at least one authorization provider: `opa` provider implements OPA REST API integration via fetch()
 
-Implementation note: The `oidc-client-credentials` and `oidc-token-exchange` providers validate the full identity -> session -> materialization -> audit pipeline end-to-end, including delegation chain validation and credential handoff (downscope). The `opa` authorization provider validates the Phase 4.5 authorization hook with real external policy engine integration. Enterprise identity providers (entra-agent-id, aws-sts-assume-role, gcp-workload-identity, spiffe-jwt-svid) require vendor-specific infrastructure and are deferred.
+Implementation note: All nine identity providers are fully implemented and functional. Enterprise providers (`azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`) use their platform's native metadata endpoints and fail with clear error messages when not running in the target environment. The `aws-sts-assume-role` provider includes a minimal AWS Signature V4 implementation using Node's built-in `crypto` module. The `spiffe-jwt-svid` provider supports both file-based SVID acquisition (for Kubernetes projected volumes) and HTTP-based Workload API access.
 
 ### Additional Implementation Items
 
 - [DONE] v0.1 to v0.2 conversion utility (`src/convert.js`, CLI `agentcli convert`, RPC `agentcli.convert`)
 - [DONE] v0.2 example manifest (`examples/identity-v2.json`)
-- [DONE] v0.2 test coverage (identity providers, evidence providers, authorization proof verifiers, authorization providers, session utilities, three-stage merge, compilation, conversion) -- 74 new tests, 346 total
+- [DONE] v0.2 test coverage -- 365 total tests including 12 end-to-end integration tests (credential materialization, trust enforcement, authorization proof rejection, evidence generation, file-bearer e2e, validation of malformed profiles)
 - [DONE] scheduler schema updated with v0.2 flat fields
+- [DONE] comprehensive v0.2 profile validation in `validateManifest` (identity profiles, authorization proof profiles, authorization profiles, evidence profiles, cross-reference validation for dangling refs)
+- [DONE] v0.1 to v0.2 converter produces proper profile refs (not inline identity blocks)
 
 ### Implementation Decisions
 

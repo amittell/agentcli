@@ -5186,11 +5186,17 @@ test('convertManifestV1toV2 converts v0.1 to v0.2', async () => {
   const v2 = convertManifestV1toV2(v1);
   assert.strictEqual(v2.version, '0.2');
   assert.ok(Array.isArray(v2.identity_profiles));
-  assert.ok(Array.isArray(v2.evidence_profiles));
+  assert.ok(v2.identity_profiles.length > 0, 'Should create identity profiles from v0.1 identities');
+  // delegation_mode is now inside the profile, not inline on the task
+  for (const profile of v2.identity_profiles) {
+    assert.strictEqual(profile.subject.delegation_mode, 'none');
+  }
+  // Tasks with identity should use ref, not inline subject/trust/presentation
   for (const wf of v2.workflows) {
     for (const task of wf.tasks) {
-      if (task.identity && task.identity.subject) {
-        assert.strictEqual(task.identity.subject.delegation_mode, 'none');
+      if (task.identity) {
+        assert.ok(task.identity.ref, 'Task identity should use a profile ref');
+        assert.strictEqual(task.identity.subject, undefined, 'Task identity should not have inline subject');
       }
     }
   }
@@ -5207,8 +5213,11 @@ test('convertManifestV1toV2 preserves workflow identity', async () => {
   const v2 = convertManifestV1toV2(v1);
   const wf = v2.workflows[0];
   assert.ok(wf.identity);
-  assert.ok(wf.identity.subject);
-  assert.strictEqual(wf.identity.subject.principal, 'deploy-bot@infra.example.com');
+  assert.ok(wf.identity.ref, 'Workflow identity should use a profile ref');
+  // The principal should now live inside the referenced identity profile
+  const profile = v2.identity_profiles.find(p => p.id === wf.identity.ref);
+  assert.ok(profile, 'Referenced identity profile should exist');
+  assert.strictEqual(profile.subject.principal, 'deploy-bot@infra.example.com');
 });
 
 test('convertManifestV1toV2 creates authorization_proof_profile for oidc attestation', async () => {
@@ -5459,4 +5468,403 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.strictEqual(failureSpec.authorization_proof.ref, 'jwt-proof');
   assert.ok(failureSpec.authorization_proof_verification);
   assert.strictEqual(failureSpec.authorization_proof_verification.verified, true);
+});
+
+// ---------------------------------------------------------------------------
+// v0.2 Execution Identity Lifecycle -- End-to-End Integration Tests
+// ---------------------------------------------------------------------------
+
+test('v0.2 exec with env-bearer materializes credentials into spawned process env', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'token-agent',
+      provider: 'env-bearer',
+      subject: { kind: 'service', principal: 'agent://test/e2e' },
+      auth: {
+        mode: 'service',
+        required: true,
+        provider_config: { token_env: 'E2E_TEST_TOKEN' }
+      },
+      trust: { level: 'supervised' },
+      presentation: {
+        bindings: [{
+          source: 'credentials.access_token.value',
+          target: { kind: 'env', name: 'INJECTED_TOKEN' },
+          required: true,
+          redact: true
+        }],
+        cleanup: 'always'
+      }
+    }],
+    workflows: [{
+      id: 'e2e-wf',
+      name: 'E2E Workflow',
+      tasks: [{
+        id: 'check-env',
+        name: 'Check Env',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write(process.env.INJECTED_TOKEN || "MISSING")']
+        },
+        target: { session_target: 'shell' },
+        identity: { ref: 'token-agent' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'check-env',
+    env: { ...process.env, E2E_TEST_TOKEN: 'secret-e2e-value-12345' },
+    signer: 'none'
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.result.stdout, 'secret-e2e-value-12345');
+  assert.ok(result.declared_identity);
+  assert.strictEqual(result.declared_identity.provider, 'env-bearer');
+  assert.ok(result.resolved_identity);
+  // Verify the token is redacted in the resolved identity
+  assert.strictEqual(result.resolved_identity.credentials.access_token.value, '[REDACTED]');
+});
+
+test('v0.2 exec with strict trust enforcement rejects insufficient trust', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'low-trust',
+      provider: 'none',
+      subject: { kind: 'agent', principal: 'agent://test/low-trust' },
+      trust: { level: 'restricted' }
+    }],
+    workflows: [{
+      id: 'trust-wf',
+      name: 'Trust Workflow',
+      tasks: [{
+        id: 'blocked-task',
+        name: 'Blocked Task',
+        shell: { program: 'echo', args: ['should-not-run'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'low-trust' },
+        contract: {
+          required_trust_level: 'autonomous',
+          trust_enforcement: 'strict'
+        },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 'blocked-task', signer: 'none' }),
+    (err) => {
+      assert.strictEqual(err.code, 'trust_level_insufficient');
+      return true;
+    }
+  );
+});
+
+test('v0.2 exec with advisory trust enforcement allows execution with warning', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'low-trust',
+      provider: 'none',
+      subject: { kind: 'agent', principal: 'agent://test/low-trust' },
+      trust: { level: 'restricted' }
+    }],
+    workflows: [{
+      id: 'advisory-wf',
+      name: 'Advisory Workflow',
+      tasks: [{
+        id: 'warned-task',
+        name: 'Warned Task',
+        shell: { program: 'echo', args: ['proceeds-with-warning'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'low-trust' },
+        contract: {
+          required_trust_level: 'autonomous',
+          trust_enforcement: 'advisory'
+        },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, { taskId: 'warned-task', signer: 'none' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.warnings.some(w => w.includes('advisory')));
+});
+
+test('v0.2 exec rejects JWT authorization proof with wrong claims', async () => {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ sub: 'wrong-principal', aud: 'agentcli', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url');
+  const badJwt = `${header}.${payload}.`;
+
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'agent', provider: 'none', subject: { kind: 'agent' } }],
+    authorization_proof_profiles: [{
+      id: 'jwt-check',
+      method: 'jwt',
+      proof: { value_from: { env: 'TEST_JWT' } },
+      claims: { subject: 'expected-principal' },
+      verify: { required: true }
+    }],
+    workflows: [{
+      id: 'proof-wf',
+      name: 'Proof Workflow',
+      tasks: [{
+        id: 'proof-task',
+        name: 'Proof Task',
+        shell: { program: 'echo', args: ['should-not-run'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'agent' },
+        authorization_proof: { ref: 'jwt-check' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 'proof-task', env: { ...process.env, TEST_JWT: badJwt }, signer: 'none' }),
+    (err) => {
+      assert.strictEqual(err.code, 'authorization_proof_failed');
+      return true;
+    }
+  );
+});
+
+test('v0.2 exec with evidence profile produces evidence metadata', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'agent', provider: 'none', subject: { kind: 'agent', principal: 'agent://test/evidence' } }],
+    evidence_profiles: [{
+      id: 'none-ev',
+      provider: 'none',
+      payload: { bind: ['execution_id', 'command', 'result'], format: 'canonical-json' },
+      verify: { required: false }
+    }],
+    workflows: [{
+      id: 'ev-wf',
+      name: 'Evidence Workflow',
+      tasks: [{
+        id: 'ev-task',
+        name: 'Evidence Task',
+        shell: { program: 'echo', args: ['evidence-test'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'agent' },
+        evidence: { ref: 'none-ev' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, { taskId: 'ev-task', signer: 'none' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.evidence);
+  assert.strictEqual(result.evidence.provider, 'none');
+  assert.strictEqual(result.evidence.attested, false);
+});
+
+test('v0.2 exec with --require-evidence throws when attestation fails', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'agent', provider: 'none', subject: { kind: 'agent' } }],
+    evidence_profiles: [{
+      id: 'none-ev',
+      provider: 'none',
+      payload: { bind: ['execution_id'] },
+      verify: { required: false }
+    }],
+    workflows: [{
+      id: 'req-ev-wf',
+      name: 'Require Evidence Workflow',
+      tasks: [{
+        id: 'req-ev-task',
+        name: 'Require Evidence Task',
+        shell: { program: 'echo', args: ['test'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'agent' },
+        evidence: { ref: 'none-ev' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 'req-ev-task', requireEvidence: true, signer: 'none' }),
+    (err) => {
+      assert.strictEqual(err.code, 'evidence_failed');
+      return true;
+    }
+  );
+});
+
+test('v0.2 exec with --require-authorization throws when no authorization block', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'agent', provider: 'none', subject: { kind: 'agent' } }],
+    workflows: [{
+      id: 'req-authz-wf',
+      name: 'Require Authz Workflow',
+      tasks: [{
+        id: 'req-authz-task',
+        name: 'Require Authz Task',
+        shell: { program: 'echo', args: ['test'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'agent' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 'req-authz-task', requireAuthorization: true, signer: 'none' }),
+    (err) => {
+      assert.strictEqual(err.code, 'invalid_argument');
+      return true;
+    }
+  );
+});
+
+test('v0.2 exec writes audit record with v0.2 fields', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'audit-agent',
+      provider: 'none',
+      subject: { kind: 'agent', principal: 'agent://test/audit' },
+      trust: { level: 'supervised' }
+    }],
+    workflows: [{
+      id: 'audit-wf',
+      name: 'Audit Workflow',
+      tasks: [{
+        id: 'audit-task',
+        name: 'Audit Task',
+        shell: { program: 'echo', args: ['audit-test'] },
+        target: { session_target: 'shell' },
+        identity: { ref: 'audit-agent' },
+        contract: { audit: 'always' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, { taskId: 'audit-task', signer: 'none' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.audited, true);
+  assert.ok(result.declared_identity);
+  assert.ok(result.trust);
+  assert.ok(result.hashes);
+  assert.ok(result.handoff);
+});
+
+test('validation rejects identity profile with invalid subject.kind', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'bad-profile',
+      provider: 'none',
+      subject: { kind: 'invalid-kind' }
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{ id: 't', name: 'T', target: { session_target: 'shell' }, shell: { program: 'echo' }, schedule: { cron: '* * * * *' } }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('subject.kind')));
+});
+
+test('validation rejects identity profile missing required id', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ provider: 'none' }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{ id: 't', name: 'T', target: { session_target: 'shell' }, shell: { program: 'echo' }, schedule: { cron: '* * * * *' } }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('identity_profiles[0].id')));
+});
+
+test('validation rejects dangling identity ref', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'real-profile', provider: 'none' }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' },
+        identity: { ref: 'nonexistent-profile' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.message.includes('nonexistent-profile')));
+});
+
+test('v0.2 exec with file-bearer reads token from file', async () => {
+  const tokenDir = join(tmpdir(), `agentcli-e2e-${Date.now()}`);
+  mkdtempSync(join(tmpdir(), 'agentcli-e2e-'));
+  const { mkdirSync: mkdirSyncFs } = await import('node:fs');
+  mkdirSyncFs(tokenDir, { recursive: true });
+  const tokenPath = join(tokenDir, 'token.txt');
+  writeFileSync(tokenPath, 'file-bearer-secret-42', { mode: 0o600 });
+
+  try {
+    const manifest = {
+      version: '0.2',
+      identity_profiles: [{
+        id: 'file-agent',
+        provider: 'file-bearer',
+        subject: { kind: 'service', principal: 'agent://test/file-bearer' },
+        auth: {
+          mode: 'service',
+          required: true,
+          provider_config: { token_file: tokenPath }
+        },
+        trust: { level: 'supervised' },
+        presentation: {
+          bindings: [{
+            source: 'credentials.access_token.value',
+            target: { kind: 'env', name: 'FILE_TOKEN' },
+            required: true
+          }],
+          cleanup: 'always'
+        }
+      }],
+      workflows: [{
+        id: 'fb-wf',
+        name: 'File Bearer Workflow',
+        tasks: [{
+          id: 'fb-task',
+          name: 'File Bearer Task',
+          shell: {
+            program: process.execPath,
+            args: ['-e', 'process.stdout.write(process.env.FILE_TOKEN || "MISSING")']
+          },
+          target: { session_target: 'shell' },
+          identity: { ref: 'file-agent' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      }]
+    };
+
+    const result = await executeTask(manifest, { taskId: 'fb-task', signer: 'none' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.result.stdout, 'file-bearer-secret-42');
+  } finally {
+    try { rmSync(tokenDir, { recursive: true }); } catch {}
+  }
 });

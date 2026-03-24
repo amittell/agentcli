@@ -30,6 +30,10 @@ import './identity/env-bearer.js';
 import './identity/file-bearer.js';
 import './identity/oidc-client-credentials.js';
 import './identity/oidc-token-exchange.js';
+import './identity/azure-managed-identity.js';
+import './identity/aws-sts-assume-role.js';
+import './identity/gcp-workload-identity.js';
+import './identity/spiffe-jwt-svid.js';
 import { compareTrustLevels, redactSession, buildCredentialSummary } from './identity/session.js';
 
 // v0.2 evidence providers

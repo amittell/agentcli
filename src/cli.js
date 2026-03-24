@@ -550,6 +550,10 @@ export async function runCli(
         await import('./identity/file-bearer.js');
         await import('./identity/oidc-client-credentials.js');
         await import('./identity/oidc-token-exchange.js');
+        await import('./identity/azure-managed-identity.js');
+        await import('./identity/aws-sts-assume-role.js');
+        await import('./identity/gcp-workload-identity.js');
+        await import('./identity/spiffe-jwt-svid.js');
         return formatOutput({ ok: true, providers: listProviders().map(name => ({ name, capabilities: listProviderCapabilities().get(name) || null })) }, { mode: outputMode, pretty });
       }
       if (subcommand === 'schema') {
@@ -561,6 +565,10 @@ export async function runCli(
         await import('./identity/file-bearer.js');
         await import('./identity/oidc-client-credentials.js');
         await import('./identity/oidc-token-exchange.js');
+        await import('./identity/azure-managed-identity.js');
+        await import('./identity/aws-sts-assume-role.js');
+        await import('./identity/gcp-workload-identity.js');
+        await import('./identity/spiffe-jwt-svid.js');
         const provider = getProvider(providerName);
         if (!provider) return formatOutput({ ok: false, error: `Unknown identity provider: ${providerName}` }, { mode: outputMode, pretty });
         return formatOutput({ ok: true, provider: providerName, capabilities: provider.capabilities }, { mode: outputMode, pretty });
