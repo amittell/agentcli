@@ -2,7 +2,10 @@
 
 ## Status
 
-This document defines the `agentcli` manifest draft standard version `0.1`.
+This document defines the `agentcli` manifest draft standard version `0.2`.
+
+Version `0.2` is backward-compatible with `0.1`. All v0.1 manifests remain valid.
+New features introduced in v0.2 are noted inline.
 
 Normative language in this document uses:
 
@@ -27,9 +30,15 @@ A manifest MUST be a JSON object with:
 - `version`
 - `workflows`
 
-`version` MUST equal `0.1`.
+A manifest MAY also contain:
+
+- `identity_profiles` (v0.2)
+
+`version` MUST equal `0.1` or `0.2`.
 
 `workflows` MUST be a non-empty array.
+
+`identity_profiles`, if present, MUST be an array (see Identity Profiles below).
 
 ## Workflow Object
 
@@ -44,6 +53,9 @@ Each workflow MAY also define:
 - `model_policy`
 - `identity`
 - `contract`
+- `authorization_proof` (v0.2)
+- `authorization` (v0.2)
+- `evidence` (v0.2)
 
 Rules:
 
@@ -64,6 +76,13 @@ Rules:
 - `id` MUST be unique within its workflow
 - `id` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$`
 - a task MUST define exactly one of `schedule` or `trigger`
+
+Each task MAY also define:
+
+- `identity` (v0.2, see Identity below)
+- `authorization_proof` (v0.2, see Authorization Proof Profiles below)
+- `authorization` (v0.2, see Authorization Profiles below)
+- `evidence` (v0.2, see Evidence Profiles below)
 
 ### Enabled State
 
@@ -392,6 +411,189 @@ Workflow-level `identity` acts as a default for tasks in that workflow.
 Task-level `identity` overrides workflow-level fields key by key.
 
 This block establishes the chain of trust: agents executing CLI tasks carry the declared principal's authorization, and backends MAY enforce that the `run_as` identity is permitted for the given principal.
+
+### v0.2 Identity Fields
+
+In v0.2, `identity` MAY additionally define:
+
+- `ref` -- a reference to a named identity profile (see Identity Profiles below)
+- `subject` -- an object describing the subject kind and attributes
+- `auth` -- an object describing the authentication mode
+- `trust` -- an object describing the trust level
+- `presentation` -- an object describing credential presentation bindings
+
+When `ref` is present, the identity is resolved by looking up the named profile from the top-level `identity_profiles` array. Inline fields (`subject`, `auth`, `trust`, `presentation`) override profile-level values key by key.
+
+`identity.subject.kind`, if present, MUST be one of:
+
+- `agent`
+- `service`
+- `workload`
+- `user`
+- `composite`
+- `delegated-agent`
+- `unknown`
+
+`identity.auth.mode`, if present, MUST be one of:
+
+- `none`
+- `service`
+- `delegated`
+- `on-behalf-of`
+- `impersonation`
+- `exchange`
+
+`identity.trust.level`, if present, MUST be one of:
+
+- `untrusted`
+- `restricted`
+- `supervised`
+- `autonomous`
+
+`identity.presentation`, if present, MUST be an object. It MAY define:
+
+- `bindings` -- an array of objects describing how credentials are presented to tools (e.g., environment variable injection, header injection)
+- `handoff` -- how identity context is transferred across task boundaries; if present, MUST be one of `none`, `downscope`, `transaction-token`
+- `cleanup` -- when credential cleanup runs; if present, MUST be one of `always`, `on-success`, `on-failure`, `never`
+- `default_redaction` -- if present, MUST be a boolean indicating whether credential values are redacted by default in audit output
+
+Workflow-level v0.2 identity fields act as defaults for tasks in that workflow. Task-level fields override workflow-level fields key by key.
+
+## Identity Profiles
+
+*v0.2*
+
+`identity_profiles`, if present, MUST be a top-level array of identity profile objects.
+
+Each identity profile MUST contain:
+
+- `id` -- a unique identifier within the manifest
+
+Each identity profile MAY contain:
+
+- `provider` -- the identity provider name (e.g., `ssh`, `oidc-client-credentials`, `spiffe`)
+- `subject` -- an object with `kind` and provider-specific attributes
+- `auth` -- an object with `mode` and provider-specific configuration
+- `trust` -- an object with `level`
+- `presentation` -- an object with `bindings`, `handoff`, `cleanup`, and `default_redaction`
+
+`subject.kind` MUST be one of: `agent`, `service`, `workload`, `user`, `composite`, `delegated-agent`, `unknown`.
+
+`auth.mode` MUST be one of: `none`, `service`, `delegated`, `on-behalf-of`, `impersonation`, `exchange`.
+
+`trust.level` MUST be one of: `untrusted`, `restricted`, `supervised`, `autonomous`.
+
+Identity profiles are referenced from workflow-level or task-level `identity.ref` fields. Profiles provide reusable identity declarations that avoid repetition across workflows and tasks.
+
+See [execution-identity.md](execution-identity.md) for full architectural details.
+
+## Authorization Proof Profiles
+
+*v0.2*
+
+`authorization_proof`, if present on a workflow or task, MUST be an object.
+
+It MAY define:
+
+- `ref` -- a reference to a named authorization proof profile
+- `claims` -- an object describing expected claims
+- `verify` -- an object describing verification requirements
+
+Authorization proof describes the method by which a task proves it is authorized to act. The proof is produced at manifest time or execution time and verified before execution proceeds.
+
+### Methods
+
+Authorization proof supports the following methods:
+
+- `jwt` -- a JSON Web Token carrying signed claims
+- `detached-signature` -- a cryptographic signature over the manifest or payload (e.g., SSH signature, PKCS#7)
+- `certificate` -- an X.509 or SPIFFE certificate presented as proof of identity
+- `none` -- no authorization proof is required
+
+`authorization_proof.verify.method`, if present, MUST be one of the above values.
+
+Implementations MUST verify the proof before executing a task when `verify` is present and `method` is not `none`. Verification failure MUST prevent execution.
+
+See [execution-identity.md](execution-identity.md) for full architectural details.
+
+## Authorization Profiles
+
+*v0.2*
+
+`authorization`, if present on a workflow or task, MUST be an object.
+
+It MAY define:
+
+- `ref` -- a reference to a named authorization provider
+- `provider_config` -- provider-specific configuration (e.g., OPA endpoint, Cedar policy store)
+- `on_error` -- behavior when the authorization provider is unreachable; MUST be one of `deny`, `warn`
+- `request` -- an object describing the authorization request shape
+- `decision` -- an object describing the normalized decision output
+
+Authorization profiles integrate with external policy engines (such as OPA, Cedar, or Topaz) to evaluate whether a resolved identity is permitted to execute a given task.
+
+Implementations MUST normalize the provider response into a decision object containing at minimum:
+
+- `allowed` -- boolean
+- `reason` -- human-readable explanation
+
+When `on_error` is omitted, implementations MUST default to `deny`.
+
+See [execution-identity.md](execution-identity.md) for full architectural details.
+
+## Evidence Profiles
+
+*v0.2*
+
+`evidence`, if present on a workflow or task, MUST be an object.
+
+It MAY define:
+
+- `ref` -- a reference to a named evidence provider
+- `payload` -- an object describing the evidence payload and its binding to the execution
+- `verify` -- an object describing verification requirements
+
+Evidence profiles describe how execution evidence is produced, bound to a specific execution, and made verifiable after the fact. Evidence is the execution-time counterpart to authorization proof.
+
+`evidence.payload`, if present, MUST be an object. It MAY define:
+
+- `binding` -- how the evidence is bound to the execution context (e.g., `execution_id`, `command_hash`)
+- `context` -- additional context included in the evidence record
+
+`evidence.verify`, if present, MUST be an object describing how the evidence can be independently verified.
+
+Implementations SHOULD produce evidence for every execution when `evidence` is declared. Evidence records MUST be included in the audit trail.
+
+See [execution-identity.md](execution-identity.md) for full architectural details.
+
+## Contract Extensions
+
+*v0.2*
+
+In addition to the v0.1 contract fields, `contract` MAY define:
+
+- `required_trust_level` -- the minimum trust level required for task execution; MUST be one of `untrusted`, `restricted`, `supervised`, `autonomous`
+- `trust_enforcement` -- how trust level mismatches are handled; MUST be one of `none`, `advisory`, `strict`
+
+When `required_trust_level` is present and `trust_enforcement` is `strict`, implementations MUST reject execution if the resolved identity's trust level is below the required level. The trust ordering from lowest to highest is: `untrusted` < `restricted` < `supervised` < `autonomous`.
+
+When `trust_enforcement` is `advisory`, implementations MUST emit a warning but SHOULD proceed with execution.
+
+When `trust_enforcement` is `none` (the default), the field is recorded for audit only and trust mismatches do not affect execution.
+
+## Resolution Semantics
+
+*v0.2*
+
+Identity, authorization proof, authorization, and evidence are resolved through a three-stage merge:
+
+1. **Profile resolution** -- if `ref` is present, the named profile is loaded from the top-level `identity_profiles` (or equivalent provider registry).
+2. **Workflow-level defaults** -- workflow-level declarations act as defaults.
+3. **Task-level overrides** -- task-level declarations override workflow-level fields key by key.
+
+At each stage, explicit fields take precedence over inherited fields. The `ref` field is resolved first, then inline fields override the resolved profile values.
+
+This merge order ensures that shared configuration is declared once at the profile or workflow level while individual tasks retain full control when needed.
 
 ## Contract
 

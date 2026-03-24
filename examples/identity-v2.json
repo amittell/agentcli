@@ -1,0 +1,131 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "local-agent",
+      "provider": "none",
+      "subject": {
+        "kind": "agent",
+        "principal": "agent://local/test-agent",
+        "display_name": "Test Agent",
+        "delegation_mode": "none"
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "env-token-agent",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://local/env-service",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "scopes": ["read"],
+        "required": false,
+        "provider_config": {
+          "token_env": "TEST_BEARER_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "API_TOKEN" },
+            "required": false,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "authorization_proof_profiles": [
+    {
+      "id": "no-proof",
+      "method": "none",
+      "verify": { "required": false }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "contract", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "identity-demo",
+      "name": "Identity Demo Workflow",
+      "identity": {
+        "ref": "local-agent"
+      },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "advisory"
+      },
+      "tasks": [
+        {
+          "id": "echo-identity",
+          "name": "Echo Identity",
+          "shell": {
+            "program": "echo",
+            "args": ["hello-v2"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "local-agent"
+          },
+          "evidence": {
+            "ref": "ssh-evidence"
+          },
+          "schedule": {
+            "cron": "0 * * * *"
+          }
+        },
+        {
+          "id": "env-token-task",
+          "name": "Env Token Task",
+          "shell": {
+            "program": "echo",
+            "args": ["token-test"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "env-token-agent"
+          },
+          "schedule": {
+            "cron": "0 * * * *"
+          }
+        }
+      ]
+    }
+  ]
+}

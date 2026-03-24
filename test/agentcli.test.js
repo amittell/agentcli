@@ -23,7 +23,7 @@ import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
 import { ensureAgentcliHome } from '../src/home.js';
-import { stableId } from '../src/compiler/shared.js';
+import { stableId, resolveIdentityV2 } from '../src/compiler/shared.js';
 import { applyFieldMask, parseFieldMask } from '../src/fields.js';
 import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
@@ -46,6 +46,14 @@ import {
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
+}
+
+function encodeBase64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function unsignedJwt(payload) {
+  return `${encodeBase64UrlJson({ alg: 'none', typ: 'JWT' })}.${encodeBase64UrlJson(payload)}.`;
 }
 
 const exampleManifest = readExample('hello-world.json');
@@ -592,7 +600,7 @@ test('load-by-name flow resolves manifests from AGENTCLI_HOME/manifests', async 
 });
 
 test('package entry exports the public API', () => {
-  assert.equal(MANIFEST_VERSION, '0.1');
+  assert.equal(MANIFEST_VERSION, '0.2');
   const compiled = compileStandaloneFromIndex(exampleManifest);
   assert.equal(compiled.target, 'standalone');
 });
@@ -601,6 +609,16 @@ test('cli schema returns json', async () => {
   const output = JSON.parse(await runCli(['schema', 'task']));
   assert.equal(output.ok, true);
   assert.equal(output.schema.type, 'object');
+});
+
+test('cli schema manifest reflects v0.2 identity surfaces', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  assert.equal(output.ok, true);
+  assert.equal(output.schema.fields.version.const, '0.2');
+  assert.ok(output.schema.fields.identity_profiles);
+  assert.ok(output.schema.fields.authorization_proof_profiles);
+  assert.ok(output.schema.fields.authorization_profiles);
+  assert.ok(output.schema.fields.evidence_profiles);
 });
 
 test('cli -h prints usage', async () => {
@@ -682,7 +700,7 @@ test('resolveSchedulerInvocation prefers npm prefix when present', () => {
   assert.deepEqual(invocation.prefixArgs, ['exec', '--prefix', '/tmp/scheduler-prefix', 'openclaw-scheduler', '--']);
 });
 
-test('applyManifestToScheduler plans and executes scheduler upserts', () => {
+test('applyManifestToScheduler plans and executes scheduler upserts', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const existing = [compiled.jobs[0]];
   const calls = [];
@@ -701,7 +719,7 @@ test('applyManifestToScheduler plans and executes scheduler upserts', () => {
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner });
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
   assert.equal(result.ok, true);
   assert.equal(result.job_count, 2);
   assert.deepEqual(result.actions.map(action => action.action), ['updated', 'created']);
@@ -712,7 +730,7 @@ test('applyManifestToScheduler plans and executes scheduler upserts', () => {
   assert.equal(calls[0].spec.enabled, true);
 });
 
-test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', () => {
+test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', async () => {
   const manifest = {
     version: '0.1',
     workflows: [
@@ -751,13 +769,13 @@ test('applyManifestToScheduler converts enabled flags to booleans for scheduler 
     }
   };
 
-  const result = applyManifestToScheduler(manifest, { runner });
+  const result = await applyManifestToScheduler(manifest, { runner });
   assert.equal(result.ok, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].enabled, false);
 });
 
-test('cli apply supports dry-run without invoking scheduler writes', () => {
+test('cli apply supports dry-run without invoking scheduler writes', async () => {
   const runner = {
     invocation: { label: 'dry-run-scheduler' },
     listJobs() {
@@ -771,14 +789,14 @@ test('cli apply supports dry-run without invoking scheduler writes', () => {
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { dryRun: true, runner });
+  const result = await applyManifestToScheduler(exampleManifest, { dryRun: true, runner });
   assert.equal(result.ok, true);
   assert.equal(result.dry_run, true);
   assert.equal(result.job_count, 2);
   assert.deepEqual(result.actions.map(action => action.action), ['created', 'created']);
 });
 
-test('applyManifestToScheduler adopt-by-name matches existing job by name and re-keys to stable id', () => {
+test('applyManifestToScheduler adopt-by-name matches existing job by name and re-keys to stable id', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const stableJob = compiled.jobs[0];
   // Simulate existing job with same name but a legacy UUID
@@ -798,7 +816,7 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
 
   assert.equal(result.ok, true);
   assert.equal(result.job_count, 2);
@@ -821,7 +839,7 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
   assert.ok(createCall, 'addJob should have been called for the unmatched job');
 });
 
-test('applyManifestToScheduler adopt-by-name creates when no name matches', () => {
+test('applyManifestToScheduler adopt-by-name creates when no name matches', async () => {
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
@@ -837,7 +855,7 @@ test('applyManifestToScheduler adopt-by-name creates when no name matches', () =
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.actions.map(a => a.action), ['created', 'created']);
@@ -845,7 +863,7 @@ test('applyManifestToScheduler adopt-by-name creates when no name matches', () =
   assert.ok(calls.every(c => c.action === 'create'));
 });
 
-test('applyManifestToScheduler adopt-by-id (default) still works correctly', () => {
+test('applyManifestToScheduler adopt-by-id (default) still works correctly', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   // Existing has first job matching by id
   const existing = [compiled.jobs[0]];
@@ -863,7 +881,7 @@ test('applyManifestToScheduler adopt-by-id (default) still works correctly', () 
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'id' });
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'id' });
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.actions.map(a => a.action), ['updated', 'created']);
@@ -872,7 +890,7 @@ test('applyManifestToScheduler adopt-by-id (default) still works correctly', () 
   assert.equal(calls[0].id, compiled.jobs[0].id);
 });
 
-test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler writes', () => {
+test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler writes', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const legacyId = 'legacy-uuid-dry-run-0000-0000-0000';
   const existing = [{ ...compiled.jobs[0], id: legacyId }];
@@ -883,7 +901,7 @@ test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler w
     updateJob() { throw new Error('dry-run should not update jobs'); }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name', dryRun: true });
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name', dryRun: true });
 
   assert.equal(result.ok, true);
   assert.equal(result.dry_run, true);
@@ -1958,7 +1976,7 @@ test('on_failure handler inherits enabled: false from parent task', () => {
   assert.equal(handler.enabled, 0, 'on_failure handler should inherit disabled state');
 });
 
-test('adopt-by-name falls back to id match when name does not match', () => {
+test('adopt-by-name falls back to id match when name does not match', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const existing = [{ ...compiled.jobs[0], name: 'Renamed Job' }];
   const calls = [];
@@ -1975,7 +1993,7 @@ test('adopt-by-name falls back to id match when name does not match', () => {
     }
   };
 
-  const result = applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
 
   assert.equal(result.ok, true);
   assert.equal(result.actions[0].action, 'updated', 'should fall back to id match when name does not match');
@@ -2857,9 +2875,12 @@ test('scheduler compilation emits identity and contract fields', () => {
   assert.equal(job.contract_audit, null);
 });
 
-test('on_failure handler propagates identity and contract via shorthand expansion', () => {
+test('on_failure handler propagates identity, contract, and v0.2 auth/evidence via shorthand expansion', () => {
   const manifest = {
-    version: '0.1',
+    version: '0.2',
+    authorization_proof_profiles: [{ id: 'proof', method: 'none', verify: { required: false } }],
+    authorization_profiles: [{ id: 'authz', provider: 'none' }],
+    evidence_profiles: [{ id: 'evidence', provider: 'none', verify: { required: false } }],
     workflows: [{
       id: 'w', name: 'W',
       tasks: [{
@@ -2869,7 +2890,10 @@ test('on_failure handler propagates identity and contract via shorthand expansio
         on_failure: {
           prompt: 'Handle failure',
           identity: { principal: 'ops@co.com' },
-          contract: { audit: 'on-failure' }
+          contract: { audit: 'on-failure' },
+          authorization_proof: { ref: 'proof', verify: { required: true } },
+          authorization: { ref: 'authz', on_error: 'deny' },
+          evidence: { ref: 'evidence', payload: { bind: ['command'] } }
         }
       }]
     }]
@@ -2881,6 +2905,12 @@ test('on_failure handler propagates identity and contract via shorthand expansio
   assert.ok(failureTask);
   assert.equal(failureTask.identity.principal, 'ops@co.com');
   assert.equal(failureTask.contract.audit, 'on-failure');
+  assert.equal(failureTask.authorization_proof.ref, 'proof');
+  assert.equal(failureTask.authorization_proof.verify.required, true);
+  assert.equal(failureTask.authorization.ref, 'authz');
+  assert.equal(failureTask.authorization.on_error, 'deny');
+  assert.equal(failureTask.evidence.ref, 'evidence');
+  assert.deepStrictEqual(failureTask.evidence.payload.bind, ['command']);
 });
 
 test('standalone capabilities include identity and contracts', () => {
@@ -2990,11 +3020,11 @@ test('identity-contract example manifest validates and compiles', () => {
   const result = validateManifest(manifest);
   assert.equal(result.ok, true);
   const standalone = compileManifestToStandalone(manifest);
-  assert.ok(standalone.workflows[0].tasks[0].identity.principal, 'deploy-bot@infra.example.com');
-  assert.ok(standalone.workflows[0].tasks[0].contract.sandbox, 'strict');
+  assert.strictEqual(standalone.workflows[0].tasks[0].identity.principal, 'deploy-bot@infra.example.com');
+  assert.strictEqual(standalone.workflows[0].tasks[0].contract.sandbox, 'strict');
   const scheduler = compileManifestToScheduler(manifest);
-  assert.ok(scheduler.jobs[0].identity_principal, 'deploy-bot@infra.example.com');
-  assert.ok(scheduler.jobs[0].contract_sandbox, 'strict');
+  assert.strictEqual(scheduler.jobs[0].identity_principal, 'deploy-bot@infra.example.com');
+  assert.strictEqual(scheduler.jobs[0].contract_sandbox, 'strict');
 });
 
 // --- exec: direct task execution ---
@@ -4364,4 +4394,1069 @@ test('exec without output.format returns structured null', () => {
   };
   const result = executeTask(manifest, { taskId: 't', signer: 'none' });
   assert.equal(result.result.structured, null);
+});
+
+// ---------------------------------------------------------------------------
+// v0.2 Execution Identity Tests
+// ---------------------------------------------------------------------------
+
+const identityV2Manifest = readExample('identity-v2.json');
+const proofEnabledManifest = {
+  version: '0.2',
+  identity_profiles: [
+    {
+      id: 'agent',
+      provider: 'none',
+      subject: {
+        kind: 'agent',
+        principal: 'agent://local/proof-agent',
+        delegation_mode: 'none'
+      },
+      trust: { level: 'supervised' },
+      presentation: { handoff: 'none', cleanup: 'always' }
+    }
+  ],
+  authorization_proof_profiles: [
+    {
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
+      claims: { subject: 'agentcli-proof' },
+      verify: { required: true }
+    }
+  ],
+  authorization_profiles: [
+    {
+      id: 'permit',
+      provider: 'none',
+      provider_config: { team: 'ops' },
+      request: { include: ['identity'] },
+      decision: { allow_values: ['permit'] }
+    }
+  ],
+  evidence_profiles: [
+    {
+      id: 'none-evidence',
+      provider: 'none',
+      payload: { bind: ['execution_id', 'command', 'result'] },
+      verify: { required: false }
+    }
+  ],
+  workflows: [
+    {
+      id: 'proof-workflow',
+      name: 'Proof Workflow',
+      identity: { ref: 'agent' },
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [
+        {
+          id: 'proof-task',
+          name: 'Proof Task',
+          target: { session_target: 'shell' },
+          shell: { program: 'echo', args: ['proof-ok'] },
+          schedule: { cron: '0 * * * *' },
+          authorization: {
+            ref: 'permit',
+            provider_config: { task: 'proof-task' }
+          },
+          evidence: {
+            ref: 'none-evidence',
+            payload: { bind: ['command'] }
+          }
+        }
+      ]
+    }
+  ]
+};
+const applyProofManifest = {
+  version: '0.2',
+  authorization_proof_profiles: [
+    {
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
+      claims: { subject: 'agentcli-proof' },
+      verify: { required: true }
+    }
+  ],
+  workflows: [
+    {
+      id: 'apply-proof',
+      name: 'Apply Proof',
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [
+        {
+          id: 'verify-me',
+          name: 'Verify Me',
+          target: { session_target: 'shell' },
+          shell: { program: 'echo', args: ['apply-proof'] },
+          schedule: { cron: '0 * * * *' }
+        }
+      ]
+    }
+  ]
+};
+const applyProofOverrideManifest = {
+  version: '0.2',
+  authorization_proof_profiles: [
+    {
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
+      claims: { subject: 'wrong-subject' },
+      verify: { required: true }
+    }
+  ],
+  workflows: [
+    {
+      id: 'apply-proof-override',
+      name: 'Apply Proof Override',
+      tasks: [
+        {
+          id: 'verify-override',
+          name: 'Verify Override',
+          target: { session_target: 'shell' },
+          shell: { program: 'echo', args: ['apply-proof-override'] },
+          schedule: { cron: '0 * * * *' },
+          authorization_proof: {
+            ref: 'jwt-proof',
+            claims: { subject: 'agentcli-proof' }
+          }
+        }
+      ]
+    }
+  ]
+};
+const applyOnFailureProofManifest = {
+  version: '0.2',
+  authorization_proof_profiles: [
+    {
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
+      claims: { subject: 'agentcli-proof' },
+      verify: { required: true }
+    }
+  ],
+  workflows: [
+    {
+      id: 'apply-proof-failure',
+      name: 'Apply Proof Failure',
+      tasks: [
+        {
+          id: 'primary',
+          name: 'Primary',
+          target: { session_target: 'shell' },
+          shell: { program: 'echo', args: ['primary'] },
+          schedule: { cron: '0 * * * *' },
+          on_failure: {
+            name: 'Handle Failure',
+            shell: { program: 'echo', args: ['failure'] },
+            authorization_proof: { ref: 'jwt-proof' }
+          }
+        }
+      ]
+    }
+  ]
+};
+
+// -- Schema and Validation Tests --
+
+test('v0.2 manifest with identity_profiles validates', () => {
+  const manifest = structuredClone(identityV2Manifest);
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true, `Validation failed: ${JSON.stringify(result.errors)}`);
+});
+
+test('v0.2 manifest version is accepted', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+});
+
+// -- Identity Provider Registry Tests --
+
+test('identity provider registry lists none and env-bearer', async () => {
+  const { listProviders: listIdentityProviders } = await import('../src/identity/index.js');
+  await import('../src/identity/none.js');
+  await import('../src/identity/env-bearer.js');
+  const providers = listIdentityProviders();
+  assert.ok(providers.includes('none'));
+  assert.ok(providers.includes('env-bearer'));
+});
+
+test('none identity provider resolves minimal session', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/none.js');
+  const provider = getIdentityProvider('none');
+  const session = provider.resolveSession({
+    profile: {
+      subject: { principal: 'test://p' },
+      trust: { level: 'supervised' }
+    }
+  }, {});
+  assert.strictEqual(session.provider, 'none');
+  assert.strictEqual(session.subject.principal, 'test://p');
+  assert.deepStrictEqual(session.credentials, {});
+});
+
+test('none identity provider validateProfile always succeeds', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/none.js');
+  const provider = getIdentityProvider('none');
+  const result = provider.validateProfile({}, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('env-bearer identity provider validates profile with token_env', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/env-bearer.js');
+  const provider = getIdentityProvider('env-bearer');
+  const result = provider.validateProfile({
+    auth: { provider_config: { token_env: 'MY_TOKEN' } }
+  }, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('env-bearer identity provider rejects profile without token_env', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/env-bearer.js');
+  const provider = getIdentityProvider('env-bearer');
+  const result = provider.validateProfile({ auth: {} }, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.length > 0);
+});
+
+test('env-bearer resolves session with token from env', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/env-bearer.js');
+  const provider = getIdentityProvider('env-bearer');
+  const session = provider.resolveSession({
+    profile: {
+      subject: { kind: 'service', principal: 'agent://svc' },
+      auth: { required: true, provider_config: { token_env: 'TEST_TOK' } },
+      trust: { level: 'restricted' }
+    }
+  }, { env: { TEST_TOK: 'abc123' } });
+  assert.strictEqual(session.provider, 'env-bearer');
+  assert.strictEqual(session.subject.principal, 'agent://svc');
+  assert.strictEqual(session.credentials.access_token.value, 'abc123');
+  assert.strictEqual(session.credentials.access_token.kind, 'bearer');
+});
+
+test('env-bearer resolves empty credentials when token missing and not required', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/env-bearer.js');
+  const provider = getIdentityProvider('env-bearer');
+  const session = provider.resolveSession({
+    profile: {
+      subject: { principal: 'agent://svc' },
+      auth: { required: false, provider_config: { token_env: 'MISSING_TOK' } },
+      trust: { level: 'restricted' }
+    }
+  }, { env: {} });
+  assert.strictEqual(session.provider, 'env-bearer');
+  assert.deepStrictEqual(session.credentials, {});
+});
+
+test('env-bearer throws when token missing and required', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/env-bearer.js');
+  const provider = getIdentityProvider('env-bearer');
+  assert.throws(() => {
+    provider.resolveSession({
+      profile: {
+        subject: { principal: 'agent://svc' },
+        auth: { required: true, provider_config: { token_env: 'MISSING_TOK' } },
+        trust: { level: 'restricted' }
+      }
+    }, { env: {} });
+  }, /Bearer token not found/);
+});
+
+// -- Session Utilities Tests --
+
+test('resolveSourcePath navigates session objects', async () => {
+  const { resolveSourcePath } = await import('../src/identity/session.js');
+  const session = {
+    credentials: {
+      access_token: {
+        value: 'secret123',
+        expires_at: '2026-12-31T00:00:00Z'
+      }
+    }
+  };
+  assert.strictEqual(resolveSourcePath(session, 'credentials.access_token.value'), 'secret123');
+  assert.strictEqual(resolveSourcePath(session, 'credentials.access_token.expires_at'), '2026-12-31T00:00:00Z');
+  assert.strictEqual(resolveSourcePath(session, 'credentials.missing.path'), undefined);
+});
+
+test('resolveSourcePath returns undefined for null session', async () => {
+  const { resolveSourcePath } = await import('../src/identity/session.js');
+  assert.strictEqual(resolveSourcePath(null, 'credentials.value'), undefined);
+  assert.strictEqual(resolveSourcePath({}, ''), undefined);
+});
+
+test('compareTrustLevels orders correctly', async () => {
+  const { compareTrustLevels } = await import('../src/identity/session.js');
+  assert.strictEqual(compareTrustLevels('untrusted', 'autonomous'), -1);
+  assert.strictEqual(compareTrustLevels('supervised', 'supervised'), 0);
+  assert.strictEqual(compareTrustLevels('autonomous', 'restricted'), 1);
+  assert.strictEqual(compareTrustLevels('restricted', 'supervised'), -1);
+  assert.strictEqual(compareTrustLevels('supervised', 'restricted'), 1);
+});
+
+test('compareTrustLevels throws on unknown level', async () => {
+  const { compareTrustLevels } = await import('../src/identity/session.js');
+  assert.throws(() => compareTrustLevels('bogus', 'supervised'), /Unknown trust level/);
+});
+
+test('redactSession removes credential values', async () => {
+  const { redactSession } = await import('../src/identity/session.js');
+  const session = {
+    provider: 'test',
+    credentials: {
+      access_token: { value: 'secret', kind: 'bearer' }
+    }
+  };
+  const redacted = redactSession(session);
+  assert.strictEqual(redacted.credentials.access_token.value, '[REDACTED]');
+  assert.strictEqual(redacted.credentials.access_token.kind, '[REDACTED]');
+  assert.strictEqual(redacted.provider, 'test');
+});
+
+test('redactSession preserves nested structure', async () => {
+  const { redactSession } = await import('../src/identity/session.js');
+  const session = {
+    provider: 'test',
+    credentials: {
+      nested: { inner: { deep_secret: 'hidden' } }
+    }
+  };
+  const redacted = redactSession(session);
+  assert.strictEqual(redacted.credentials.nested.inner.deep_secret, '[REDACTED]');
+  assert.strictEqual(redacted.provider, 'test');
+});
+
+test('buildCredentialSummary returns types and expiry', async () => {
+  const { buildCredentialSummary } = await import('../src/identity/session.js');
+  const session = {
+    credentials: {
+      access_token: { kind: 'bearer', expires_at: '2026-12-31T00:00:00Z' },
+      refresh_token: { kind: 'refresh', expires_at: '2027-06-30T00:00:00Z' }
+    }
+  };
+  const summary = buildCredentialSummary(session);
+  assert.ok(summary.credential_types.includes('bearer'));
+  assert.ok(summary.credential_types.includes('refresh'));
+  assert.strictEqual(summary.expires_at, '2026-12-31T00:00:00Z');
+});
+
+test('validateTrustLevel accepts canonical levels', async () => {
+  const { validateTrustLevel } = await import('../src/identity/session.js');
+  assert.strictEqual(validateTrustLevel('untrusted').valid, true);
+  assert.strictEqual(validateTrustLevel('restricted').valid, true);
+  assert.strictEqual(validateTrustLevel('supervised').valid, true);
+  assert.strictEqual(validateTrustLevel('autonomous').valid, true);
+  assert.strictEqual(validateTrustLevel('bogus').valid, false);
+});
+
+test('formatMaterializationValue handles raw, json, and base64', async () => {
+  const { formatMaterializationValue } = await import('../src/identity/session.js');
+  assert.strictEqual(formatMaterializationValue('hello', 'raw'), 'hello');
+  assert.strictEqual(formatMaterializationValue({ a: 1 }, 'json'), '{"a":1}');
+  assert.strictEqual(formatMaterializationValue('hello', 'base64'), Buffer.from('hello').toString('base64'));
+});
+
+// -- Evidence Provider Tests --
+
+test('evidence provider registry lists none and ssh', async () => {
+  const { listEvidenceProviders } = await import('../src/evidence/index.js');
+  await import('../src/evidence/none.js');
+  await import('../src/evidence/ssh.js');
+  const providers = listEvidenceProviders();
+  assert.ok(providers.includes('none'));
+  assert.ok(providers.includes('ssh'));
+});
+
+test('none evidence provider returns attested: false', async () => {
+  const { getEvidenceProvider } = await import('../src/evidence/index.js');
+  await import('../src/evidence/none.js');
+  const provider = getEvidenceProvider('none');
+  const result = provider.attest('payload', {}, {});
+  assert.strictEqual(result.attested, false);
+});
+
+test('none evidence provider verify returns verified: false', async () => {
+  const { getEvidenceProvider } = await import('../src/evidence/index.js');
+  await import('../src/evidence/none.js');
+  const provider = getEvidenceProvider('none');
+  const result = provider.verify();
+  assert.strictEqual(result.verified, false);
+});
+
+test('none evidence provider describe returns provider none', async () => {
+  const { getEvidenceProvider } = await import('../src/evidence/index.js');
+  await import('../src/evidence/none.js');
+  const provider = getEvidenceProvider('none');
+  const result = provider.describe();
+  assert.strictEqual(result.provider, 'none');
+  assert.strictEqual(result.attested, false);
+});
+
+test('ssh evidence provider resolves signing key', async () => {
+  const { resolveSigningKey: resolveEvidenceSigningKey } = await import('../src/evidence/ssh.js');
+  const result = resolveEvidenceSigningKey({ signingKey: '/nonexistent/key' });
+  assert.strictEqual(result, null);
+});
+
+// -- Evidence Payload Tests --
+
+test('buildEvidencePayload filters by bind targets', async () => {
+  const { buildEvidencePayload } = await import('../src/evidence/payload.js');
+  const payload = buildEvidencePayload({
+    executionId: 'abc123',
+    timestamp: '2026-03-21T00:00:00Z',
+    source: { workflow_id: 'w', task_id: 't' },
+    command: { program: 'echo', args: [], cwd: '/tmp' },
+    result: { exit_code: 0, duration_ms: 10 },
+    contract: { sandbox: 'permissive' },
+    bindTargets: ['execution_id', 'command'],
+  });
+  assert.ok(payload.execution_id);
+  assert.ok(payload.command);
+  assert.strictEqual(payload.contract, undefined);
+  assert.strictEqual(payload.result, undefined);
+});
+
+test('buildEvidencePayload always includes timestamp and source', async () => {
+  const { buildEvidencePayload } = await import('../src/evidence/payload.js');
+  const payload = buildEvidencePayload({
+    executionId: 'abc123',
+    timestamp: '2026-03-21T00:00:00Z',
+    source: { workflow_id: 'w', task_id: 't' },
+    bindTargets: [],
+  });
+  assert.strictEqual(payload.timestamp, '2026-03-21T00:00:00Z');
+  assert.deepStrictEqual(payload.source, { workflow_id: 'w', task_id: 't' });
+  assert.strictEqual(payload.execution_id, undefined);
+});
+
+test('serializePayload canonical-json sorts keys', async () => {
+  const { serializePayload } = await import('../src/evidence/payload.js');
+  const result = serializePayload({ z: 1, a: 2 }, 'canonical-json');
+  assert.strictEqual(result, '{"a":2,"z":1}');
+});
+
+test('serializePayload canonical-json sorts nested keys', async () => {
+  const { serializePayload } = await import('../src/evidence/payload.js');
+  const result = serializePayload({ z: { b: 2, a: 1 }, m: 3 }, 'canonical-json');
+  assert.strictEqual(result, '{"m":3,"z":{"a":1,"b":2}}');
+});
+
+test('serializePayload json mode does not sort keys', async () => {
+  const { serializePayload } = await import('../src/evidence/payload.js');
+  const result = serializePayload({ z: 1, a: 2 }, 'json');
+  assert.strictEqual(result, '{"z":1,"a":2}');
+});
+
+test('collectComplianceContext returns null for missing fields', async () => {
+  const { collectComplianceContext } = await import('../src/evidence/payload.js');
+  const result = collectComplianceContext({}, { model_version: true });
+  assert.strictEqual(result.model_version, null);
+});
+
+test('collectComplianceContext passes through available values', async () => {
+  const { collectComplianceContext } = await import('../src/evidence/payload.js');
+  const result = collectComplianceContext(
+    { compliance_context: { model_version: 'gpt-5-nano' } },
+    { model_version: true }
+  );
+  assert.strictEqual(result.model_version, 'gpt-5-nano');
+});
+
+// -- Authorization Proof Verifier Tests --
+
+test('authorization proof verifier registry lists none and jwt', async () => {
+  const { listVerifiers } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/none.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifiers = listVerifiers();
+  assert.ok(verifiers.includes('none'));
+  assert.ok(verifiers.includes('jwt'));
+});
+
+test('none verifier rejects verify.required: true', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/none.js');
+  const verifier = getVerifier('none');
+  const result = verifier.validateProfile({ verify: { required: true } }, {});
+  assert.strictEqual(result.valid, false);
+});
+
+test('none verifier accepts verify.required: false', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/none.js');
+  const verifier = getVerifier('none');
+  const result = verifier.validateProfile({ verify: { required: false } }, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('none verifier verifyProof returns unverified', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/none.js');
+  const verifier = getVerifier('none');
+  const result = verifier.verifyProof(null, {}, {});
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.method, 'none');
+});
+
+test('jwt verifier validates profile with issuer', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({
+    issuer: 'https://issuer.example.com',
+    proof: { value_from: { env: 'JWT_TOKEN' } }
+  }, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('jwt verifier rejects profile with empty issuer', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({ issuer: '' }, {});
+  assert.strictEqual(result.valid, false);
+});
+
+test('jwt verifier rejects non-string proof', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.verifyProof(null, {}, {});
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.method, 'jwt');
+});
+
+// -- Authorization Provider Tests --
+
+test('authorization provider registry lists none', async () => {
+  const { listAuthorizationProviders } = await import('../src/authorization/index.js');
+  await import('../src/authorization/none.js');
+  const providers = listAuthorizationProviders();
+  assert.ok(providers.includes('none'));
+});
+
+test('none authorization provider always permits', async () => {
+  const { getAuthorizationProvider } = await import('../src/authorization/index.js');
+  await import('../src/authorization/none.js');
+  const provider = getAuthorizationProvider('none');
+  const result = provider.authorize({}, {}, {});
+  assert.strictEqual(result.decision, 'permit');
+  assert.strictEqual(result.provider, 'none');
+});
+
+test('normalizeDecision maps allow to permit', async () => {
+  const { normalizeDecision } = await import('../src/authorization/index.js');
+  const result = normalizeDecision('allow', {
+    allow_values: ['allow'],
+    deny_values: ['deny'],
+    escalate_values: []
+  });
+  assert.strictEqual(result.decision, 'permit');
+  assert.strictEqual(result.mapped, true);
+});
+
+test('normalizeDecision maps deny to deny', async () => {
+  const { normalizeDecision } = await import('../src/authorization/index.js');
+  const result = normalizeDecision('deny', {
+    allow_values: ['allow'],
+    deny_values: ['deny'],
+    escalate_values: []
+  });
+  assert.strictEqual(result.decision, 'deny');
+  assert.strictEqual(result.mapped, true);
+});
+
+test('normalizeDecision maps escalate values', async () => {
+  const { normalizeDecision } = await import('../src/authorization/index.js');
+  const result = normalizeDecision('needs-review', {
+    allow_values: ['allow'],
+    deny_values: ['deny'],
+    escalate_values: ['needs-review']
+  });
+  assert.strictEqual(result.decision, 'require-escalation');
+  assert.strictEqual(result.mapped, true);
+});
+
+test('normalizeDecision defaults unmapped to deny', async () => {
+  const { normalizeDecision } = await import('../src/authorization/index.js');
+  const result = normalizeDecision('unknown-value', {
+    allow_values: ['allow'],
+    deny_values: ['deny'],
+    escalate_values: []
+  });
+  assert.strictEqual(result.decision, 'deny');
+  assert.strictEqual(result.mapped, false);
+});
+
+test('normalizeAuthorizationRequest includes only listed fields', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w', task_id: 't' },
+    identity: { principal: 'agent://a', trust_level: 'supervised' },
+    contract: { required_trust_level: 'restricted' },
+    command: { program: 'echo', args: ['hi'] },
+    includeFields: ['identity'],
+  });
+  assert.ok(result.source);
+  assert.ok(result.identity);
+  assert.strictEqual(result.contract, undefined);
+  assert.strictEqual(result.command, undefined);
+});
+
+// -- Three-Stage Merge Tests --
+
+test('resolveIdentityV2 merges workflow and task identity', () => {
+  const workflowIdentity = {
+    ref: 'profile-a',
+    subject: { kind: 'agent', principal: 'agent://a' },
+    trust: { level: 'supervised' }
+  };
+  const taskIdentity = {
+    subject: { principal: 'agent://b' },
+    trust: { level: 'restricted' }
+  };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.strictEqual(result.ref, 'profile-a');
+  assert.strictEqual(result.subject.principal, 'agent://b');
+  assert.strictEqual(result.subject.kind, 'agent');
+  assert.strictEqual(result.trust.level, 'restricted');
+});
+
+test('resolveIdentityV2 task ref overrides workflow ref', () => {
+  const workflowIdentity = { ref: 'profile-a' };
+  const taskIdentity = { ref: 'profile-b' };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.strictEqual(result.ref, 'profile-b');
+});
+
+test('resolveIdentityV2 merges auth fields', () => {
+  const workflowIdentity = {
+    auth: { mode: 'service', scopes: ['read'], provider_config: { token_env: 'TOK' } }
+  };
+  const taskIdentity = {
+    auth: { scopes: ['read', 'write'] }
+  };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.strictEqual(result.auth.mode, 'service');
+  assert.deepStrictEqual(result.auth.scopes, ['read', 'write']);
+  assert.deepStrictEqual(result.auth.provider_config, { token_env: 'TOK' });
+});
+
+test('resolveIdentityV2 merges presentation bindings replace', () => {
+  const workflowIdentity = {
+    presentation: { bindings: [{ source: 'a' }], handoff: 'none' }
+  };
+  const taskIdentity = {
+    presentation: { bindings: [{ source: 'b' }] }
+  };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.strictEqual(result.presentation.bindings.length, 1);
+  assert.strictEqual(result.presentation.bindings[0].source, 'b');
+  assert.strictEqual(result.presentation.handoff, 'none');
+});
+
+test('resolveIdentityV2 merges trust constraints', () => {
+  const workflowIdentity = {
+    trust: { level: 'supervised', constraints: { max_autonomy: 'supervised', escalation: 'fail' } }
+  };
+  const taskIdentity = {
+    trust: { constraints: { escalation: 'warn' } }
+  };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.strictEqual(result.trust.level, 'supervised');
+  assert.strictEqual(result.trust.constraints.max_autonomy, 'supervised');
+  assert.strictEqual(result.trust.constraints.escalation, 'warn');
+});
+
+test('resolveIdentityV2 returns nulls for empty inputs', () => {
+  const result = resolveIdentityV2({}, {});
+  assert.strictEqual(result.ref, null);
+  assert.strictEqual(result.subject.kind, null);
+  assert.strictEqual(result.subject.principal, null);
+  assert.strictEqual(result.trust.level, null);
+});
+
+// -- v0.2 Exec Lifecycle Tests --
+
+test('v0.2 exec with none identity provider succeeds (dry run)', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.dry_run, true);
+  assert.ok(result.declared_identity);
+  assert.ok(result.principal_used);
+});
+
+test('v0.2 exec includes declared identity fields', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.strictEqual(result.declared_identity.provider, 'none');
+  assert.strictEqual(result.declared_identity.subject.principal, 'agent://local/test-agent');
+  assert.strictEqual(result.declared_identity.subject.kind, 'agent');
+  assert.strictEqual(result.declared_identity.trust_level, 'supervised');
+});
+
+test('v0.2 exec includes trust info', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.ok(result.trust);
+  assert.strictEqual(result.trust.declared_level, 'supervised');
+  assert.strictEqual(result.trust.effective_level, 'supervised');
+});
+
+test('v0.2 exec includes contract with trust fields', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.strictEqual(result.contract.required_trust_level, 'restricted');
+  assert.strictEqual(result.contract.trust_enforcement, 'advisory');
+});
+
+test('v0.2 exec with env-bearer identity and missing optional token succeeds', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'env-token-task', dryRun: true });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.declared_identity.provider, 'env-bearer');
+  assert.strictEqual(result.declared_identity.subject.kind, 'service');
+});
+
+test('v0.2 exec runs command and returns output', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.result.stdout.includes('hello-v2'));
+  assert.strictEqual(result.result.exit_code, 0);
+  assert.ok(result.execution_id);
+});
+
+test('v0.2 exec principal_used matches profile principal', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.strictEqual(result.principal_used, 'agent://local/test-agent');
+});
+
+test('v0.2 exec with resolved identity includes session description', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
+  assert.ok(result.resolved_identity);
+  assert.strictEqual(result.resolved_identity.provider, 'none');
+  assert.deepStrictEqual(result.resolved_identity.credentials, {});
+});
+
+test('v0.2 exec resolves authorization proof, authorization, and evidence', async () => {
+  const result = await executeTask(proofEnabledManifest, {
+    taskId: 'proof-task',
+    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+  });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.authorization_proof.verified, true);
+  assert.strictEqual(result.authorization.decision, 'permit');
+  assert.strictEqual(result.evidence.provider, 'none');
+  assert.strictEqual(result.evidence.attested, false);
+});
+
+// -- Conversion Tests --
+
+test('convertManifestV1toV2 converts v0.1 to v0.2', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  const v1 = JSON.parse(readFileSync(new URL('../examples/identity-contract.json', import.meta.url), 'utf8'));
+  const v2 = convertManifestV1toV2(v1);
+  assert.strictEqual(v2.version, '0.2');
+  assert.ok(Array.isArray(v2.identity_profiles));
+  assert.ok(Array.isArray(v2.evidence_profiles));
+  for (const wf of v2.workflows) {
+    for (const task of wf.tasks) {
+      if (task.identity && task.identity.subject) {
+        assert.strictEqual(task.identity.subject.delegation_mode, 'none');
+      }
+    }
+  }
+});
+
+test('convertManifestV1toV2 rejects non-v0.1 input', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  assert.throws(() => convertManifestV1toV2({ version: '0.2', workflows: [] }), /version 0\.1/);
+});
+
+test('convertManifestV1toV2 preserves workflow identity', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  const v1 = JSON.parse(readFileSync(new URL('../examples/identity-contract.json', import.meta.url), 'utf8'));
+  const v2 = convertManifestV1toV2(v1);
+  const wf = v2.workflows[0];
+  assert.ok(wf.identity);
+  assert.ok(wf.identity.subject);
+  assert.strictEqual(wf.identity.subject.principal, 'deploy-bot@infra.example.com');
+});
+
+test('convertManifestV1toV2 creates authorization_proof_profile for oidc attestation', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  const v1 = JSON.parse(readFileSync(new URL('../examples/identity-contract.json', import.meta.url), 'utf8'));
+  const v2 = convertManifestV1toV2(v1);
+  assert.ok(Array.isArray(v2.authorization_proof_profiles));
+  const jwtProfile = v2.authorization_proof_profiles.find(p => p.method === 'jwt');
+  assert.ok(jwtProfile, 'Should create a jwt authorization_proof_profile for oidc attestation');
+});
+
+test('convertManifestV1toV2 rejects null input', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  assert.throws(() => convertManifestV1toV2(null), /version 0\.1/);
+});
+
+// -- Compilation Tests --
+
+test('v0.2 standalone compilation preserves identity profiles', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToStandalone(manifest);
+  assert.ok(compiled.identity_profiles);
+  assert.strictEqual(compiled.identity_profiles.length, 2);
+  assert.ok(compiled.capabilities.identity_declaration);
+});
+
+test('v0.2 standalone compilation preserves evidence profiles', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToStandalone(manifest);
+  assert.ok(compiled.evidence_profiles);
+  assert.strictEqual(compiled.evidence_profiles.length, 1);
+  assert.ok(compiled.capabilities.evidence_generation);
+});
+
+test('v0.2 standalone compilation preserves authorization_proof_profiles', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToStandalone(manifest);
+  assert.ok(compiled.authorization_proof_profiles);
+  assert.strictEqual(compiled.authorization_proof_profiles.length, 1);
+});
+
+test('v0.2 standalone compiled tasks include identity ref', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks.find(t => t.source.task_id === 'echo-identity');
+  assert.ok(task);
+  assert.strictEqual(task.identity.ref, 'local-agent');
+  // Subject fields are null in compiled output -- profile lookup happens at execution time
+  assert.ok(task.identity.subject);
+});
+
+test('v0.2 standalone compiled tasks include evidence ref', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToStandalone(manifest);
+  const task = compiled.workflows[0].tasks.find(t => t.source.task_id === 'echo-identity');
+  assert.ok(task);
+  assert.strictEqual(task.evidence.ref, 'ssh-evidence');
+});
+
+test('v0.2 scheduler compilation includes identity flat fields', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs.find(j => j.source.task_id === 'echo-identity');
+  assert.ok(job);
+  assert.strictEqual(job.identity_ref, 'local-agent');
+  assert.strictEqual(job.identity_subject_principal, 'agent://local/test-agent');
+  assert.strictEqual(job.identity_subject_kind, 'agent');
+  assert.strictEqual(job.identity_trust_level, 'supervised');
+  assert.strictEqual(job.identity_delegation_mode, 'none');
+});
+
+test('v0.2 scheduler compilation includes evidence ref', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs.find(j => j.source.task_id === 'echo-identity');
+  assert.ok(job);
+  assert.strictEqual(job.evidence_ref, 'ssh-evidence');
+});
+
+test('v0.2 scheduler compilation includes contract trust fields', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs.find(j => j.source.task_id === 'echo-identity');
+  assert.ok(job);
+  assert.strictEqual(job.contract_required_trust_level, 'restricted');
+  assert.strictEqual(job.contract_trust_enforcement, 'advisory');
+});
+
+test('v0.2 scheduler compilation preserves profile arrays', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToScheduler(manifest);
+  assert.ok(compiled.identity_profiles);
+  assert.strictEqual(compiled.identity_profiles.length, 2);
+  assert.ok(compiled.authorization_proof_profiles);
+  assert.ok(compiled.evidence_profiles);
+});
+
+test('v0.2 scheduler compilation env-token task includes correct identity fields', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs.find(j => j.source.task_id === 'env-token-task');
+  assert.ok(job);
+  assert.strictEqual(job.identity_ref, 'env-token-agent');
+  assert.strictEqual(job.identity_subject_principal, 'agent://local/env-service');
+  assert.strictEqual(job.identity_trust_level, 'restricted');
+});
+
+test('v0.2 scheduler compilation includes resolved authorization and evidence declarations', () => {
+  const compiled = compileManifestToScheduler(proofEnabledManifest);
+  const job = compiled.jobs.find(candidate => candidate.source.task_id === 'proof-task');
+  assert.ok(job);
+  assert.deepStrictEqual(job.authorization_proof.claims, { subject: 'agentcli-proof' });
+  assert.strictEqual(job.authorization_proof.verify.required, true);
+  assert.deepStrictEqual(job.authorization.provider_config, { team: 'ops', task: 'proof-task' });
+  assert.deepStrictEqual(job.authorization.request, { include: ['identity'] });
+  assert.deepStrictEqual(job.evidence.payload.bind, ['command']);
+  assert.strictEqual(job.evidence.verify.required, false);
+});
+
+test('applyManifestToScheduler returns authorization proof verification summaries', async () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  const result = await applyManifestToScheduler(applyProofManifest, {
+    runner,
+    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.ok(Array.isArray(result.authorization_proof_verifications));
+  assert.strictEqual(result.authorization_proof_verifications.length, 1);
+  assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-me');
+  assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
+  assert.ok(calls[0].authorization_proof_verification);
+  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+});
+
+test('applyManifestToScheduler rejects generated on_failure authorization when target lacks hook', async () => {
+  const manifest = {
+    version: '0.2',
+    authorization_profiles: [{ id: 'authz', provider: 'none' }],
+    workflows: [
+      {
+        id: 'apply-auth-failure',
+        name: 'Apply Auth Failure',
+        tasks: [
+          {
+            id: 'primary',
+            name: 'Primary',
+            target: { session_target: 'shell' },
+            shell: { program: 'echo', args: ['primary'] },
+            schedule: { cron: '0 * * * *' },
+            on_failure: {
+              shell: { program: 'echo', args: ['failure'] },
+              authorization: { ref: 'authz' }
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  await assert.rejects(
+    () => applyManifestToScheduler(manifest, {
+      runner: {
+        invocation: { label: 'fake-scheduler' },
+        listJobs() {
+          return [];
+        },
+        addJob() {
+          throw new Error('should not add jobs');
+        },
+        updateJob() {
+          throw new Error('should not update jobs');
+        }
+      }
+    }),
+    /authorization_hook/
+  );
+});
+
+test('applyManifestToScheduler proof fallback uses resolved task proof declaration', async () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  const result = await applyManifestToScheduler(applyProofOverrideManifest, {
+    runner,
+    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.authorization_proof_verifications.length, 1);
+  assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-override');
+  assert.deepStrictEqual(calls[0].authorization_proof.claims, { subject: 'agentcli-proof' });
+  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+});
+
+test('applyManifestToScheduler proof fallback covers generated on_failure tasks', async () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  const result = await applyManifestToScheduler(applyOnFailureProofManifest, {
+    runner,
+    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.authorization_proof_verifications.length, 1);
+  assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'primary.failure');
+  const failureSpec = calls.find(spec => spec.authorization_proof_ref === 'jwt-proof');
+  assert.ok(failureSpec);
+  assert.strictEqual(failureSpec.authorization_proof.ref, 'jwt-proof');
+  assert.ok(failureSpec.authorization_proof_verification);
+  assert.strictEqual(failureSpec.authorization_proof_verification.verified, true);
 });

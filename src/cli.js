@@ -36,7 +36,10 @@ Commands:
   validate <path-or-json|->
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
   apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name]
-  exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh|none] [--signing-key path]
+  exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms]
+       [--signer ssh|none] [--signing-key path] [--evidence-provider name]
+       [--instance-id id] [--require-evidence] [--require-authorization]
+       [--identity-debug] [--presentation-debug]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   verify <execution-id> [--allowed-signers path]
@@ -46,6 +49,20 @@ Commands:
   registry remove <name>
   import <directory> [--name name]
   merge <manifest1> <manifest2> [--output path]
+  convert <path-or-json|-> [--output path]  Convert v0.1 manifest to v0.2
+  identity providers
+  identity schema <provider>
+  identity resolve <manifest> <task-id> [--workflow id]
+  identity validate-delegation <manifest> <task-id> [--workflow id]
+  authorization-proof methods
+  authorization-proof schema <method>
+  authorization-proof verify <manifest> <task-id> [--workflow id]
+  authorization providers
+  authorization schema <provider>
+  authorization evaluate <manifest> <task-id> [--workflow id]
+  evidence providers
+  evidence schema <provider>
+  whoami <manifest> <task-id> [--workflow id]
   skill-path
   serve [--db path]
 
@@ -249,7 +266,7 @@ export async function runCli(
           { code: 'invalid_argument' }
         );
       }
-      const payload = applyManifestToScheduler(manifest, {
+      const payload = await applyManifestToScheduler(manifest, {
         dryRun: Boolean(flags['dry-run']),
         includeExplain: Boolean(flags.explain),
         adoptBy,
@@ -308,13 +325,19 @@ export async function runCli(
           { code: 'invalid_argument' }
         );
       }
-      const payload = executeTask(manifest, {
+      const payload = await executeTask(manifest, {
         workflowId: flags.workflow || undefined,
         taskId,
         dryRun: Boolean(flags['dry-run']),
         timeoutMs: rawTimeout ? Number(rawTimeout) : undefined,
         signer: flags.signer || undefined,
         signingKey: flags['signing-key'] || undefined,
+        evidenceProvider: flags['evidence-provider'] || undefined,
+        instanceId: flags['instance-id'] || undefined,
+        requireEvidence: flags['require-evidence'] ? true : undefined,
+        requireAuthorization: flags['require-authorization'] ? true : undefined,
+        identityDebug: flags['identity-debug'] ? true : undefined,
+        presentationDebug: flags['presentation-debug'] ? true : undefined,
         cwd,
         env: derivedEnv,
       });
@@ -502,6 +525,151 @@ export async function runCli(
         mergePayload.written_to = writtenTo;
       }
       return formatOutput(mergePayload, { mode: outputMode, pretty });
+    }
+    case 'convert': {
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
+      const { convertManifestV1toV2 } = await import('./convert.js');
+      try {
+        const converted = convertManifestV1toV2(manifest);
+        const writeTarget = flags.output || flags.write;
+        if (writeTarget) {
+          const writtenTo = writeJsonOutput(writeTarget, converted, { cwd });
+          return formatOutput({ ok: true, output: writtenTo, version: '0.2' }, { mode: outputMode, pretty });
+        }
+        return formatOutput(converted, { mode: outputMode, pretty });
+      } catch (err) {
+        return formatOutput({ ok: false, error: err.message }, { mode: outputMode, pretty });
+      }
+    }
+    case 'identity': {
+      const subcommand = positionals[1];
+      if (subcommand === 'providers') {
+        const { listProviders, listProviderCapabilities } = await import('./identity/index.js');
+        await import('./identity/none.js');
+        await import('./identity/env-bearer.js');
+        await import('./identity/file-bearer.js');
+        await import('./identity/oidc-client-credentials.js');
+        await import('./identity/oidc-token-exchange.js');
+        return formatOutput({ ok: true, providers: listProviders().map(name => ({ name, capabilities: listProviderCapabilities().get(name) || null })) }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'schema') {
+        const providerName = positionals[2];
+        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli identity schema <provider>' }, { mode: outputMode, pretty });
+        const { getProvider } = await import('./identity/index.js');
+        await import('./identity/none.js');
+        await import('./identity/env-bearer.js');
+        await import('./identity/file-bearer.js');
+        await import('./identity/oidc-client-credentials.js');
+        await import('./identity/oidc-token-exchange.js');
+        const provider = getProvider(providerName);
+        if (!provider) return formatOutput({ ok: false, error: `Unknown identity provider: ${providerName}` }, { mode: outputMode, pretty });
+        return formatOutput({ ok: true, provider: providerName, capabilities: provider.capabilities }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'resolve') {
+        const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
+        const taskId = positionals[3];
+        const workflowId = flags.workflow || null;
+        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli identity resolve <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
+        return formatOutput({ ok: true, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, principal_used: result.principal_used }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'validate-delegation') {
+        const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
+        const taskId = positionals[3];
+        const workflowId = flags.workflow || null;
+        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli identity validate-delegation <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
+        return formatOutput({ ok: true, delegation: result.resolved_identity?.delegation_validation || null }, { mode: outputMode, pretty });
+      }
+      return formatOutput({ ok: false, error: 'Unknown identity subcommand. Available: providers, schema, resolve, validate-delegation' }, { mode: outputMode, pretty });
+    }
+    case 'authorization-proof': {
+      const subcommand = positionals[1];
+      if (subcommand === 'methods') {
+        const { listVerifiers } = await import('./authorization-proof/index.js');
+        await import('./authorization-proof/none.js');
+        await import('./authorization-proof/jwt.js');
+        await import('./authorization-proof/detached-signature.js');
+        await import('./authorization-proof/certificate.js');
+        return formatOutput({ ok: true, methods: listVerifiers() }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'schema') {
+        const method = positionals[2];
+        if (!method) return formatOutput({ ok: false, error: 'Usage: agentcli authorization-proof schema <method>' }, { mode: outputMode, pretty });
+        const { getVerifier } = await import('./authorization-proof/index.js');
+        await import('./authorization-proof/none.js');
+        await import('./authorization-proof/jwt.js');
+        await import('./authorization-proof/detached-signature.js');
+        await import('./authorization-proof/certificate.js');
+        const verifier = getVerifier(method);
+        if (!verifier) return formatOutput({ ok: false, error: `Unknown verifier method: ${method}` }, { mode: outputMode, pretty });
+        return formatOutput({ ok: true, method, verifier: verifier.name }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'verify') {
+        const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
+        const taskId = positionals[3];
+        const workflowId = flags.workflow || null;
+        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli authorization-proof verify <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, cwd, env: derivedEnv });
+        return formatOutput({ ok: true, authorization_proof: result.authorization_proof || null }, { mode: outputMode, pretty });
+      }
+      return formatOutput({ ok: false, error: 'Unknown authorization-proof subcommand. Available: methods, schema, verify' }, { mode: outputMode, pretty });
+    }
+    case 'authorization': {
+      const subcommand = positionals[1];
+      if (subcommand === 'providers') {
+        const { listAuthorizationProviders } = await import('./authorization/index.js');
+        await import('./authorization/none.js');
+        await import('./authorization/opa.js');
+        return formatOutput({ ok: true, providers: listAuthorizationProviders() }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'schema') {
+        const providerName = positionals[2];
+        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli authorization schema <provider>' }, { mode: outputMode, pretty });
+        const { getAuthorizationProvider } = await import('./authorization/index.js');
+        await import('./authorization/none.js');
+        await import('./authorization/opa.js');
+        const provider = getAuthorizationProvider(providerName);
+        if (!provider) return formatOutput({ ok: false, error: `Unknown authorization provider: ${providerName}` }, { mode: outputMode, pretty });
+        return formatOutput({ ok: true, provider: providerName, capabilities: provider.capabilities }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'evaluate') {
+        const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
+        const taskId = positionals[3];
+        const workflowId = flags.workflow || null;
+        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli authorization evaluate <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, requireAuthorization: true, cwd, env: derivedEnv });
+        return formatOutput({ ok: true, authorization: result.authorization || null }, { mode: outputMode, pretty });
+      }
+      return formatOutput({ ok: false, error: 'Unknown authorization subcommand. Available: providers, schema, evaluate' }, { mode: outputMode, pretty });
+    }
+    case 'evidence': {
+      const subcommand = positionals[1];
+      if (subcommand === 'providers') {
+        const { listEvidenceProviders } = await import('./evidence/index.js');
+        await import('./evidence/none.js');
+        await import('./evidence/ssh.js');
+        return formatOutput({ ok: true, providers: listEvidenceProviders() }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'schema') {
+        const providerName = positionals[2];
+        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli evidence schema <provider>' }, { mode: outputMode, pretty });
+        const { getEvidenceProvider } = await import('./evidence/index.js');
+        await import('./evidence/none.js');
+        await import('./evidence/ssh.js');
+        const provider = getEvidenceProvider(providerName);
+        if (!provider) return formatOutput({ ok: false, error: `Unknown evidence provider: ${providerName}` }, { mode: outputMode, pretty });
+        return formatOutput({ ok: true, provider: providerName, methods: provider.methods || [] }, { mode: outputMode, pretty });
+      }
+      return formatOutput({ ok: false, error: 'Unknown evidence subcommand. Available: providers, schema' }, { mode: outputMode, pretty });
+    }
+    case 'whoami': {
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
+      const taskId = positionals[2];
+      const workflowId = flags.workflow || null;
+      if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli whoami <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+      const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
+      return formatOutput({ ok: true, principal_used: result.principal_used, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, trust: result.trust || null }, { mode: outputMode, pretty });
     }
     case 'serve': {
       await serveJsonRpc({

@@ -21,7 +21,7 @@ Rules:
 On startup, the server emits a readiness notification before processing requests:
 
 ```json
-{"jsonrpc":"2.0","method":"agentcli.ready","params":{"ok":true,"manifest_version":"0.1"}}
+{"jsonrpc":"2.0","method":"agentcli.ready","params":{"ok":true,"manifest_version":"0.2"}}
 ```
 
 Clients MAY ignore this notification, but it provides a clean synchronization point for process-spawn integrations.
@@ -142,6 +142,206 @@ Result:
 
 - `{ "ok": true, "target": "openclaw-scheduler", "entity": "...", "count": <int>, "items": [...] }`
 
+### `agentcli.convert`
+
+*v0.2*
+
+Purpose:
+
+- convert a v0.1 manifest to v0.2 format
+
+Params:
+
+- `manifest` -- a valid v0.1 manifest object
+
+Result:
+
+- `{ "ok": true, "manifest": <converted-v0.2-manifest> }`
+
+The converted manifest preserves all existing fields and adds v0.2 defaults where applicable. The `version` field is updated to `"0.2"`.
+
+### `agentcli.identity.providers`
+
+*v0.2*
+
+Purpose:
+
+- list registered identity providers
+
+Params:
+
+- none
+
+Result:
+
+- `{ "ok": true, "providers": [{ "name": "...", "capabilities": {...} }] }`
+
+### `agentcli.identity.schema`
+
+*v0.2*
+
+Purpose:
+
+- get identity provider capabilities and configuration schema
+
+Params:
+
+- `provider` -- provider name (string)
+
+Result:
+
+- `{ "ok": true, "provider": "...", "capabilities": {...} }`
+
+### `agentcli.identity.resolve`
+
+*v0.2*
+
+Purpose:
+
+- resolve the effective identity for a manifest and task, applying the three-stage merge (profile, workflow, task)
+
+Params:
+
+- `manifest` -- a valid manifest object
+- `taskId` -- the task id to resolve identity for
+- `workflowId` -- (optional) the workflow id; required when the manifest contains multiple workflows
+
+Result:
+
+- `{ "ok": true, "declared_identity": {...}, "resolved_identity": {...}, "principal_used": "..." }`
+
+### `agentcli.identity.validateDelegation`
+
+*v0.2*
+
+Purpose:
+
+- validate the delegation chain for a task's identity
+
+Params:
+
+- `manifest` -- a valid manifest object
+- `taskId` -- the task id to validate
+- `workflowId` -- (optional) the workflow id
+
+Result:
+
+- `{ "ok": true, "delegation": {...} }`
+
+### `agentcli.authorizationProof.methods`
+
+*v0.2*
+
+Purpose:
+
+- list available authorization proof verifier methods
+
+Params:
+
+- none
+
+Result:
+
+- `{ "ok": true, "methods": [{ "name": "...", "capabilities": {...} }] }`
+
+### `agentcli.authorizationProof.schema`
+
+*v0.2*
+
+Purpose:
+
+- get authorization proof verifier information and configuration schema
+
+Params:
+
+- `method` -- verifier method name (string)
+
+Result:
+
+- `{ "ok": true, "method": "...", "capabilities": {...} }`
+
+### `agentcli.authorization.providers`
+
+*v0.2*
+
+Purpose:
+
+- list registered authorization providers (e.g., OPA, Cedar, Topaz)
+
+Params:
+
+- none
+
+Result:
+
+- `{ "ok": true, "providers": [{ "name": "...", "capabilities": {...} }] }`
+
+### `agentcli.authorization.schema`
+
+*v0.2*
+
+Purpose:
+
+- get authorization provider capabilities and configuration schema
+
+Params:
+
+- `provider` -- provider name (string)
+
+Result:
+
+- `{ "ok": true, "provider": "...", "capabilities": {...} }`
+
+### `agentcli.authorization.evaluate`
+
+*v0.2*
+
+Purpose:
+
+- evaluate authorization for a task given its resolved identity and contract
+
+Params:
+
+- `manifest` -- a valid manifest object
+- `taskId` -- the task id to evaluate
+- `workflowId` -- (optional) the workflow id
+
+Result:
+
+- `{ "ok": true, "decision": { "allowed": <boolean>, "reason": "..." } }`
+
+### `agentcli.evidence.providers`
+
+*v0.2*
+
+Purpose:
+
+- list registered evidence providers
+
+Params:
+
+- none
+
+Result:
+
+- `{ "ok": true, "providers": [{ "name": "...", "capabilities": {...} }] }`
+
+### `agentcli.evidence.schema`
+
+*v0.2*
+
+Purpose:
+
+- get evidence provider information and configuration schema
+
+Params:
+
+- `provider` -- provider name (string)
+
+Result:
+
+- `{ "ok": true, "provider": "...", "capabilities": {...} }`
+
 ## Notifications
 
 ### `agentcli.ready`
@@ -171,11 +371,13 @@ Caller-fixable request shape and argument issues SHOULD use `-32602`, including 
 
 ## Stability
 
-The following are intended to be stable within manifest spec version `0.1`:
+The following are intended to be stable within manifest spec versions `0.1` and `0.2`:
 
 - method names
 - request envelope shape
 - response envelope shape
 - top-level `result.ok` convention
+
+All v0.1 methods remain stable in v0.2. The v0.2 identity, authorization proof, authorization, and evidence methods are additive and do not alter existing method signatures.
 
 Future protocol additions SHOULD be additive.

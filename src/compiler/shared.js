@@ -93,11 +93,85 @@ function resolveModelPolicy(workflow, task) {
 export function resolveIdentity(workflow, task) {
   const workflowIdentity = workflow.identity || {};
   const taskIdentity = task.identity || {};
+
+  // v0.2 path: identity has ref or subject
+  if (taskIdentity.ref || taskIdentity.subject || workflowIdentity.ref || workflowIdentity.subject) {
+    return resolveIdentityV2(workflowIdentity, taskIdentity);
+  }
+
+  // v0.1 path: flat identity
   return {
     principal: taskIdentity.principal ?? workflowIdentity.principal ?? null,
     run_as: taskIdentity.run_as ?? workflowIdentity.run_as ?? null,
     attestation: taskIdentity.attestation ?? workflowIdentity.attestation ?? null,
   };
+}
+
+export function resolveIdentityV2(workflowIdentity, taskIdentity) {
+  // ref: task replaces workflow
+  const ref = taskIdentity.ref ?? workflowIdentity.ref ?? null;
+
+  // subject: merge key by key
+  const workflowSubject = workflowIdentity.subject || {};
+  const taskSubject = taskIdentity.subject || {};
+  const subject = {
+    kind: taskSubject.kind ?? workflowSubject.kind ?? null,
+    principal: taskSubject.principal ?? workflowSubject.principal ?? null,
+    display_name: taskSubject.display_name ?? workflowSubject.display_name ?? null,
+    run_as: taskSubject.run_as ?? workflowSubject.run_as ?? null,
+    issuer: taskSubject.issuer ?? workflowSubject.issuer ?? null,
+    delegation_mode: taskSubject.delegation_mode ?? workflowSubject.delegation_mode ?? null,
+    attributes: taskSubject.attributes ?? workflowSubject.attributes ?? null,
+  };
+
+  // auth: merge key by key, delegation_policy merges key by key
+  const workflowAuth = workflowIdentity.auth || {};
+  const taskAuth = taskIdentity.auth || {};
+  const workflowDelegation = workflowAuth.delegation_policy || {};
+  const taskDelegation = taskAuth.delegation_policy || {};
+  const auth = {
+    mode: taskAuth.mode ?? workflowAuth.mode ?? null,
+    scopes: taskAuth.scopes ?? workflowAuth.scopes ?? null,
+    audience: taskAuth.audience ?? workflowAuth.audience ?? null,
+    resource: taskAuth.resource ?? workflowAuth.resource ?? null,
+    cache: taskAuth.cache ?? workflowAuth.cache ?? null,
+    refresh: taskAuth.refresh ?? workflowAuth.refresh ?? null,
+    required: taskAuth.required ?? workflowAuth.required ?? null,
+    delegation_policy: {
+      max_depth: taskDelegation.max_depth ?? workflowDelegation.max_depth ?? null,
+      allowed_delegators: taskDelegation.allowed_delegators ?? workflowDelegation.allowed_delegators ?? null,
+      require_grant_per_hop: taskDelegation.require_grant_per_hop ?? workflowDelegation.require_grant_per_hop ?? null,
+    },
+    provider_config: taskAuth.provider_config ?? workflowAuth.provider_config ?? null,
+    inputs: taskAuth.inputs ?? workflowAuth.inputs ?? null,
+  };
+
+  // trust: merge key by key, constraints merge key by key
+  const workflowTrust = workflowIdentity.trust || {};
+  const taskTrust = taskIdentity.trust || {};
+  const workflowConstraints = workflowTrust.constraints || {};
+  const taskConstraints = taskTrust.constraints || {};
+  const trust = {
+    level: taskTrust.level ?? workflowTrust.level ?? null,
+    constraints: {
+      escalation: taskConstraints.escalation ?? workflowConstraints.escalation ?? null,
+      max_autonomy: taskConstraints.max_autonomy ?? workflowConstraints.max_autonomy ?? null,
+      escalation_timeout: taskConstraints.escalation_timeout ?? workflowConstraints.escalation_timeout ?? null,
+      require_justification: taskConstraints.require_justification ?? workflowConstraints.require_justification ?? null,
+    },
+  };
+
+  // presentation: bindings REPLACE (not merge), other fields merge
+  const workflowPres = workflowIdentity.presentation || {};
+  const taskPres = taskIdentity.presentation || {};
+  const presentation = {
+    bindings: taskPres.bindings ?? workflowPres.bindings ?? null,
+    handoff: taskPres.handoff ?? workflowPres.handoff ?? null,
+    cleanup: taskPres.cleanup ?? workflowPres.cleanup ?? null,
+    default_redaction: taskPres.default_redaction ?? workflowPres.default_redaction ?? null,
+  };
+
+  return { ref, subject, auth, trust, presentation };
 }
 
 export function resolveContract(workflow, task) {
@@ -109,6 +183,229 @@ export function resolveContract(workflow, task) {
     network: taskContract.network ?? workflowContract.network ?? null,
     max_cost_usd: taskContract.max_cost_usd ?? workflowContract.max_cost_usd ?? null,
     audit: taskContract.audit ?? workflowContract.audit ?? null,
+    required_trust_level: taskContract.required_trust_level ?? workflowContract.required_trust_level ?? null,
+    trust_enforcement: taskContract.trust_enforcement ?? workflowContract.trust_enforcement ?? null,
+  };
+}
+
+export function resolveAuthorizationProof(workflow, task) {
+  const workflowProof = workflow.authorization_proof || {};
+  const taskProof = task.authorization_proof || {};
+  const ref = taskProof.ref ?? workflowProof.ref ?? null;
+  if (!ref) return null;
+
+  const workflowClaims = workflowProof.claims || {};
+  const taskClaims = taskProof.claims || {};
+  const claims = { ...workflowClaims, ...taskClaims };
+
+  const workflowRequired = workflowProof.verify?.required ?? null;
+  const taskRequired = taskProof.verify?.required ?? null;
+  let required;
+  if (workflowRequired === true && taskRequired === false) {
+    required = true;
+  } else {
+    required = taskRequired ?? workflowRequired ?? null;
+  }
+
+  return { ref, claims: Object.keys(claims).length > 0 ? claims : null, verify: { required } };
+}
+
+export function resolveAuthorization(workflow, task) {
+  const workflowAuth = workflow.authorization || {};
+  const taskAuth = task.authorization || {};
+  const ref = taskAuth.ref ?? workflowAuth.ref ?? null;
+  if (!ref) return null;
+
+  const providerConfig = { ...(workflowAuth.provider_config || {}), ...(taskAuth.provider_config || {}) };
+
+  const workflowOnError = workflowAuth.on_error ?? null;
+  const taskOnError = taskAuth.on_error ?? null;
+  let onError;
+  if (workflowOnError === 'deny' && taskOnError === 'warn') {
+    onError = 'deny';
+  } else {
+    onError = taskOnError ?? workflowOnError ?? null;
+  }
+
+  const request = taskAuth.request ?? workflowAuth.request ?? null;
+  const decision = taskAuth.decision ?? workflowAuth.decision ?? null;
+
+  return {
+    ref,
+    provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
+    on_error: onError,
+    request,
+    decision,
+  };
+}
+
+export function resolveEvidence(workflow, task) {
+  const workflowEvidence = workflow.evidence || {};
+  const taskEvidence = task.evidence || {};
+  const ref = taskEvidence.ref ?? workflowEvidence.ref ?? null;
+  if (!ref) return null;
+
+  const workflowPayload = workflowEvidence.payload || {};
+  const taskPayload = taskEvidence.payload || {};
+  const payload = {
+    bind: taskPayload.bind ?? workflowPayload.bind ?? null,
+    context: taskPayload.context ?? workflowPayload.context ?? null,
+    format: taskPayload.format ?? workflowPayload.format ?? null,
+  };
+
+  const workflowRequired = workflowEvidence.verify?.required ?? null;
+  const taskRequired = taskEvidence.verify?.required ?? null;
+  let required;
+  if (workflowRequired === true && taskRequired === false) {
+    required = true;
+  } else {
+    required = taskRequired ?? workflowRequired ?? null;
+  }
+
+  return { ref, payload, verify: { required } };
+}
+
+function mergeRequiredFlag(baseRequired, overrideRequired) {
+  if (baseRequired === true && overrideRequired === false) {
+    return true;
+  }
+  return overrideRequired ?? baseRequired ?? null;
+}
+
+function mergeDenyFirst(baseMode, overrideMode) {
+  if (baseMode === 'deny' && overrideMode === 'warn') {
+    return 'deny';
+  }
+  return overrideMode ?? baseMode ?? null;
+}
+
+export function mergeIdentityProfile(profile, identity) {
+  const base = profile || {};
+  const declaration = identity || {};
+
+  const baseSubject = base.subject || {};
+  const declarationSubject = declaration.subject || {};
+  const baseAuth = base.auth || {};
+  const declarationAuth = declaration.auth || {};
+  const baseTrust = base.trust || {};
+  const declarationTrust = declaration.trust || {};
+  const baseConstraints = baseTrust.constraints || {};
+  const declarationConstraints = declarationTrust.constraints || {};
+  const basePresentation = base.presentation || {};
+  const declarationPresentation = declaration.presentation || {};
+
+  const providerConfig = {
+    ...(baseAuth.provider_config || {}),
+    ...(declarationAuth.provider_config || {}),
+  };
+  const inputs = {
+    ...(baseAuth.inputs || {}),
+    ...(declarationAuth.inputs || {}),
+  };
+
+  return {
+    ref: declaration.ref ?? base.id ?? null,
+    provider: base.provider ?? null,
+    subject: {
+      kind: declarationSubject.kind ?? baseSubject.kind ?? null,
+      principal: declarationSubject.principal ?? baseSubject.principal ?? null,
+      display_name: declarationSubject.display_name ?? baseSubject.display_name ?? null,
+      run_as: declarationSubject.run_as ?? baseSubject.run_as ?? null,
+      issuer: declarationSubject.issuer ?? baseSubject.issuer ?? null,
+      delegation_mode: declarationSubject.delegation_mode ?? baseSubject.delegation_mode ?? null,
+      attributes: declarationSubject.attributes ?? baseSubject.attributes ?? null,
+    },
+    auth: {
+      mode: declarationAuth.mode ?? baseAuth.mode ?? null,
+      scopes: declarationAuth.scopes ?? baseAuth.scopes ?? null,
+      audience: declarationAuth.audience ?? baseAuth.audience ?? null,
+      resource: declarationAuth.resource ?? baseAuth.resource ?? null,
+      cache: declarationAuth.cache ?? baseAuth.cache ?? null,
+      refresh: declarationAuth.refresh ?? baseAuth.refresh ?? null,
+      required: declarationAuth.required ?? baseAuth.required ?? null,
+      delegation_policy: {
+        max_depth: declarationAuth.delegation_policy?.max_depth ?? baseAuth.delegation_policy?.max_depth ?? null,
+        allowed_delegators: declarationAuth.delegation_policy?.allowed_delegators ?? baseAuth.delegation_policy?.allowed_delegators ?? null,
+        require_grant_per_hop: declarationAuth.delegation_policy?.require_grant_per_hop ?? baseAuth.delegation_policy?.require_grant_per_hop ?? null,
+      },
+      provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
+      inputs: Object.keys(inputs).length > 0 ? inputs : null,
+    },
+    trust: {
+      level: declarationTrust.level ?? baseTrust.level ?? null,
+      constraints: {
+        escalation: declarationConstraints.escalation ?? baseConstraints.escalation ?? null,
+        max_autonomy: declarationConstraints.max_autonomy ?? baseConstraints.max_autonomy ?? null,
+        escalation_timeout: declarationConstraints.escalation_timeout ?? baseConstraints.escalation_timeout ?? null,
+        require_justification: declarationConstraints.require_justification ?? baseConstraints.require_justification ?? null,
+      },
+    },
+    presentation: {
+      bindings: declarationPresentation.bindings ?? basePresentation.bindings ?? null,
+      handoff: declarationPresentation.handoff ?? basePresentation.handoff ?? null,
+      cleanup: declarationPresentation.cleanup ?? basePresentation.cleanup ?? null,
+      default_redaction: declarationPresentation.default_redaction ?? basePresentation.default_redaction ?? null,
+    },
+  };
+}
+
+export function mergeAuthorizationProofProfile(profile, declaration) {
+  const base = profile || {};
+  const overlay = declaration || {};
+  const claims = { ...(base.claims || {}), ...(overlay.claims || {}) };
+
+  return {
+    ref: overlay.ref ?? base.id ?? null,
+    method: base.method ?? null,
+    issuer: base.issuer ?? null,
+    audience: base.audience ?? null,
+    jwks_uri: base.jwks_uri ?? null,
+    public_key: base.public_key ?? null,
+    proof: base.proof ?? null,
+    claims: Object.keys(claims).length > 0 ? claims : null,
+    verify: {
+      required: mergeRequiredFlag(base.verify?.required ?? null, overlay.verify?.required ?? null),
+    },
+  };
+}
+
+export function mergeAuthorizationProfile(profile, declaration) {
+  const base = profile || {};
+  const overlay = declaration || {};
+  const providerConfig = {
+    ...(base.provider_config || {}),
+    ...(overlay.provider_config || {}),
+  };
+
+  return {
+    ref: overlay.ref ?? base.id ?? null,
+    provider: base.provider ?? null,
+    provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
+    on_error: mergeDenyFirst(base.on_error ?? null, overlay.on_error ?? null),
+    request: overlay.request ?? base.request ?? null,
+    decision: overlay.decision ?? base.decision ?? null,
+  };
+}
+
+export function mergeEvidenceProfile(profile, declaration) {
+  const base = profile || {};
+  const overlay = declaration || {};
+  const basePayload = base.payload || {};
+  const overlayPayload = overlay.payload || {};
+
+  return {
+    ref: overlay.ref ?? base.id ?? null,
+    provider: base.provider ?? null,
+    methods: base.methods ?? null,
+    provider_config: base.provider_config ?? null,
+    payload: {
+      bind: overlayPayload.bind ?? basePayload.bind ?? null,
+      context: overlayPayload.context ?? basePayload.context ?? null,
+      format: overlayPayload.format ?? basePayload.format ?? null,
+    },
+    verify: {
+      required: mergeRequiredFlag(base.verify?.required ?? null, overlay.verify?.required ?? null),
+    },
   };
 }
 
@@ -190,6 +487,9 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     },
     identity,
     contract,
+    authorization_proof: resolveAuthorizationProof(workflow, task),
+    authorization: resolveAuthorization(workflow, task),
+    evidence: resolveEvidence(workflow, task),
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

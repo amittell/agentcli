@@ -1,4 +1,4 @@
-export const MANIFEST_VERSION = '0.1';
+export const MANIFEST_VERSION = '0.2';
 
 const nullableString = { type: 'string', nullable: true };
 const nullableToken = { type: 'string', nullable: true, format: 'token', note: 'restricted to /^[A-Za-z0-9@:_./-]+$/' };
@@ -373,3 +373,410 @@ export const MANIFEST_SCHEMA = {
     }
   }
 };
+
+// -- v0.2 schema field definitions --
+
+/**
+ * v0.1 identity field (flat principal/run_as/attestation).
+ */
+export const identityFieldV1 = identityField;
+
+/**
+ * Value-from reference: a field that can resolve its value from env, file, or literal.
+ */
+export const valueFromField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    env: nullableString,
+    file: nullableString,
+    literal: nullableString,
+  },
+};
+
+/**
+ * Delegation policy sub-field for auth blocks.
+ */
+export const delegationPolicyField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    max_depth: { type: 'integer', min: 0, nullable: true },
+    allowed_delegators: { type: 'array', nullable: true, items: { type: 'string' } },
+    require_grant_per_hop: nullableBoolean,
+  },
+};
+
+/**
+ * Subject sub-field for v0.2 identity.
+ */
+export const subjectField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    kind: { type: 'string', enum: ['agent', 'service', 'workload', 'user', 'composite', 'delegated-agent', 'unknown'], nullable: true },
+    principal: nullableString,
+    display_name: nullableString,
+    run_as: nullableToken,
+    issuer: nullableString,
+    delegation_mode: { type: 'string', enum: ['none', 'on-behalf-of', 'impersonation'], nullable: true },
+    attributes: { type: 'object', nullable: true },
+  },
+};
+
+/**
+ * Auth sub-field for v0.2 identity.
+ */
+export const authField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    mode: { type: 'string', enum: ['none', 'service', 'delegated', 'on-behalf-of', 'impersonation', 'exchange'], nullable: true },
+    scopes: { type: 'array', nullable: true, items: { type: 'string' } },
+    audience: nullableString,
+    resource: nullableString,
+    cache: { type: 'string', enum: ['none', 'memory', 'state'], nullable: true },
+    refresh: { type: 'string', enum: ['never', 'manual', 'auto'], nullable: true },
+    required: nullableBoolean,
+    delegation_policy: delegationPolicyField,
+    provider_config: { type: 'object', nullable: true },
+    inputs: { type: 'object', nullable: true },
+  },
+};
+
+/**
+ * Trust sub-field for v0.2 identity.
+ */
+export const trustField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    level: { type: 'string', enum: ['untrusted', 'restricted', 'supervised', 'autonomous'], nullable: true },
+    constraints: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        escalation: { type: 'string', enum: ['fail', 'human-approval', 'log-and-proceed'], nullable: true },
+        max_autonomy: { type: 'string', enum: ['untrusted', 'restricted', 'supervised', 'autonomous'], nullable: true },
+        escalation_timeout: nullableString,
+        require_justification: nullableBoolean,
+      },
+    },
+  },
+};
+
+/**
+ * Presentation sub-field for v0.2 identity.
+ */
+export const presentationField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    bindings: { type: 'array', nullable: true, items: { type: 'object' } },
+    handoff: { type: 'string', enum: ['none', 'downscope', 'transaction-token'], nullable: true },
+    cleanup: { type: 'string', enum: ['always', 'on-success', 'on-failure', 'never'], nullable: true },
+    default_redaction: nullableBoolean,
+  },
+};
+
+/**
+ * v0.2 identity field (ref + subject + auth + trust + presentation).
+ */
+export const identityFieldV2 = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    ref: nullableString,
+    subject: subjectField,
+    auth: authField,
+    trust: trustField,
+    presentation: presentationField,
+  },
+};
+
+/**
+ * Identity profile definition for v0.2 manifest identity_profiles array.
+ */
+export const identityProfileField = {
+  type: 'object',
+  required: ['id', 'provider'],
+  fields: {
+    id: { type: 'string' },
+    provider: { type: 'string' },
+    subject: subjectField,
+    auth: authField,
+    trust: trustField,
+    presentation: presentationField,
+    provider_config: { type: 'object', nullable: true },
+  },
+};
+
+/**
+ * Authorization proof ref sub-field for v0.2 tasks.
+ */
+export const authorizationProofRefField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    ref: nullableString,
+    claims: { type: 'object', nullable: true },
+    verify: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        required: nullableBoolean,
+      },
+    },
+  },
+};
+
+/**
+ * Authorization proof profile definition for v0.2 manifest authorization_proof_profiles array.
+ */
+export const authorizationProofProfileField = {
+  type: 'object',
+  required: ['id', 'method'],
+  fields: {
+    id: { type: 'string' },
+    method: { type: 'string', enum: ['none', 'jwt', 'detached-signature', 'certificate'] },
+    issuer: nullableString,
+    audience: nullableString,
+    jwks_uri: nullableString,
+    public_key: nullableString,
+    claims: { type: 'object', nullable: true },
+    verify: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        required: nullableBoolean,
+      },
+    },
+  },
+};
+
+/**
+ * Authorization ref sub-field for v0.2 tasks.
+ */
+export const authorizationRefField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    ref: nullableString,
+    provider_config: { type: 'object', nullable: true },
+    on_error: { type: 'string', enum: ['deny', 'warn'], nullable: true },
+    request: { type: 'object', nullable: true },
+    decision: { type: 'object', nullable: true },
+  },
+};
+
+/**
+ * Authorization profile definition for v0.2 manifest authorization_profiles array.
+ */
+export const authorizationProfileField = {
+  type: 'object',
+  required: ['id', 'provider'],
+  fields: {
+    id: { type: 'string' },
+    provider: { type: 'string' },
+    provider_config: { type: 'object', nullable: true },
+    on_error: { type: 'string', enum: ['deny', 'warn'], nullable: true },
+    request: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        include: { type: 'array', nullable: true, items: { type: 'string' } },
+      },
+    },
+    decision: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        allow_values: { type: 'array', nullable: true, items: { type: 'string' } },
+        deny_values: { type: 'array', nullable: true, items: { type: 'string' } },
+        escalate_values: { type: 'array', nullable: true, items: { type: 'string' } },
+      },
+    },
+  },
+};
+
+/**
+ * Evidence ref sub-field for v0.2 tasks.
+ */
+export const evidenceRefField = {
+  type: 'object',
+  nullable: true,
+  fields: {
+    ref: nullableString,
+    payload: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        context: { type: 'object', nullable: true },
+        format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
+      },
+    },
+    verify: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        required: nullableBoolean,
+      },
+    },
+  },
+};
+
+/**
+ * Evidence profile definition for v0.2 manifest evidence_profiles array.
+ */
+export const evidenceProfileField = {
+  type: 'object',
+  required: ['id', 'provider'],
+  fields: {
+    id: { type: 'string' },
+    provider: { type: 'string' },
+    methods: { type: 'array', nullable: true, items: { type: 'string' } },
+    provider_config: { type: 'object', nullable: true },
+    payload: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        context: { type: 'object', nullable: true },
+        format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
+      },
+    },
+    verify: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        required: nullableBoolean,
+      },
+    },
+  },
+};
+
+Object.assign(contractField.fields, {
+  required_trust_level: nullableString,
+  trust_enforcement: { type: 'string', enum: ['none', 'advisory', 'strict'], nullable: true }
+});
+
+Object.assign(onFailureField.fields, {
+  identity: identityFieldV2,
+  contract: contractField,
+  authorization_proof: authorizationProofRefField,
+  authorization: authorizationRefField,
+  evidence: evidenceRefField
+});
+
+MANIFEST_SCHEMA.manifest = {
+  type: 'object',
+  required: ['version', 'workflows'],
+  fields: {
+    version: { type: 'string', const: MANIFEST_VERSION },
+    identity_profiles: { type: 'array', nullable: true, items: identityProfileField },
+    authorization_proof_profiles: { type: 'array', nullable: true, items: authorizationProofProfileField },
+    authorization_profiles: { type: 'array', nullable: true, items: authorizationProfileField },
+    evidence_profiles: { type: 'array', nullable: true, items: evidenceProfileField },
+    workflows: { type: 'array', minItems: 1, items: { type: 'object' } }
+  }
+};
+
+MANIFEST_SCHEMA.workflow = {
+  type: 'object',
+  required: ['id', 'name', 'tasks'],
+  fields: {
+    id: { type: 'string' },
+    name: { type: 'string' },
+    model_policy: modelPolicyField,
+    identity: identityFieldV2,
+    contract: contractField,
+    authorization_proof: authorizationProofRefField,
+    authorization: authorizationRefField,
+    evidence: evidenceRefField,
+    tasks: { type: 'array', minItems: 1, items: { type: 'object' } }
+  }
+};
+
+MANIFEST_SCHEMA.manifest.fields.workflows.items = MANIFEST_SCHEMA.workflow;
+
+MANIFEST_SCHEMA.task = {
+  type: 'object',
+  required: ['id', 'name', 'target'],
+  note: 'Exactly one of schedule or trigger must be present.',
+  fields: {
+    id: { type: 'string' },
+    name: { type: 'string' },
+    enabled: nullableBoolean,
+    prompt: nullableString,
+    command: { type: 'string', removed: true, note: 'use shell.program and shell.args' },
+    shell: shellField,
+    target: targetField,
+    model_policy: modelPolicyField,
+    intent: intentField,
+    output: outputField,
+    budgets: budgetsField,
+    schedule: {
+      type: 'object',
+      nullable: true,
+      required: ['cron'],
+      fields: {
+        cron: { type: 'string' },
+        tz: nullableString
+      }
+    },
+    trigger: {
+      type: 'object',
+      nullable: true,
+      required: ['parent', 'on'],
+      fields: {
+        parent: { type: 'string' },
+        on: { type: 'string', enum: ['success', 'failure', 'complete'] },
+        delay_s: { type: 'integer', min: 0, nullable: true },
+        condition: nullableString
+      }
+    },
+    delivery: deliveryField,
+    reliability: reliabilityField,
+    runtime: runtimeField,
+    approval: approvalField,
+    context: contextField,
+    session: sessionField,
+    identity: identityFieldV2,
+    contract: contractField,
+    authorization_proof: authorizationProofRefField,
+    authorization: authorizationRefField,
+    evidence: evidenceRefField,
+    on_failure: onFailureField,
+    delete_after_run: nullableBoolean
+  }
+};
+
+MANIFEST_SCHEMA.workflow.fields.tasks.items = MANIFEST_SCHEMA.task;
+
+Object.assign(MANIFEST_SCHEMA.standalonePlan.fields.capabilities.fields, {
+  identity: { type: 'boolean' },
+  contracts: { type: 'boolean' },
+  identity_declaration: { type: 'boolean' },
+  evidence_generation: { type: 'boolean' },
+  trust_evaluation: { type: 'boolean' },
+  delegation_validation: { type: 'boolean' }
+});
+
+Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
+  identity_ref: nullableString,
+  identity_subject_kind: nullableString,
+  identity_subject_principal: nullableString,
+  identity_trust_level: nullableString,
+  identity_delegation_mode: nullableString,
+  identity: { type: 'object', nullable: true },
+  authorization_proof_ref: nullableString,
+  authorization_proof: { type: 'object', nullable: true },
+  authorization_ref: nullableString,
+  authorization: { type: 'object', nullable: true },
+  evidence_ref: nullableString,
+  evidence: { type: 'object', nullable: true },
+  contract_required_trust_level: nullableString,
+  contract_trust_enforcement: nullableString,
+  authorization_proof_verification: { type: 'object', nullable: true }
+});

@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
+import { TARGETS } from './targets.js';
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -111,7 +112,7 @@ export function createSchedulerCliRunner(options = {}) {
   };
 }
 
-export function applyManifestToScheduler(
+export async function applyManifestToScheduler(
   manifest,
   {
     dryRun = false,
@@ -126,6 +127,76 @@ export function applyManifestToScheduler(
   } = {}
 ) {
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
+  const verificationByTask = new Map();
+
+  // v0.2: Authorization proof verification for backends lacking the capability
+  const targetFeatures = TARGETS['openclaw-scheduler']?.features || {};
+  if (!targetFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
+    // Target cannot verify proofs at runtime; verify locally during apply
+    const { readFileSync } = await import('node:fs');
+    const { resolveVerifier } = await import('./authorization-proof/index.js');
+    await import('./authorization-proof/none.js');
+    await import('./authorization-proof/jwt.js');
+    await import('./authorization-proof/detached-signature.js');
+    await import('./authorization-proof/certificate.js');
+
+    for (const job of compiled.jobs) {
+      const proof = job.authorization_proof;
+      if (!proof?.ref || proof.verify?.required !== true) continue;
+
+      const verifier = resolveVerifier(proof.method || 'none');
+
+      let proofValue = null;
+      if (proof.proof?.value_from?.env) {
+        proofValue = env[proof.proof.value_from.env] || null;
+      } else if (proof.proof?.value_from?.file) {
+        try {
+          proofValue = readFileSync(proof.proof.value_from.file, 'utf8').trim();
+        } catch {
+          proofValue = null;
+        }
+      }
+
+      if (!proofValue) {
+        throw Object.assign(
+          new Error(`Authorization proof not available for profile "${proof.ref}" (value_from did not resolve)`),
+          { code: 'authorization_proof_failed' }
+        );
+      }
+
+      const result = verifier.verifyProof(proofValue, proof, { env });
+      if (!result.verified) {
+        throw Object.assign(
+          new Error(`Authorization proof verification failed for profile "${proof.ref}": ${result.reason || 'verification failed'}`),
+          { code: 'authorization_proof_failed' }
+        );
+      }
+
+      const summary = verifier.describeVerification(result, {});
+      const verificationEntry = {
+        source: job.source,
+        authorization_proof_ref: proof.ref,
+        verification: summary,
+      };
+      verificationByTask.set(`${job.source.workflow_id}:${job.source.task_id}`, verificationEntry);
+    }
+  }
+
+  // v0.2: Reject manifests with authorization blocks when target lacks authorization_hook
+  if (!targetFeatures.authorization_hook) {
+    for (const job of compiled.jobs) {
+      if (job.authorization_ref || job.authorization?.ref) {
+        throw Object.assign(
+          new Error(
+            `Task "${job.source.task_id}" in workflow "${job.source.workflow_id}" has an authorization block ` +
+            'but target "openclaw-scheduler" does not support authorization_hook'
+          ),
+          { code: 'unsupported_capability' }
+        );
+      }
+    }
+  }
+
   const schedulerRunner = runner || createSchedulerCliRunner({
     schedulerPrefix,
     schedulerBin,
@@ -140,7 +211,11 @@ export function applyManifestToScheduler(
 
   const actions = [];
   for (const job of compiled.jobs) {
-    const spec = schedulerJobSpec(job);
+    const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
+    const spec = schedulerJobSpec({
+      ...job,
+      ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})
+    });
 
     let action;
     let existingId;
@@ -188,6 +263,9 @@ export function applyManifestToScheduler(
     },
     job_count: compiled.jobs.length,
     actions,
+    ...(verificationByTask.size > 0
+      ? { authorization_proof_verifications: [...verificationByTask.values()] }
+      : {}),
     ...(includeExplain ? { explain: compiled.explain } : {})
   };
 }

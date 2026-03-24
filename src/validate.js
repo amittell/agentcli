@@ -1,26 +1,36 @@
 import { MANIFEST_VERSION } from './schema.js';
 import { onFailureTaskId } from './shorthand.js';
 
+const SUPPORTED_VERSIONS = ['0.1', MANIFEST_VERSION];
+
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+const KNOWN_MANIFEST_KEYS = new Set([
+  'version', 'workflows',
+  'identity_profiles', 'authorization_proof_profiles', 'authorization_profiles', 'evidence_profiles'
+]);
+
 const KNOWN_WORKFLOW_KEYS = new Set([
-  'id', 'name', 'model_policy', 'identity', 'contract', 'tasks'
+  'id', 'name', 'model_policy', 'identity', 'contract', 'tasks',
+  'authorization_proof', 'authorization', 'evidence'
 ]);
 
 const KNOWN_TASK_KEYS = new Set([
   'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
-  'identity', 'contract', 'on_failure', 'delete_after_run'
+  'identity', 'contract', 'on_failure', 'delete_after_run',
+  'authorization_proof', 'authorization', 'evidence'
 ]);
 
 const KNOWN_ON_FAILURE_KEYS = new Set([
   'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
   'delay_s', 'condition', 'model_policy', 'intent', 'output', 'budgets',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
-  'identity', 'contract', 'delete_after_run'
+  'identity', 'contract', 'delete_after_run',
+  'authorization_proof', 'authorization', 'evidence'
 ]);
 
 function isObject(value) {
@@ -292,6 +302,8 @@ function validateContract(errors, path, value) {
     }
   }
   checkEnum(errors, `${path}.audit`, value.audit, ['none', 'on-failure', 'always']);
+  checkEnum(errors, `${path}.required_trust_level`, value.required_trust_level, ['untrusted', 'restricted', 'supervised', 'autonomous']);
+  checkEnum(errors, `${path}.trust_enforcement`, value.trust_enforcement, ['none', 'advisory', 'strict']);
 }
 
 function checkOptionalObject(errors, path, value) {
@@ -409,9 +421,11 @@ export function validateManifest(manifest) {
     return { ok: false, errors: [{ path: '$', message: 'manifest must be an object' }], warnings };
   }
 
-  if (manifest.version !== MANIFEST_VERSION) {
-    addError(errors, '$.version', `must equal ${MANIFEST_VERSION}`);
+  if (!SUPPORTED_VERSIONS.includes(manifest.version)) {
+    addError(errors, '$.version', `must be one of: ${SUPPORTED_VERSIONS.join(', ')}`);
   }
+
+  checkUnknownKeys(warnings, '$', manifest, KNOWN_MANIFEST_KEYS);
 
   if (!Array.isArray(manifest.workflows) || manifest.workflows.length === 0) {
     addError(errors, '$.workflows', 'must be a non-empty array');

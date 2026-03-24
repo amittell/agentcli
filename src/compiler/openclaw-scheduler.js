@@ -1,5 +1,13 @@
 import { validateManifest } from '../validate.js';
-import { normalizedTaskPlan, payloadMessageForExecution, stableId } from './shared.js';
+import {
+  mergeAuthorizationProfile,
+  mergeAuthorizationProofProfile,
+  mergeEvidenceProfile,
+  mergeIdentityProfile,
+  normalizedTaskPlan,
+  payloadMessageForExecution,
+  stableId
+} from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
@@ -43,6 +51,32 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       const plan = normalizedTaskPlan(workflow, task, taskIdToJobId);
       const isTriggered = plan.invocation.mode === 'trigger';
       const outputPolicy = schedulerOutputPolicy(plan);
+      const identityProfile = plan.identity?.ref
+        ? expanded.identity_profiles?.find(profile => profile.id === plan.identity.ref) ?? null
+        : null;
+      const authorizationProofProfile = plan.authorization_proof?.ref
+        ? expanded.authorization_proof_profiles?.find(profile => profile.id === plan.authorization_proof.ref) ?? null
+        : null;
+      const authorizationProfile = plan.authorization?.ref
+        ? expanded.authorization_profiles?.find(profile => profile.id === plan.authorization.ref) ?? null
+        : null;
+      const evidenceProfile = plan.evidence?.ref
+        ? expanded.evidence_profiles?.find(profile => profile.id === plan.evidence.ref) ?? null
+        : null;
+
+      const resolvedIdentity = plan.identity
+        ? mergeIdentityProfile(identityProfile, plan.identity)
+        : null;
+      const resolvedAuthorizationProof = plan.authorization_proof
+        ? mergeAuthorizationProofProfile(authorizationProofProfile, plan.authorization_proof)
+        : null;
+      const resolvedAuthorization = plan.authorization
+        ? mergeAuthorizationProfile(authorizationProfile, plan.authorization)
+        : null;
+      const resolvedEvidence = plan.evidence
+        ? mergeEvidenceProfile(evidenceProfile, plan.evidence)
+        : null;
+
       jobs.push({
         id: plan.id,
         source: plan.source,
@@ -79,14 +113,39 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
         preferred_session_key: plan.session.preferred_key,
-        identity_principal: plan.identity.principal,
-        identity_run_as: plan.identity.run_as,
-        identity_attestation: plan.identity.attestation,
+        identity_principal: plan.identity?.principal ?? null,
+        identity_run_as: plan.identity?.run_as ?? null,
+        identity_attestation: plan.identity?.attestation ?? null,
         contract_sandbox: plan.contract.sandbox,
         contract_allowed_paths: plan.contract.allowed_paths ? JSON.stringify(plan.contract.allowed_paths) : null,
         contract_network: plan.contract.network,
         contract_max_cost_usd: plan.contract.max_cost_usd,
         contract_audit: plan.contract.audit,
+
+        // v0.2 identity fields (when present)
+        identity_ref: resolvedIdentity?.ref ?? null,
+        identity_subject_kind: resolvedIdentity?.subject?.kind ?? null,
+        identity_subject_principal: resolvedIdentity?.subject?.principal ?? null,
+        identity_trust_level: resolvedIdentity?.trust?.level ?? null,
+        identity_delegation_mode: resolvedIdentity?.subject?.delegation_mode ?? null,
+        identity: resolvedIdentity,
+
+        // v0.2 authorization proof
+        authorization_proof_ref: resolvedAuthorizationProof?.ref ?? null,
+        authorization_proof: resolvedAuthorizationProof,
+
+        // v0.2 authorization
+        authorization_ref: resolvedAuthorization?.ref ?? null,
+        authorization: resolvedAuthorization,
+
+        // v0.2 evidence
+        evidence_ref: resolvedEvidence?.ref ?? null,
+        evidence: resolvedEvidence,
+
+        // v0.2 contract trust fields
+        contract_required_trust_level: plan.contract?.required_trust_level ?? null,
+        contract_trust_enforcement: plan.contract?.trust_enforcement ?? null,
+
         delete_after_run: plan.delete_after_run == null ? null : (plan.delete_after_run ? 1 : 0)
       });
 
@@ -110,10 +169,25 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
     }
   }
 
+  const profiles = {};
+  if (Array.isArray(expanded.identity_profiles) && expanded.identity_profiles.length > 0) {
+    profiles.identity_profiles = expanded.identity_profiles;
+  }
+  if (Array.isArray(expanded.authorization_proof_profiles) && expanded.authorization_proof_profiles.length > 0) {
+    profiles.authorization_proof_profiles = expanded.authorization_proof_profiles;
+  }
+  if (Array.isArray(expanded.authorization_profiles) && expanded.authorization_profiles.length > 0) {
+    profiles.authorization_profiles = expanded.authorization_profiles;
+  }
+  if (Array.isArray(expanded.evidence_profiles) && expanded.evidence_profiles.length > 0) {
+    profiles.evidence_profiles = expanded.evidence_profiles;
+  }
+
   return {
     target: 'openclaw-scheduler',
     version: '0.2',
     jobs,
+    ...profiles,
     ...(includeExplain ? { explain } : {})
   };
 }

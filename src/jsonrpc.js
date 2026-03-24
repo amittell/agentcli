@@ -188,7 +188,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
         }
         return responseResult(
           id,
-          applyManifestToScheduler(params.manifest, {
+          await applyManifestToScheduler(params.manifest, {
             dryRun: Boolean(params.dryRun),
             includeExplain: Boolean(params.explain),
             adoptBy,
@@ -204,6 +204,112 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
           id,
           await inspectSchedulerState(inspectParams(params, defaults))
         );
+      case 'agentcli.convert': {
+        const p = paramsObject(rawParams);
+        if (!p.manifest) throw invalidParams('manifest is required');
+        const { convertManifestV1toV2 } = await import('./convert.js');
+        return responseResult(id, convertManifestV1toV2(p.manifest));
+      }
+      case 'agentcli.authorizationProof.methods': {
+        const { listVerifiers } = await import('./authorization-proof/index.js');
+        await import('./authorization-proof/none.js');
+        await import('./authorization-proof/jwt.js');
+        await import('./authorization-proof/detached-signature.js');
+        await import('./authorization-proof/certificate.js');
+        return responseResult(id, { methods: listVerifiers() });
+      }
+      case 'agentcli.authorizationProof.schema': {
+        const p = paramsObject(rawParams);
+        if (!p.method) throw invalidParams('method is required');
+        const { getVerifier } = await import('./authorization-proof/index.js');
+        await import('./authorization-proof/none.js');
+        await import('./authorization-proof/jwt.js');
+        await import('./authorization-proof/detached-signature.js');
+        await import('./authorization-proof/certificate.js');
+        const verifier = getVerifier(p.method);
+        if (!verifier) throw invalidParams(`Unknown verifier method: ${p.method}`);
+        return responseResult(id, { method: p.method, verifier: verifier.name });
+      }
+      case 'agentcli.identity.providers': {
+        const { listProviders, listProviderCapabilities } = await import('./identity/index.js');
+        await import('./identity/none.js');
+        await import('./identity/env-bearer.js');
+        await import('./identity/file-bearer.js');
+        await import('./identity/oidc-client-credentials.js');
+        await import('./identity/oidc-token-exchange.js');
+        const providers = listProviders();
+        const capabilities = listProviderCapabilities();
+        return responseResult(id, { providers: providers.map(name => ({ name, capabilities: capabilities.get(name) || null })) });
+      }
+      case 'agentcli.identity.schema': {
+        const p = paramsObject(rawParams);
+        if (!p.provider) throw invalidParams('provider is required');
+        const { getProvider } = await import('./identity/index.js');
+        await import('./identity/none.js');
+        await import('./identity/env-bearer.js');
+        await import('./identity/file-bearer.js');
+        await import('./identity/oidc-client-credentials.js');
+        await import('./identity/oidc-token-exchange.js');
+        const idProvider = getProvider(p.provider);
+        if (!idProvider) throw invalidParams(`Unknown identity provider: ${p.provider}`);
+        return responseResult(id, { provider: p.provider, capabilities: idProvider.capabilities });
+      }
+      case 'agentcli.identity.resolve': {
+        const p = paramsObject(rawParams);
+        if (!p.manifest) throw invalidParams('manifest is required');
+        if (!p.taskId) throw invalidParams('taskId is required');
+        const { executeTask } = await import('./exec.js');
+        const result = await executeTask(p.manifest, { workflowId: p.workflowId, taskId: p.taskId, dryRun: true, identityDebug: true });
+        return responseResult(id, { declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, principal_used: result.principal_used });
+      }
+      case 'agentcli.identity.validateDelegation': {
+        const p = paramsObject(rawParams);
+        if (!p.manifest) throw invalidParams('manifest is required');
+        if (!p.taskId) throw invalidParams('taskId is required');
+        const { executeTask } = await import('./exec.js');
+        const result = await executeTask(p.manifest, { workflowId: p.workflowId, taskId: p.taskId, dryRun: true, identityDebug: true });
+        return responseResult(id, { delegation: result.resolved_identity?.delegation_validation || null });
+      }
+      case 'agentcli.authorization.providers': {
+        const { listAuthorizationProviders } = await import('./authorization/index.js');
+        await import('./authorization/none.js');
+        await import('./authorization/opa.js');
+        return responseResult(id, { providers: listAuthorizationProviders() });
+      }
+      case 'agentcli.authorization.schema': {
+        const p = paramsObject(rawParams);
+        if (!p.provider) throw invalidParams('provider is required');
+        const { getAuthorizationProvider } = await import('./authorization/index.js');
+        await import('./authorization/none.js');
+        await import('./authorization/opa.js');
+        const authzProvider = getAuthorizationProvider(p.provider);
+        if (!authzProvider) throw invalidParams(`Unknown authorization provider: ${p.provider}`);
+        return responseResult(id, { provider: p.provider, capabilities: authzProvider.capabilities });
+      }
+      case 'agentcli.authorization.evaluate': {
+        const p = paramsObject(rawParams);
+        if (!p.manifest) throw invalidParams('manifest is required');
+        if (!p.taskId) throw invalidParams('taskId is required');
+        const { executeTask } = await import('./exec.js');
+        const result = await executeTask(p.manifest, { workflowId: p.workflowId, taskId: p.taskId, dryRun: true, requireAuthorization: true });
+        return responseResult(id, { authorization: result.authorization || null });
+      }
+      case 'agentcli.evidence.providers': {
+        const { listEvidenceProviders } = await import('./evidence/index.js');
+        await import('./evidence/none.js');
+        await import('./evidence/ssh.js');
+        return responseResult(id, { providers: listEvidenceProviders() });
+      }
+      case 'agentcli.evidence.schema': {
+        const p = paramsObject(rawParams);
+        if (!p.provider) throw invalidParams('provider is required');
+        const { getEvidenceProvider } = await import('./evidence/index.js');
+        await import('./evidence/none.js');
+        await import('./evidence/ssh.js');
+        const evProvider = getEvidenceProvider(p.provider);
+        if (!evProvider) throw invalidParams(`Unknown evidence provider: ${p.provider}`);
+        return responseResult(id, { provider: p.provider, methods: evProvider.methods || [] });
+      }
       default:
         return responseError(id, -32601, `Method not found: ${method}`);
     }

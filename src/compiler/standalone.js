@@ -54,6 +54,20 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
     });
   }
 
+  const profiles = {};
+  if (Array.isArray(expanded.identity_profiles) && expanded.identity_profiles.length > 0) {
+    profiles.identity_profiles = expanded.identity_profiles;
+  }
+  if (Array.isArray(expanded.authorization_proof_profiles) && expanded.authorization_proof_profiles.length > 0) {
+    profiles.authorization_proof_profiles = expanded.authorization_proof_profiles;
+  }
+  if (Array.isArray(expanded.authorization_profiles) && expanded.authorization_profiles.length > 0) {
+    profiles.authorization_profiles = expanded.authorization_profiles;
+  }
+  if (Array.isArray(expanded.evidence_profiles) && expanded.evidence_profiles.length > 0) {
+    profiles.evidence_profiles = expanded.evidence_profiles;
+  }
+
   return {
     target: 'standalone',
     version: '0.2',
@@ -68,7 +82,12 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
       budgets: true,
       identity: true,
       contracts: true,
+      identity_declaration: true,
+      evidence_generation: true,
+      trust_evaluation: true,
+      delegation_validation: true,
     },
+    ...profiles,
     workflows,
     ...(includeExplain ? { explain } : {})
   };

@@ -40,6 +40,9 @@ export function buildOnFailureTask(parentTask) {
     ...(handler.session ? { session: structuredClone(handler.session) } : {}),
     ...(handler.identity ? { identity: structuredClone(handler.identity) } : {}),
     ...(handler.contract ? { contract: structuredClone(handler.contract) } : {}),
+    ...(handler.authorization_proof ? { authorization_proof: structuredClone(handler.authorization_proof) } : {}),
+    ...(handler.authorization ? { authorization: structuredClone(handler.authorization) } : {}),
+    ...(handler.evidence ? { evidence: structuredClone(handler.evidence) } : {}),
     ...(handler.delete_after_run != null ? { delete_after_run: handler.delete_after_run } : {})
   };
 }
