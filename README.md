@@ -100,9 +100,13 @@ Identity profiles are reusable, declarative descriptions of how a task should au
         "mode": "service",
         "scopes": ["deploy:staging"],
         "provider_config": {
-          "issuer": "https://auth.acme.com",
-          "client_id_env": "DEPLOY_CLIENT_ID",
-          "client_secret_env": "DEPLOY_CLIENT_SECRET"
+          "token_endpoint": "https://auth.acme.com/oauth2/token",
+          "client_id": "deploy-bot"
+        },
+        "inputs": {
+          "client_secret": {
+            "value_from": { "env": "DEPLOY_CLIENT_SECRET" }
+          }
         }
       },
       "trust": {
@@ -128,7 +132,7 @@ Identity profiles are reusable, declarative descriptions of how a task should au
 }
 ```
 
-Profiles never contain raw secrets. Credential references point to environment variables or files that are resolved at execution time.
+Prefer indirect secret references via `value_from` environment or file sources. Some providers also accept inline secret strings for compatibility, but published manifests should avoid them.
 
 ### Provider system
 
@@ -221,7 +225,7 @@ agentcli verify <execution-id> --allowed-signers ~/.ssh/allowed_signers
 | `spiffe-jwt-svid` | Acquires a JWT-SVID from the SPIFFE Workload API or a projected volume file. Works in SPIFFE-enabled Kubernetes clusters. |
 | `entra-agent-id` | Acquires a token via Microsoft Entra Agent ID using JWT bearer client assertion. Supports Agent Registry, Conditional Access, and IMDS fallback. |
 
-Use `agentcli identity providers` to list registered providers and `agentcli identity schema <provider>` to inspect provider-specific configuration fields.
+Use `agentcli identity providers` to list registered providers and `agentcli identity schema <provider>` to inspect the current provider metadata surface, including capabilities.
 
 ## Authorization Proof Methods
 
@@ -234,7 +238,7 @@ Authorization proof verifies that the manifest itself was approved before execut
 | `detached-signature` | Manifest approval via a detached cryptographic signature. |
 | `certificate` | Manifest approval via an X.509 certificate chain. |
 
-Use `agentcli authorization-proof methods` to list available methods and `agentcli authorization-proof schema <method>` to inspect method-specific fields.
+Use `agentcli authorization-proof methods` to list available methods and `agentcli authorization-proof schema <method>` to inspect verifier metadata for a method.
 
 ## Authorization Providers
 
@@ -243,7 +247,7 @@ Use `agentcli authorization-proof methods` to list available methods and `agentc
 | `none` | No external authorization. Contract enforcement still applies. |
 | `opa` | Evaluates policy using Open Policy Agent. |
 
-Use `agentcli authorization providers` to list registered providers and `agentcli authorization schema <provider>` to inspect configuration.
+Use `agentcli authorization providers` to list registered providers and `agentcli authorization schema <provider>` to inspect provider metadata and capabilities.
 
 ## Evidence Providers
 
@@ -252,7 +256,7 @@ Use `agentcli authorization providers` to list registered providers and `agentcl
 | `none` | No evidence produced. Audit records are still written. |
 | `ssh` | Signs evidence payloads using SSH keys. Verifiable with `agentcli verify`. |
 
-Use `agentcli evidence providers` to list registered providers and `agentcli evidence schema <provider>` to inspect configuration.
+Use `agentcli evidence providers` to list registered providers and `agentcli evidence schema <provider>` to inspect provider metadata.
 
 ## CLI Reference
 
@@ -290,17 +294,17 @@ Use `agentcli evidence providers` to list registered providers and `agentcli evi
 | Command | Description |
 |---|---|
 | `identity providers` | List registered identity providers. |
-| `identity schema <provider>` | Show configuration schema for an identity provider. |
+| `identity schema <provider>` | Show provider metadata and capabilities for an identity provider. |
 | `identity resolve <manifest> <task-id> [--workflow id]` | Resolve the effective identity for a task. |
 | `identity validate-delegation <manifest> <task-id> [--workflow id]` | Validate delegation chain for a task. |
 | `authorization-proof methods` | List available authorization proof methods. |
-| `authorization-proof schema <method>` | Show schema for an authorization proof method. |
+| `authorization-proof schema <method>` | Show verifier metadata for an authorization proof method. |
 | `authorization-proof verify <manifest> <task-id> [--workflow id]` | Verify authorization proof for a task. |
 | `authorization providers` | List registered authorization providers. |
-| `authorization schema <provider>` | Show schema for an authorization provider. |
+| `authorization schema <provider>` | Show provider metadata and capabilities for an authorization provider. |
 | `authorization evaluate <manifest> <task-id> [--workflow id]` | Evaluate authorization policy for a task. |
 | `evidence providers` | List registered evidence providers. |
-| `evidence schema <provider>` | Show schema for an evidence provider. |
+| `evidence schema <provider>` | Show provider metadata for an evidence provider. |
 | `whoami <manifest> <task-id> [--workflow id]` | Show the fully resolved identity, trust, and contract for a task. |
 
 ### Inspection and Audit

@@ -182,7 +182,7 @@ Result:
 
 Purpose:
 
-- get identity provider capabilities and configuration schema
+- get identity provider metadata and capabilities
 
 Params:
 
@@ -250,7 +250,7 @@ Result:
 
 Purpose:
 
-- get authorization proof verifier information and configuration schema
+- get authorization proof verifier metadata
 
 Params:
 
@@ -258,7 +258,7 @@ Params:
 
 Result:
 
-- `{ "ok": true, "method": "...", "capabilities": {...} }`
+- `{ "ok": true, "method": "...", "verifier": "..." }`
 
 ### `agentcli.authorization.providers`
 
@@ -282,7 +282,7 @@ Result:
 
 Purpose:
 
-- get authorization provider capabilities and configuration schema
+- get authorization provider metadata and capabilities
 
 Params:
 
@@ -332,7 +332,7 @@ Result:
 
 Purpose:
 
-- get evidence provider information and configuration schema
+- get evidence provider metadata
 
 Params:
 
@@ -340,7 +340,7 @@ Params:
 
 Result:
 
-- `{ "ok": true, "provider": "...", "capabilities": {...} }`
+- `{ "ok": true, "provider": "...", "methods": ["..."] }`
 
 ## Notifications
 
