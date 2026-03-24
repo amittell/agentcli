@@ -168,7 +168,8 @@ const jwtVerifier = {
    * Validate a JWT authorization proof profile without resolving the proof value.
    *
    * Checks that issuer is a non-empty string when present, that proof uses
-   * value_from with env or file source, and that claims is an object when present.
+   * value_from with env, file, or literal source, and that claims is an object
+   * when present.
    *
    * @param {object} profile - The authorization proof profile.
    * @param {object} _ctx    - Validation context.
@@ -194,10 +195,10 @@ const jwtVerifier = {
         });
       } else {
         const vf = profile.proof.value_from;
-        if (!vf.env && !vf.file) {
+        if (!vf.env && !vf.file && !vf.literal) {
           errors.push({
             field: 'proof.value_from',
-            message: 'value_from must specify env or file source',
+            message: 'value_from must specify env, file, or literal source',
           });
         }
       }

@@ -1,6 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
+import {
+  mergeAuthorizationProofProfile,
+  normalizedTaskPlan,
+  stableId
+} from './compiler/shared.js';
+import { expandManifestShorthands } from './shorthand.js';
 import { TARGETS } from './targets.js';
 
 function npmCommandForPlatform(platform = process.platform) {
@@ -112,6 +118,32 @@ export function createSchedulerCliRunner(options = {}) {
   };
 }
 
+function buildResolvedAuthorizationProofsByTask(manifest) {
+  const expanded = expandManifestShorthands(manifest);
+  const resolvedProofs = new Map();
+
+  for (const workflow of expanded.workflows || []) {
+    const taskIdToJobId = new Map();
+    for (const task of workflow.tasks || []) {
+      taskIdToJobId.set(task.id, stableId(workflow.id, task.id));
+    }
+
+    for (const task of workflow.tasks || []) {
+      const plan = normalizedTaskPlan(workflow, task, taskIdToJobId);
+      const proofProfile = plan.authorization_proof?.ref
+        ? expanded.authorization_proof_profiles?.find(profile => profile.id === plan.authorization_proof.ref) ?? null
+        : null;
+      const resolvedProof = plan.authorization_proof
+        ? mergeAuthorizationProofProfile(proofProfile, plan.authorization_proof)
+        : null;
+
+      resolvedProofs.set(`${workflow.id}:${task.id}`, resolvedProof);
+    }
+  }
+
+  return resolvedProofs;
+}
+
 export async function applyManifestToScheduler(
   manifest,
   {
@@ -128,6 +160,7 @@ export async function applyManifestToScheduler(
 ) {
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
   const verificationByTask = new Map();
+  const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
 
   // v0.2: Authorization proof verification for backends lacking the capability
   const targetFeatures = TARGETS['openclaw-scheduler']?.features || {};
@@ -141,7 +174,7 @@ export async function applyManifestToScheduler(
     await import('./authorization-proof/certificate.js');
 
     for (const job of compiled.jobs) {
-      const proof = job.authorization_proof;
+      const proof = resolvedProofsByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
       if (!proof?.ref || proof.verify?.required !== true) continue;
 
       const verifier = resolveVerifier(proof.method || 'none');
@@ -155,6 +188,8 @@ export async function applyManifestToScheduler(
         } catch {
           proofValue = null;
         }
+      } else if (proof.proof?.value_from?.literal) {
+        proofValue = proof.proof.value_from.literal;
       }
 
       if (!proofValue) {

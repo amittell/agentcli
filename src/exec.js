@@ -34,6 +34,7 @@ import './identity/azure-managed-identity.js';
 import './identity/aws-sts-assume-role.js';
 import './identity/gcp-workload-identity.js';
 import './identity/spiffe-jwt-svid.js';
+import './identity/entra-agent-id.js';
 import { compareTrustLevels, redactSession, buildCredentialSummary } from './identity/session.js';
 
 // v0.2 evidence providers

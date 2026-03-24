@@ -30,6 +30,108 @@ function schedulerOutputPolicy(plan) {
   };
 }
 
+function sanitizeIdentityDeclaration(identity) {
+  if (!identity) return null;
+  return {
+    ...identity,
+    auth: identity.auth
+      ? {
+          ...identity.auth,
+          provider_config: null,
+          inputs: null,
+        }
+      : null,
+  };
+}
+
+function sanitizeIdentityProfile(profile) {
+  if (!profile) return null;
+  return {
+    ...profile,
+    provider_config: null,
+    auth: profile.auth
+      ? {
+          ...profile.auth,
+          provider_config: null,
+          inputs: null,
+        }
+      : null,
+  };
+}
+
+function sanitizeAuthorizationDeclaration(authorization) {
+  if (!authorization) return null;
+  return {
+    ...authorization,
+    provider_config: null,
+  };
+}
+
+function sanitizeAuthorizationProofValueFrom(valueFrom) {
+  if (!valueFrom) return null;
+
+  const sanitized = {
+    env: valueFrom.env ?? null,
+    file: valueFrom.file ?? null,
+  };
+
+  if (!sanitized.env && !sanitized.file) {
+    return null;
+  }
+
+  return sanitized;
+}
+
+function sanitizeAuthorizationProofDeclaration(authorizationProof) {
+  if (!authorizationProof) return null;
+  return {
+    ...authorizationProof,
+    proof: authorizationProof.proof
+      ? {
+          ...authorizationProof.proof,
+          value_from: sanitizeAuthorizationProofValueFrom(authorizationProof.proof.value_from),
+        }
+      : null,
+  };
+}
+
+function sanitizeAuthorizationProofProfile(profile) {
+  if (!profile) return null;
+  return {
+    ...profile,
+    proof: profile.proof
+      ? {
+          ...profile.proof,
+          value_from: sanitizeAuthorizationProofValueFrom(profile.proof.value_from),
+        }
+      : null,
+  };
+}
+
+function sanitizeAuthorizationProfile(profile) {
+  if (!profile) return null;
+  return {
+    ...profile,
+    provider_config: null,
+  };
+}
+
+function sanitizeEvidenceDeclaration(evidence) {
+  if (!evidence) return null;
+  return {
+    ...evidence,
+    provider_config: null,
+  };
+}
+
+function sanitizeEvidenceProfile(profile) {
+  if (!profile) return null;
+  return {
+    ...profile,
+    provider_config: null,
+  };
+}
+
 export function compileManifestToScheduler(manifest, { includeExplain = false } = {}) {
   const validation = validateManifest(manifest);
   if (!validation.ok) {
@@ -76,6 +178,10 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       const resolvedEvidence = plan.evidence
         ? mergeEvidenceProfile(evidenceProfile, plan.evidence)
         : null;
+      const persistedIdentity = sanitizeIdentityDeclaration(resolvedIdentity);
+      const persistedAuthorizationProof = sanitizeAuthorizationProofDeclaration(resolvedAuthorizationProof);
+      const persistedAuthorization = sanitizeAuthorizationDeclaration(resolvedAuthorization);
+      const persistedEvidence = sanitizeEvidenceDeclaration(resolvedEvidence);
 
       jobs.push({
         id: plan.id,
@@ -123,24 +229,24 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         contract_audit: plan.contract.audit,
 
         // v0.2 identity fields (when present)
-        identity_ref: resolvedIdentity?.ref ?? null,
-        identity_subject_kind: resolvedIdentity?.subject?.kind ?? null,
-        identity_subject_principal: resolvedIdentity?.subject?.principal ?? null,
-        identity_trust_level: resolvedIdentity?.trust?.level ?? null,
-        identity_delegation_mode: resolvedIdentity?.subject?.delegation_mode ?? null,
-        identity: resolvedIdentity,
+        identity_ref: persistedIdentity?.ref ?? null,
+        identity_subject_kind: persistedIdentity?.subject?.kind ?? null,
+        identity_subject_principal: persistedIdentity?.subject?.principal ?? null,
+        identity_trust_level: persistedIdentity?.trust?.level ?? null,
+        identity_delegation_mode: persistedIdentity?.subject?.delegation_mode ?? null,
+        identity: persistedIdentity,
 
         // v0.2 authorization proof
-        authorization_proof_ref: resolvedAuthorizationProof?.ref ?? null,
-        authorization_proof: resolvedAuthorizationProof,
+        authorization_proof_ref: persistedAuthorizationProof?.ref ?? null,
+        authorization_proof: persistedAuthorizationProof,
 
         // v0.2 authorization
         authorization_ref: resolvedAuthorization?.ref ?? null,
-        authorization: resolvedAuthorization,
+        authorization: persistedAuthorization,
 
         // v0.2 evidence
         evidence_ref: resolvedEvidence?.ref ?? null,
-        evidence: resolvedEvidence,
+        evidence: persistedEvidence,
 
         // v0.2 contract trust fields
         contract_required_trust_level: plan.contract?.required_trust_level ?? null,
@@ -171,16 +277,16 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
   const profiles = {};
   if (Array.isArray(expanded.identity_profiles) && expanded.identity_profiles.length > 0) {
-    profiles.identity_profiles = expanded.identity_profiles;
+    profiles.identity_profiles = expanded.identity_profiles.map(sanitizeIdentityProfile);
   }
   if (Array.isArray(expanded.authorization_proof_profiles) && expanded.authorization_proof_profiles.length > 0) {
-    profiles.authorization_proof_profiles = expanded.authorization_proof_profiles;
+    profiles.authorization_proof_profiles = expanded.authorization_proof_profiles.map(sanitizeAuthorizationProofProfile);
   }
   if (Array.isArray(expanded.authorization_profiles) && expanded.authorization_profiles.length > 0) {
-    profiles.authorization_profiles = expanded.authorization_profiles;
+    profiles.authorization_profiles = expanded.authorization_profiles.map(sanitizeAuthorizationProfile);
   }
   if (Array.isArray(expanded.evidence_profiles) && expanded.evidence_profiles.length > 0) {
-    profiles.evidence_profiles = expanded.evidence_profiles;
+    profiles.evidence_profiles = expanded.evidence_profiles.map(sanitizeEvidenceProfile);
   }
 
   return {

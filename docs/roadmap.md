@@ -18,7 +18,7 @@
 - Local execution adapter for shell-only workflows
 - Stronger sanitization policies beyond `basic`
 - Identity profiles and provider system (`none`, `env-bearer`, `oidc-client-credentials`, `oidc-token-exchange`)
-- Trust levels (`restricted`, `supervised`, `trusted`, `autonomous`) and escalation (`human-approval`, `fail`)
+- Trust levels (`untrusted`, `restricted`, `supervised`, `autonomous`) and escalation (`fail`, `human-approval`, `log-and-proceed`)
 - Authorization proof verification (`jwt`, `certificate`, `signature` verifiers)
 - External authorization via OPA provider (Phase 4.5 hook point)
 - Evidence generation (`ssh`, `none` evidence providers, separate from v0.1 signing)
@@ -30,11 +30,14 @@
 - Delegation chain validation with policy enforcement
 - Three-stage profile merge (profile, workflow, task) with tightening-only rules
 - Backend compilation preserves v0.2 identity, evidence, authorization proof, and authorization metadata
-- 74 new tests (346 total)
+- Enterprise identity providers: `azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`
+- Comprehensive v0.2 profile validation with cross-reference checks for dangling refs
+- Converter produces proper identity profile refs (not inline blocks)
+- 365 total tests including 12 end-to-end integration tests
 
 ## v0.3
 
-- Enterprise identity providers: `entra-agent-id`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`
+- Additional Entra Agent ID governance features (Conditional Access policy integration, agent lifecycle hooks)
 - Mid-execution credential refresh for long-running tasks (runtime-managed session renewal)
 - Agent registry export compatibility (structured identity profiles exportable for Entra Agent Registry, organizational CMDBs)
 - Multi-runtime credential handoff (cross-backend derived credential propagation)

@@ -8,7 +8,7 @@
  * Uses the global fetch() API available in Node >= 22 (no external dependencies).
  */
 
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes, createHmac, createHash } from 'node:crypto';

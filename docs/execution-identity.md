@@ -4,12 +4,14 @@
 
 This document describes the execution identity architecture for `agentcli` manifest spec `0.2`.
 
-Implementation status as of 2026-03-21:
+Implementation status as of 2026-03-23:
 
-- Phases 1-5 are complete
-- Phase 6 (enterprise/cloud-specific providers) is partially complete
-- The `oidc-client-credentials` provider validates the architecture end-to-end
-- Enterprise providers (entra-agent-id, aws-sts-assume-role, etc.) and external authorization providers (opa) are deferred to a future implementation wave
+- Phases 1-6 are complete
+- All ten identity providers are shipped: none, env-bearer, file-bearer, oidc-client-credentials, oidc-token-exchange, azure-managed-identity, aws-sts-assume-role, gcp-workload-identity, spiffe-jwt-svid, entra-agent-id
+- Authorization providers: none, opa
+- Evidence providers: none, ssh
+- Authorization proof verifiers: none, jwt, detached-signature, certificate
+- All provider targets from the original spec are implemented, including `entra-agent-id`
 - v0.1 backward compatibility is preserved: v0.1 manifests execute through the original code path unchanged
 
 This spec is normative for `0.2` and backward-compatible with `0.1`.
@@ -2285,11 +2287,11 @@ Implementation note: `apply.js` was made async to support dynamic import of auth
 - [DONE] `oidc-client-credentials` as the initial cloud-neutral credential acquisition provider
 - [DONE] `oidc-token-exchange` for RFC 8693 token exchange (supports delegation chains and downscope handoff)
 - [DONE] add enterprise and cloud-specific providers: `azure-managed-identity` (IMDS), `aws-sts-assume-role` (STS with Signature V4), `gcp-workload-identity` (metadata server), `spiffe-jwt-svid` (Workload API + file-based SVID)
-- [PENDING] `entra-agent-id` provider -- requires Entra Agent Registry API access (distinct from azure-managed-identity)
+- [DONE] `entra-agent-id` provider -- authenticates via Entra token endpoint with JWT bearer client assertion, supports IMDS fallback, GUID validation, downscope handoff, and delegation
 - [DONE] providers implement trust level capabilities from the start
 - [DONE] ship at least one authorization provider: `opa` provider implements OPA REST API integration via fetch()
 
-Implementation note: All nine identity providers are fully implemented and functional. Enterprise providers (`azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`) use their platform's native metadata endpoints and fail with clear error messages when not running in the target environment. The `aws-sts-assume-role` provider includes a minimal AWS Signature V4 implementation using Node's built-in `crypto` module. The `spiffe-jwt-svid` provider supports both file-based SVID acquisition (for Kubernetes projected volumes) and HTTP-based Workload API access.
+Implementation note: All ten identity providers are fully implemented and functional. Enterprise providers (`azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`, `entra-agent-id`) use their platform's native metadata endpoints and fail with clear error messages when not running in the target environment. The `aws-sts-assume-role` provider includes a minimal AWS Signature V4 implementation using Node's built-in `crypto` module. The `spiffe-jwt-svid` provider supports both file-based SVID acquisition (for Kubernetes projected volumes) and HTTP-based Workload API access.
 
 ### Additional Implementation Items
 

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -621,9 +622,34 @@ test('cli schema manifest reflects v0.2 identity surfaces', async () => {
   assert.ok(output.schema.fields.evidence_profiles);
 });
 
+test('cli schema manifest exposes authorization proof value_from sources', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const proofValueFrom = output.schema.fields.authorization_proof_profiles.items.fields.proof.fields.value_from.fields;
+
+  assert.equal(output.ok, true);
+  assert.ok(proofValueFrom.env);
+  assert.ok(proofValueFrom.file);
+  assert.ok(proofValueFrom.literal);
+});
+
 test('cli -h prints usage', async () => {
   const output = await runCli(['-h']);
   assert.match(output, /^agentcli <command> \[args\]/);
+});
+
+test('cli subcommand errors preserve the structured stderr contract', () => {
+  const result = spawnSync(process.execPath, ['bin/agentcli.js', 'identity', 'schema'], {
+    cwd: process.cwd(),
+    encoding: 'utf8'
+  });
+
+  assert.strictEqual(result.status, 1);
+  assert.strictEqual(result.stdout, '');
+
+  const error = JSON.parse(result.stderr);
+  assert.strictEqual(error.ok, false);
+  assert.strictEqual(error.error_type, 'invalid_argument');
+  assert.match(error.error, /Usage: agentcli identity schema <provider>/);
 });
 
 test('cli accepts -- as an argument terminator', async () => {
@@ -4933,6 +4959,21 @@ test('jwt verifier validates profile with issuer', async () => {
   assert.strictEqual(result.valid, true);
 });
 
+test('authorization proof verifiers accept literal proof sources', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  await import('../src/authorization-proof/detached-signature.js');
+  await import('../src/authorization-proof/certificate.js');
+
+  for (const method of ['jwt', 'detached-signature', 'certificate']) {
+    const verifier = getVerifier(method);
+    const result = verifier.validateProfile({
+      proof: { value_from: { literal: 'inline-proof-material' } }
+    }, {});
+    assert.strictEqual(result.valid, true, `${method} should accept literal proof sources`);
+  }
+});
+
 test('jwt verifier rejects profile with empty issuer', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
@@ -5331,10 +5372,97 @@ test('v0.2 scheduler compilation includes resolved authorization and evidence de
   assert.ok(job);
   assert.deepStrictEqual(job.authorization_proof.claims, { subject: 'agentcli-proof' });
   assert.strictEqual(job.authorization_proof.verify.required, true);
-  assert.deepStrictEqual(job.authorization.provider_config, { team: 'ops', task: 'proof-task' });
+  assert.strictEqual(job.authorization.provider_config, null);
   assert.deepStrictEqual(job.authorization.request, { include: ['identity'] });
   assert.deepStrictEqual(job.evidence.payload.bind, ['command']);
   assert.strictEqual(job.evidence.verify.required, false);
+});
+
+test('v0.2 scheduler compilation redacts provider inputs from durable specs', () => {
+  const manifest = {
+    version: '0.2',
+    authorization_proof_profiles: [{
+      id: 'literal-proof',
+      method: 'jwt',
+      proof: {
+        value_from: {
+          literal: unsignedJwt({ sub: 'agentcli-proof' })
+        }
+      },
+      verify: { required: true }
+    }],
+    identity_profiles: [{
+      id: 'secret-agent',
+      provider: 'none',
+      provider_config: {
+        profile_secret: 'profile-level-secret'
+      },
+      subject: { kind: 'agent', principal: 'agent://local/secret' },
+      auth: {
+        mode: 'service',
+        provider_config: {
+          token_endpoint: 'https://issuer.example/token',
+          client_secret: 'super-secret'
+        },
+        inputs: {
+          access_token: {
+            value_from: {
+              env: 'SECRET_TOKEN'
+            }
+          }
+        }
+      }
+    }],
+    authorization_profiles: [{
+      id: 'secret-authz',
+      provider: 'none',
+      provider_config: {
+        team: 'ops',
+        api_key: 'secret-api-key'
+      }
+    }],
+    evidence_profiles: [{
+      id: 'secret-evidence',
+      provider: 'none',
+      provider_config: {
+        signing_key: '/tmp/private-key'
+      }
+    }],
+    workflows: [{
+      id: 'redaction-workflow',
+      name: 'Redaction Workflow',
+      tasks: [{
+        id: 'redact-task',
+        name: 'Redact Task',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['redact'] },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'secret-agent' },
+        authorization_proof: { ref: 'literal-proof' },
+        authorization: {
+          ref: 'secret-authz',
+          provider_config: { task: 'redact-task' }
+        },
+        evidence: { ref: 'secret-evidence' }
+      }]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs.find(candidate => candidate.source.task_id === 'redact-task');
+
+  assert.ok(job);
+  assert.strictEqual(job.identity.auth.provider_config, null);
+  assert.strictEqual(job.identity.auth.inputs, null);
+  assert.strictEqual(job.authorization_proof.proof.value_from, null);
+  assert.strictEqual(job.authorization.provider_config, null);
+  assert.strictEqual(job.evidence.provider_config, null);
+  assert.strictEqual(compiled.authorization_proof_profiles[0].proof.value_from, null);
+  assert.strictEqual(compiled.identity_profiles[0].provider_config, null);
+  assert.strictEqual(compiled.identity_profiles[0].auth.provider_config, null);
+  assert.strictEqual(compiled.identity_profiles[0].auth.inputs, null);
+  assert.strictEqual(compiled.authorization_profiles[0].provider_config, null);
+  assert.strictEqual(compiled.evidence_profiles[0].provider_config, null);
 });
 
 test('applyManifestToScheduler returns authorization proof verification summaries', async () => {
@@ -5364,6 +5492,55 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-me');
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
   assert.ok(calls[0].authorization_proof_verification);
+  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+});
+
+test('applyManifestToScheduler verifies literal authorization proofs without persisting them', async () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  const result = await applyManifestToScheduler({
+    version: '0.2',
+    authorization_proof_profiles: [{
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { literal: unsignedJwt({ sub: 'agentcli-proof' }) } },
+      claims: { subject: 'agentcli-proof' },
+      verify: { required: true }
+    }],
+    workflows: [{
+      id: 'apply-proof-literal',
+      name: 'Apply Proof Literal',
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [{
+        id: 'verify-me',
+        name: 'Verify Me',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['apply-proof'] },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  }, {
+    runner,
+    env: process.env
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.authorization_proof_verifications.length, 1);
+  assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
+  assert.strictEqual(calls[0].authorization_proof.proof.value_from, null);
   assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
 });
 
@@ -5792,6 +5969,60 @@ test('validation rejects identity profile missing required id', () => {
   const result = validateManifest(manifest);
   assert.strictEqual(result.ok, false);
   assert.ok(result.errors.some(e => e.path.includes('identity_profiles[0].id')));
+});
+
+test('validation accepts authorization proof profiles with value_from proof sources', () => {
+  const manifest = {
+    version: '0.2',
+    authorization_proof_profiles: [{
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { literal: 'header.payload.signature' } },
+      verify: { required: true }
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+});
+
+test('validation rejects authorization proof profiles with empty value_from', () => {
+  const manifest = {
+    version: '0.2',
+    authorization_proof_profiles: [{
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: {} }
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path === '$.authorization_proof_profiles[0].proof.value_from'));
 });
 
 test('validation rejects dangling identity ref', () => {

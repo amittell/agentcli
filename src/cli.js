@@ -167,6 +167,10 @@ function formatOutput(payload, { mode = 'json', pretty = false } = {}) {
   return pretty ? colorizeJson(json) : json;
 }
 
+function cliError(message, code = 'invalid_argument', extra = {}) {
+  throw Object.assign(new Error(message), { code, ...extra });
+}
+
 export async function runCli(
   argv,
   {
@@ -538,7 +542,7 @@ export async function runCli(
         }
         return formatOutput(converted, { mode: outputMode, pretty });
       } catch (err) {
-        return formatOutput({ ok: false, error: err.message }, { mode: outputMode, pretty });
+        return cliError(err.message, err.code || 'invalid_argument', err.validation ? { validation: err.validation } : {});
       }
     }
     case 'identity': {
@@ -554,11 +558,12 @@ export async function runCli(
         await import('./identity/aws-sts-assume-role.js');
         await import('./identity/gcp-workload-identity.js');
         await import('./identity/spiffe-jwt-svid.js');
+        await import('./identity/entra-agent-id.js');
         return formatOutput({ ok: true, providers: listProviders().map(name => ({ name, capabilities: listProviderCapabilities().get(name) || null })) }, { mode: outputMode, pretty });
       }
       if (subcommand === 'schema') {
         const providerName = positionals[2];
-        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli identity schema <provider>' }, { mode: outputMode, pretty });
+        if (!providerName) cliError('Usage: agentcli identity schema <provider>');
         const { getProvider } = await import('./identity/index.js');
         await import('./identity/none.js');
         await import('./identity/env-bearer.js');
@@ -569,15 +574,16 @@ export async function runCli(
         await import('./identity/aws-sts-assume-role.js');
         await import('./identity/gcp-workload-identity.js');
         await import('./identity/spiffe-jwt-svid.js');
+        await import('./identity/entra-agent-id.js');
         const provider = getProvider(providerName);
-        if (!provider) return formatOutput({ ok: false, error: `Unknown identity provider: ${providerName}` }, { mode: outputMode, pretty });
+        if (!provider) cliError(`Unknown identity provider: ${providerName}`);
         return formatOutput({ ok: true, provider: providerName, capabilities: provider.capabilities }, { mode: outputMode, pretty });
       }
       if (subcommand === 'resolve') {
         const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
-        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli identity resolve <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        if (!taskId) cliError('Usage: agentcli identity resolve <manifest> <task-id> [--workflow id]');
         const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
         return formatOutput({ ok: true, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, principal_used: result.principal_used }, { mode: outputMode, pretty });
       }
@@ -585,11 +591,11 @@ export async function runCli(
         const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
-        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli identity validate-delegation <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        if (!taskId) cliError('Usage: agentcli identity validate-delegation <manifest> <task-id> [--workflow id]');
         const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
         return formatOutput({ ok: true, delegation: result.resolved_identity?.delegation_validation || null }, { mode: outputMode, pretty });
       }
-      return formatOutput({ ok: false, error: 'Unknown identity subcommand. Available: providers, schema, resolve, validate-delegation' }, { mode: outputMode, pretty });
+      return cliError('Unknown identity subcommand. Available: providers, schema, resolve, validate-delegation');
     }
     case 'authorization-proof': {
       const subcommand = positionals[1];
@@ -603,25 +609,25 @@ export async function runCli(
       }
       if (subcommand === 'schema') {
         const method = positionals[2];
-        if (!method) return formatOutput({ ok: false, error: 'Usage: agentcli authorization-proof schema <method>' }, { mode: outputMode, pretty });
+        if (!method) cliError('Usage: agentcli authorization-proof schema <method>');
         const { getVerifier } = await import('./authorization-proof/index.js');
         await import('./authorization-proof/none.js');
         await import('./authorization-proof/jwt.js');
         await import('./authorization-proof/detached-signature.js');
         await import('./authorization-proof/certificate.js');
         const verifier = getVerifier(method);
-        if (!verifier) return formatOutput({ ok: false, error: `Unknown verifier method: ${method}` }, { mode: outputMode, pretty });
+        if (!verifier) cliError(`Unknown verifier method: ${method}`);
         return formatOutput({ ok: true, method, verifier: verifier.name }, { mode: outputMode, pretty });
       }
       if (subcommand === 'verify') {
         const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
-        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli authorization-proof verify <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        if (!taskId) cliError('Usage: agentcli authorization-proof verify <manifest> <task-id> [--workflow id]');
         const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, cwd, env: derivedEnv });
         return formatOutput({ ok: true, authorization_proof: result.authorization_proof || null }, { mode: outputMode, pretty });
       }
-      return formatOutput({ ok: false, error: 'Unknown authorization-proof subcommand. Available: methods, schema, verify' }, { mode: outputMode, pretty });
+      return cliError('Unknown authorization-proof subcommand. Available: methods, schema, verify');
     }
     case 'authorization': {
       const subcommand = positionals[1];
@@ -633,23 +639,23 @@ export async function runCli(
       }
       if (subcommand === 'schema') {
         const providerName = positionals[2];
-        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli authorization schema <provider>' }, { mode: outputMode, pretty });
+        if (!providerName) cliError('Usage: agentcli authorization schema <provider>');
         const { getAuthorizationProvider } = await import('./authorization/index.js');
         await import('./authorization/none.js');
         await import('./authorization/opa.js');
         const provider = getAuthorizationProvider(providerName);
-        if (!provider) return formatOutput({ ok: false, error: `Unknown authorization provider: ${providerName}` }, { mode: outputMode, pretty });
+        if (!provider) cliError(`Unknown authorization provider: ${providerName}`);
         return formatOutput({ ok: true, provider: providerName, capabilities: provider.capabilities }, { mode: outputMode, pretty });
       }
       if (subcommand === 'evaluate') {
         const manifest = await loadJsonInput(positionals[2], { cwd, env: derivedEnv, stdin });
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
-        if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli authorization evaluate <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+        if (!taskId) cliError('Usage: agentcli authorization evaluate <manifest> <task-id> [--workflow id]');
         const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, requireAuthorization: true, cwd, env: derivedEnv });
         return formatOutput({ ok: true, authorization: result.authorization || null }, { mode: outputMode, pretty });
       }
-      return formatOutput({ ok: false, error: 'Unknown authorization subcommand. Available: providers, schema, evaluate' }, { mode: outputMode, pretty });
+      return cliError('Unknown authorization subcommand. Available: providers, schema, evaluate');
     }
     case 'evidence': {
       const subcommand = positionals[1];
@@ -661,21 +667,21 @@ export async function runCli(
       }
       if (subcommand === 'schema') {
         const providerName = positionals[2];
-        if (!providerName) return formatOutput({ ok: false, error: 'Usage: agentcli evidence schema <provider>' }, { mode: outputMode, pretty });
+        if (!providerName) cliError('Usage: agentcli evidence schema <provider>');
         const { getEvidenceProvider } = await import('./evidence/index.js');
         await import('./evidence/none.js');
         await import('./evidence/ssh.js');
         const provider = getEvidenceProvider(providerName);
-        if (!provider) return formatOutput({ ok: false, error: `Unknown evidence provider: ${providerName}` }, { mode: outputMode, pretty });
+        if (!provider) cliError(`Unknown evidence provider: ${providerName}`);
         return formatOutput({ ok: true, provider: providerName, methods: provider.methods || [] }, { mode: outputMode, pretty });
       }
-      return formatOutput({ ok: false, error: 'Unknown evidence subcommand. Available: providers, schema' }, { mode: outputMode, pretty });
+      return cliError('Unknown evidence subcommand. Available: providers, schema');
     }
     case 'whoami': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
       const taskId = positionals[2];
       const workflowId = flags.workflow || null;
-      if (!taskId) return formatOutput({ ok: false, error: 'Usage: agentcli whoami <manifest> <task-id> [--workflow id]' }, { mode: outputMode, pretty });
+      if (!taskId) cliError('Usage: agentcli whoami <manifest> <task-id> [--workflow id]');
       const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
       return formatOutput({ ok: true, principal_used: result.principal_used, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, trust: result.trust || null }, { mode: outputMode, pretty });
     }

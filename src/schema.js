@@ -401,7 +401,7 @@ export const delegationPolicyField = {
   type: 'object',
   nullable: true,
   fields: {
-    max_depth: { type: 'integer', min: 0, nullable: true },
+    max_depth: { type: 'integer', min: 1, nullable: true },
     allowed_delegators: { type: 'array', nullable: true, items: { type: 'string' } },
     require_grant_per_hop: nullableBoolean,
   },
@@ -543,6 +543,13 @@ export const authorizationProofProfileField = {
     audience: nullableString,
     jwks_uri: nullableString,
     public_key: nullableString,
+    proof: {
+      type: 'object',
+      nullable: true,
+      fields: {
+        value_from: valueFromField,
+      },
+    },
     claims: { type: 'object', nullable: true },
     verify: {
       type: 'object',

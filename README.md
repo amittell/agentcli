@@ -215,6 +215,11 @@ agentcli verify <execution-id> --allowed-signers ~/.ssh/allowed_signers
 | `file-bearer` | Reads a bearer token from a file at execution time. |
 | `oidc-client-credentials` | Acquires an access token using the OAuth 2.0 Client Credentials grant. |
 | `oidc-token-exchange` | Exchanges an existing token for a new one using RFC 8693 Token Exchange. |
+| `azure-managed-identity` | Acquires a token from the Azure Instance Metadata Service (IMDS). Works on Azure VMs, App Service, and Container Instances. |
+| `aws-sts-assume-role` | Assumes an AWS IAM role via STS and returns temporary credentials. Includes AWS Signature V4 signing. |
+| `gcp-workload-identity` | Acquires a token from the GCP metadata server. Works on Compute Engine, Cloud Run, and GKE. |
+| `spiffe-jwt-svid` | Acquires a JWT-SVID from the SPIFFE Workload API or a projected volume file. Works in SPIFFE-enabled Kubernetes clusters. |
+| `entra-agent-id` | Acquires a token via Microsoft Entra Agent ID using JWT bearer client assertion. Supports Agent Registry, Conditional Access, and IMDS fallback. |
 
 Use `agentcli identity providers` to list registered providers and `agentcli identity schema <provider>` to inspect provider-specific configuration fields.
 

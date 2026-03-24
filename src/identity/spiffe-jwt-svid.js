@@ -75,14 +75,14 @@ function parseJwtClaims(jwt) {
   try {
     header = JSON.parse(base64urlDecode(parts[0]));
   } catch (err) {
-    throw new Error(`Failed to decode JWT header: ${err.message}`);
+    throw new Error(`Failed to decode JWT header: ${err.message}`, { cause: err });
   }
 
   let payload;
   try {
     payload = JSON.parse(base64urlDecode(parts[1]));
   } catch (err) {
-    throw new Error(`Failed to decode JWT payload: ${err.message}`);
+    throw new Error(`Failed to decode JWT payload: ${err.message}`, { cause: err });
   }
 
   return { header, payload };
@@ -228,7 +228,7 @@ const spiffeJwtSvidProvider = {
         } else {
           acquisitionMethod = 'file';
         }
-      } catch (fileErr) {
+      } catch {
         // File not readable -- fall through to socket approach
         jwtSvid = null;
       }

@@ -27,6 +27,11 @@ subprocess environment, and records a redacted audit trail.
 | Bearer token stored in a file on disk | `file-bearer` | `service` |
 | Service-to-service OAuth (client credentials grant) | `oidc-client-credentials` | `service` |
 | Exchange one token for another (RFC 8693) | `oidc-token-exchange` | `exchange` |
+| Running on an Azure VM, App Service, or Container Instance | `azure-managed-identity` | `service` |
+| Running on AWS EC2, Lambda, ECS, or EKS | `aws-sts-assume-role` | `service` |
+| Running on GCP Compute Engine, Cloud Run, or GKE | `gcp-workload-identity` | `service` |
+| Running in a SPIFFE-enabled Kubernetes cluster | `spiffe-jwt-svid` | `service` |
+| Running as an Entra Agent ID in Microsoft Entra | `entra-agent-id` | `service` |
 | No credentials needed | `none` | `none` |
 
 List available providers at any time:
@@ -845,8 +850,7 @@ SHA-256 hash of the combined output are recorded.
 ### "Identity provider not found"
 
 The provider name in the identity profile does not match a registered provider. Check
-the spelling and confirm it is one of: `none`, `env-bearer`, `file-bearer`,
-`oidc-client-credentials`, `oidc-token-exchange`.
+the spelling and run `agentcli identity providers` to see all available providers.
 
 ```bash
 agentcli identity providers

@@ -74,7 +74,7 @@ export function convertManifestV1toV2(manifest) {
 
   function ensureIdentityProfile(identity) {
     if (!identity) return null;
-    const { principal, run_as, attestation } = identity;
+    const { principal, run_as } = identity;
     if (!principal && !run_as) return null;
 
     // Generate a stable key from the identity fields

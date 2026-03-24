@@ -9,7 +9,7 @@
  * API available in Node >= 22 (no external dependencies).
  */
 
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -104,7 +104,7 @@ const gcpWorkloadIdentityProvider = {
    * @param {object} [ctx]   - Resolution context.
    * @returns {Promise<object>} A credential session.
    */
-  async resolveSession(request, ctx) {
+  async resolveSession(request, _ctx) {
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const auth = profile.auth || {};

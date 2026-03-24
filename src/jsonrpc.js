@@ -241,6 +241,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
         await import('./identity/aws-sts-assume-role.js');
         await import('./identity/gcp-workload-identity.js');
         await import('./identity/spiffe-jwt-svid.js');
+        await import('./identity/entra-agent-id.js');
         const providers = listProviders();
         const capabilities = listProviderCapabilities();
         return responseResult(id, { providers: providers.map(name => ({ name, capabilities: capabilities.get(name) || null })) });
@@ -258,6 +259,7 @@ export async function handleJsonRpcRequest(message, defaults = {}) {
         await import('./identity/aws-sts-assume-role.js');
         await import('./identity/gcp-workload-identity.js');
         await import('./identity/spiffe-jwt-svid.js');
+        await import('./identity/entra-agent-id.js');
         const idProvider = getProvider(p.provider);
         if (!idProvider) throw invalidParams(`Unknown identity provider: ${p.provider}`);
         return responseResult(id, { provider: p.provider, capabilities: idProvider.capabilities });

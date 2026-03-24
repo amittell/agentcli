@@ -371,6 +371,34 @@ function validateIdentity(errors, path, value) {
   checkString(errors, `${path}.attestation`, value.attestation, { required: false });
 }
 
+function validateAuthorizationProofRef(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkString(errors, `${path}.ref`, value.ref);
+  if (checkOptionalObject(errors, `${path}.verify`, value.verify)) {
+    checkBoolean(errors, `${path}.verify.required`, value.verify.required);
+  }
+}
+
+function validateAuthorizationRef(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkString(errors, `${path}.ref`, value.ref);
+  checkEnum(errors, `${path}.on_error`, value.on_error, ['deny', 'warn']);
+}
+
+function validateEvidenceRef(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  checkString(errors, `${path}.ref`, value.ref, { required: false });
+  if (checkOptionalObject(errors, `${path}.payload`, value.payload)) {
+    if (value.payload.bind != null && !Array.isArray(value.payload.bind)) {
+      addError(errors, `${path}.payload.bind`, 'must be an array');
+    }
+    checkEnum(errors, `${path}.payload.format`, value.payload.format, ['canonical-json', 'json']);
+  }
+  if (checkOptionalObject(errors, `${path}.verify`, value.verify)) {
+    checkBoolean(errors, `${path}.verify.required`, value.verify.required);
+  }
+}
+
 function validateContract(errors, path, value) {
   if (!isObject(value)) {
     addError(errors, path, 'must be an object');
@@ -404,6 +432,32 @@ function checkOptionalObject(errors, path, value) {
     return false;
   }
   return true;
+}
+
+function validateValueFrom(errors, path, value, { allowLiteral = true } = {}) {
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return;
+  }
+
+  checkString(errors, `${path}.env`, value.env, { required: false });
+  checkString(errors, `${path}.file`, value.file, { required: false });
+  if (allowLiteral) {
+    checkString(errors, `${path}.literal`, value.literal, { required: false });
+  } else if (value.literal != null) {
+    addError(errors, `${path}.literal`, 'is not supported here');
+  }
+
+  const hasSupportedSource = Boolean(
+    value.env != null ||
+    value.file != null ||
+    (allowLiteral && value.literal != null)
+  );
+
+  if (!hasSupportedSource) {
+    const supported = allowLiteral ? 'env, file, or literal' : 'env or file';
+    addError(errors, path, `must include at least one of: ${supported}`);
+  }
 }
 
 function validateOptionalBlocks(errors, warnings, path, value) {
@@ -475,6 +529,16 @@ function validateOptionalBlocks(errors, warnings, path, value) {
 
   if (checkOptionalObject(errors, `${path}.contract`, value.contract)) {
     validateContract(errors, `${path}.contract`, value.contract);
+  }
+
+  if (checkOptionalObject(errors, `${path}.authorization_proof`, value.authorization_proof)) {
+    validateAuthorizationProofRef(errors, `${path}.authorization_proof`, value.authorization_proof);
+  }
+  if (checkOptionalObject(errors, `${path}.authorization`, value.authorization)) {
+    validateAuthorizationRef(errors, `${path}.authorization`, value.authorization);
+  }
+  if (checkOptionalObject(errors, `${path}.evidence`, value.evidence)) {
+    validateEvidenceRef(errors, `${path}.evidence`, value.evidence);
   }
 
   checkBoolean(errors, `${path}.delete_after_run`, value.delete_after_run);
@@ -564,6 +628,17 @@ export function validateManifest(manifest) {
           proofIds.add(profile.id);
         }
         checkString(errors, `${pp}.issuer`, profile.issuer, { required: false });
+        checkString(errors, `${pp}.audience`, profile.audience, { required: false });
+        checkString(errors, `${pp}.jwks_uri`, profile.jwks_uri, { required: false });
+        checkString(errors, `${pp}.public_key`, profile.public_key, { required: false });
+        if (checkOptionalObject(errors, `${pp}.proof`, profile.proof)) {
+          if (checkOptionalObject(errors, `${pp}.proof.value_from`, profile.proof.value_from)) {
+            validateValueFrom(errors, `${pp}.proof.value_from`, profile.proof.value_from);
+          }
+        }
+        if (profile.claims != null && !isObject(profile.claims)) {
+          addError(errors, `${pp}.claims`, 'must be an object');
+        }
         if (checkOptionalObject(errors, `${pp}.verify`, profile.verify)) {
           checkBoolean(errors, `${pp}.verify.required`, profile.verify.required);
         }
@@ -638,6 +713,15 @@ export function validateManifest(manifest) {
       }
       if (checkOptionalObject(errors, `${workflowPath}.contract`, workflow.contract)) {
         validateContract(errors, `${workflowPath}.contract`, workflow.contract);
+      }
+      if (checkOptionalObject(errors, `${workflowPath}.authorization_proof`, workflow.authorization_proof)) {
+        validateAuthorizationProofRef(errors, `${workflowPath}.authorization_proof`, workflow.authorization_proof);
+      }
+      if (checkOptionalObject(errors, `${workflowPath}.authorization`, workflow.authorization)) {
+        validateAuthorizationRef(errors, `${workflowPath}.authorization`, workflow.authorization);
+      }
+      if (checkOptionalObject(errors, `${workflowPath}.evidence`, workflow.evidence)) {
+        validateEvidenceRef(errors, `${workflowPath}.evidence`, workflow.evidence);
       }
       if (workflow.id) {
         if (workflowIds.has(workflow.id)) addError(errors, `${workflowPath}.id`, 'must be unique');
