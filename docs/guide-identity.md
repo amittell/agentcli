@@ -98,8 +98,8 @@ to pass it to the tool process.
           "id": "call-api",
           "name": "Call API",
           "shell": {
-            "program": "curl",
-            "args": ["-H", "Authorization: Bearer $TOOL_ACCESS_TOKEN", "https://api.example.com/deploy"]
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $TOOL_ACCESS_TOKEN\" https://api.example.com/deploy"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "api-service" }
@@ -109,6 +109,8 @@ to pass it to the tool process.
   ]
 }
 ```
+
+This example uses `sh -lc` intentionally. Structured `shell.args` are passed literally by `agentcli`, so shell variable expansion only happens when you opt into an explicit shell wrapper. For tools that can read credentials directly from the environment, prefer invoking them without `sh -lc`.
 
 ### Run it
 
@@ -810,8 +812,8 @@ A v0.2 audit record includes:
     "audit": "always"
   },
   "command": {
-    "program": "curl",
-    "args": ["-H", "Authorization: Bearer $TOOL_ACCESS_TOKEN", "https://api.example.com/deploy"],
+    "program": "sh",
+    "args": ["-lc", "curl -H \"Authorization: Bearer $TOOL_ACCESS_TOKEN\" https://api.example.com/deploy"],
     "cwd": "/home/user/project",
     "env_keys": ["TOOL_ACCESS_TOKEN"],
     "stdin_present": false
@@ -955,4 +957,24 @@ Validate the delegation chain:
 
 ```bash
 agentcli identity validate-delegation manifest.json my-task
+```
+
+## Example Manifests
+
+The `examples/` directory contains complete, runnable manifests for common use cases:
+
+| Example | Use case |
+|---|---|
+| `identity-v2.json` | Basic v0.2 identity with `none` and `env-bearer` providers |
+| `oidc-service-auth.json` | OIDC client credentials with token materialization |
+| `trust-enforcement.json` | Graduated trust levels with strict and advisory enforcement |
+| `authorization-proof.json` | JWT-based manifest authorization proof |
+| `cloud-workload.json` | Azure managed identity for cloud workloads |
+
+Run any example locally:
+
+```bash
+agentcli validate examples/trust-enforcement.json
+agentcli exec examples/trust-enforcement.json collect-data --dry-run --signer none
+agentcli identity resolve examples/cloud-workload.json fetch-prices
 ```

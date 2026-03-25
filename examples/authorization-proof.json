@@ -1,0 +1,69 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "ci-deployer",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ci.example.com/deployer",
+        "display_name": "CI Deploy Agent"
+      },
+      "trust": { "level": "supervised" }
+    }
+  ],
+  "authorization_proof_profiles": [
+    {
+      "id": "ci-jwt",
+      "method": "jwt",
+      "issuer": "https://ci.example.com",
+      "proof": {
+        "value_from": { "env": "CI_DEPLOY_TOKEN" }
+      },
+      "claims": {
+        "audience": "agentcli",
+        "subject": "deploy-pipeline"
+      },
+      "verify": { "required": true }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "authorization_proof", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "ci-deploy",
+      "name": "CI Deployment Pipeline",
+      "identity": { "ref": "ci-deployer" },
+      "authorization_proof": { "ref": "ci-jwt" },
+      "contract": {
+        "sandbox": "permissive",
+        "allowed_paths": ["/opt/deploy", "/tmp"],
+        "audit": "always",
+        "required_trust_level": "supervised",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "deploy-app",
+          "name": "Deploy Application",
+          "shell": {
+            "program": "echo",
+            "args": ["deploying application"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "schedule": { "cron": "0 * * * *" }
+        }
+      ]
+    }
+  ]
+}

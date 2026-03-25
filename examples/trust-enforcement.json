@@ -1,0 +1,92 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "high-trust-agent",
+      "provider": "none",
+      "subject": {
+        "kind": "agent",
+        "principal": "agent://example.com/production-deployer",
+        "display_name": "Production Deployer"
+      },
+      "trust": {
+        "level": "autonomous",
+        "constraints": {
+          "max_autonomy": "autonomous"
+        }
+      }
+    },
+    {
+      "id": "low-trust-agent",
+      "provider": "none",
+      "subject": {
+        "kind": "agent",
+        "principal": "agent://example.com/data-collector",
+        "display_name": "Data Collector"
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "graduated-trust",
+      "name": "Graduated Trust Workflow",
+      "contract": {
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "collect-data",
+          "name": "Collect Data (low trust OK)",
+          "shell": {
+            "program": "echo",
+            "args": ["collecting data"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "low-trust-agent" },
+          "contract": {
+            "required_trust_level": "restricted",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "deploy-staging",
+          "name": "Deploy to Staging (needs autonomous)",
+          "shell": {
+            "program": "echo",
+            "args": ["deploying to staging"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "high-trust-agent" },
+          "contract": {
+            "required_trust_level": "autonomous",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "0 2 * * *" }
+        },
+        {
+          "id": "health-check",
+          "name": "Health Check (advisory trust)",
+          "shell": {
+            "program": "echo",
+            "args": ["checking health"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "low-trust-agent" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "advisory"
+          },
+          "schedule": { "cron": "*/5 * * * *" }
+        }
+      ]
+    }
+  ]
+}

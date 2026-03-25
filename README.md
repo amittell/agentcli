@@ -423,6 +423,10 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [public-bot-health.json](examples/public-bot-health.json) | Bot health monitoring with plan/read-only intent and context retrieval. |
 | [identity-contract.json](examples/identity-contract.json) | v0.1 identity and contract fields with approval and attestation. |
 | [identity-v2.json](examples/identity-v2.json) | Full v0.2 identity: profiles, trust levels, credential presentation, evidence, and authorization proof. |
+| [oidc-service-auth.json](examples/oidc-service-auth.json) | OIDC client credentials authentication with token materialization into the process environment. |
+| [trust-enforcement.json](examples/trust-enforcement.json) | Graduated trust levels with strict and advisory enforcement across multiple tasks. |
+| [authorization-proof.json](examples/authorization-proof.json) | JWT-based manifest authorization proof with claims verification. |
+| [cloud-workload.json](examples/cloud-workload.json) | Azure managed identity for cloud workload authentication with evidence and compliance context. |
 
 ### Putting it together: a v0.2 manifest
 

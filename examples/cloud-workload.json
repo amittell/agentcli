@@ -1,0 +1,83 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "azure-agent",
+      "provider": "azure-managed-identity",
+      "subject": {
+        "kind": "workload",
+        "principal": "agent://azure/trading-bot",
+        "display_name": "Trading Data Agent"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "resource": "https://management.azure.com/"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "AZURE_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "resolved_identity", "contract", "command", "result"],
+        "context": {
+          "model_version": true,
+          "policy_version": true
+        },
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "trading-data",
+      "name": "Trading Data Pipeline",
+      "identity": { "ref": "azure-agent" },
+      "contract": {
+        "sandbox": "strict",
+        "network": "restricted",
+        "allowed_paths": ["/data/trading"],
+        "audit": "always",
+        "required_trust_level": "supervised",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "fetch-prices",
+          "name": "Fetch Market Prices",
+          "shell": {
+            "program": "echo",
+            "args": ["fetching prices"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "schedule": { "cron": "*/5 * * * *" }
+        }
+      ]
+    }
+  ]
+}

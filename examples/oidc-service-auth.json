@@ -1,0 +1,88 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "api-service",
+      "provider": "oidc-client-credentials",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://example.com/api-service",
+        "display_name": "API Service Agent"
+      },
+      "auth": {
+        "mode": "service",
+        "scopes": ["api.read", "api.write"],
+        "audience": "https://api.example.com",
+        "cache": "memory",
+        "refresh": "never",
+        "required": true,
+        "provider_config": {
+          "token_endpoint": "https://auth.example.com/oauth2/token",
+          "client_id": "api-service-agent"
+        },
+        "inputs": {
+          "client_secret": {
+            "value_from": { "env": "API_CLIENT_SECRET" }
+          }
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "API_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-proof",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "api-sync",
+      "name": "API Data Sync",
+      "identity": { "ref": "api-service" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "supervised",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "fetch-data",
+          "name": "Fetch Data from API",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $API_ACCESS_TOKEN\" https://api.example.com/data"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-proof" },
+          "schedule": { "cron": "0 */6 * * *" }
+        }
+      ]
+    }
+  ]
+}
