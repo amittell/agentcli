@@ -4711,6 +4711,237 @@ test('env-bearer throws when token missing and required', async () => {
   }, /Bearer token not found/);
 });
 
+test('entra-agent-id validates required GUID-shaped provider fields', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/entra-agent-id.js');
+  const provider = getIdentityProvider('entra-agent-id');
+
+  const valid = provider.validateProfile({
+    auth: {
+      provider_config: {
+        tenant_id: '11111111-2222-4333-8444-555555555555',
+        blueprint_app_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        agent_identity_id: '99999999-8888-4777-8666-555555555555',
+      }
+    }
+  }, {});
+  assert.strictEqual(valid.valid, true);
+
+  const invalid = provider.validateProfile({
+    auth: {
+      provider_config: {
+        tenant_id: '11111111-2222-4333-8444-zzzzzzzzzzzz',
+        blueprint_app_id: '',
+        agent_identity_id: '12345678-zzzz-4777-8666-555555555555',
+      }
+    }
+  }, {});
+  assert.strictEqual(invalid.valid, false);
+  assert.ok(invalid.errors.some(error => error.includes('tenant_id')));
+  assert.ok(invalid.errors.some(error => error.includes('blueprint_app_id')));
+  assert.ok(invalid.errors.some(error => error.includes('agent_identity_id')));
+});
+
+test('entra-agent-id resolves a session from env assertion and token endpoint', async (t) => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/entra-agent-id.js');
+  const provider = getIdentityProvider('entra-agent-id');
+
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const fetchCalls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    fetchCalls.push({ url, options });
+    return {
+      ok: true,
+      json: async () => ({
+        access_token: 'entra-access-token',
+        token_type: 'Bearer',
+        expires_in: 900,
+      }),
+    };
+  };
+
+  const session = await provider.resolveSession({
+    profile: {
+      subject: {
+        kind: 'agent',
+        principal: 'agent://example.com/deployer',
+      },
+      auth: {
+        scopes: ['https://graph.microsoft.com/.default'],
+        provider_config: {
+          tenant_id: '11111111-2222-4333-8444-555555555555',
+          blueprint_app_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          agent_identity_id: '99999999-8888-4777-8666-555555555555',
+        }
+      },
+      trust: { level: 'autonomous' }
+    },
+    instanceId: 'run-123'
+  }, {
+    env: {
+      AGENTCLI_ENTRA_CLIENT_ASSERTION: 'platform-jwt-assertion'
+    }
+  });
+
+  assert.strictEqual(fetchCalls.length, 1);
+  assert.strictEqual(
+    fetchCalls[0].url,
+    'https://login.microsoftonline.com/11111111-2222-4333-8444-555555555555/oauth2/v2.0/token'
+  );
+
+  const params = new URLSearchParams(fetchCalls[0].options.body);
+  assert.strictEqual(params.get('grant_type'), 'client_credentials');
+  assert.strictEqual(params.get('client_id'), 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  assert.strictEqual(
+    params.get('client_assertion_type'),
+    'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+  );
+  assert.strictEqual(params.get('client_assertion'), 'platform-jwt-assertion');
+  assert.strictEqual(params.get('scope'), 'https://graph.microsoft.com/.default');
+
+  assert.strictEqual(session.provider, 'entra-agent-id');
+  assert.strictEqual(session.subject.principal, 'agent://example.com/deployer');
+  assert.strictEqual(session.instance.id, 'run-123');
+  assert.strictEqual(session.trust.declared_level, 'autonomous');
+  assert.strictEqual(session.credentials.access_token.value, 'entra-access-token');
+  assert.strictEqual(session.provider_assertions.tenant_id, '11111111-2222-4333-8444-555555555555');
+  assert.strictEqual(session.provider_assertions.agent_identity_id, '99999999-8888-4777-8666-555555555555');
+});
+
+test('entra-agent-id describeSession redacts tokens and materialize/cleanup manages env and files', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/entra-agent-id.js');
+  const provider = getIdentityProvider('entra-agent-id');
+
+  const session = {
+    provider: 'entra-agent-id',
+    subject: {
+      principal: 'agent://example.com/deployer',
+      issuer: 'https://login.microsoftonline.com/11111111-2222-4333-8444-555555555555',
+      run_as: null,
+    },
+    credentials: {
+      access_token: {
+        kind: 'bearer',
+        value: 'sensitive-token',
+        audience: 'https://graph.microsoft.com/.default',
+        scopes: ['https://graph.microsoft.com/.default'],
+        expires_at: '2030-01-01T00:00:00.000Z',
+      }
+    },
+    provider_assertions: {
+      tenant_id: '11111111-2222-4333-8444-555555555555',
+      blueprint_app_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      agent_identity_id: '99999999-8888-4777-8666-555555555555',
+    }
+  };
+
+  const described = provider.describeSession(session, {});
+  assert.strictEqual(described.credentials.access_token.value, '[REDACTED]');
+  assert.deepStrictEqual(described.credential_summary.credential_types, ['bearer']);
+  assert.strictEqual(described.credential_summary.expires_at, '2030-01-01T00:00:00.000Z');
+
+  const materialization = provider.materialize(session, {
+    bindings: [
+      {
+        source: 'credentials.access_token.value',
+        target: { kind: 'env', name: 'ENTRA_TOKEN' },
+      },
+      {
+        source: 'credentials.access_token.value',
+        target: { kind: 'file', prefix: 'agentcli-entra-test' },
+      }
+    ]
+  }, {});
+
+  assert.strictEqual(materialization.materialized, true);
+  assert.strictEqual(materialization.env_vars.ENTRA_TOKEN, 'sensitive-token');
+  assert.strictEqual(materialization.temp_files.length, 1);
+  assert.ok(existsSync(materialization.temp_files[0].path));
+  assert.strictEqual(readFileSync(materialization.temp_files[0].path, 'utf8'), 'sensitive-token');
+
+  const cleanup = provider.cleanup(materialization, {});
+  assert.strictEqual(cleanup.cleaned, true);
+  assert.deepStrictEqual(cleanup.warnings, []);
+  assert.strictEqual(existsSync(materialization.temp_files[0].path), false);
+});
+
+test('entra-agent-id prepareHandoff downscopes using a fresh token request', async (t) => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/entra-agent-id.js');
+  const provider = getIdentityProvider('entra-agent-id');
+
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const fetchCalls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    fetchCalls.push({ url, options });
+    return {
+      ok: true,
+      json: async () => ({
+        access_token: 'downscoped-token',
+        token_type: 'Bearer',
+        expires_in: 300,
+      }),
+    };
+  };
+
+  const result = await provider.prepareHandoff({
+    credentials: {
+      access_token: {
+        audience: 'https://graph.microsoft.com/.default',
+        scopes: ['https://graph.microsoft.com/.default'],
+      }
+    },
+    provider_assertions: {
+      tenant_id: '11111111-2222-4333-8444-555555555555',
+      blueprint_app_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      agent_identity_id: '99999999-8888-4777-8666-555555555555',
+    }
+  }, {
+    mode: 'downscope',
+    scopes: ['api://child/.default'],
+    audience: 'api://child'
+  }, {
+    env: { AGENTCLI_ENTRA_CLIENT_ASSERTION: 'platform-jwt-assertion' }
+  });
+
+  assert.strictEqual(fetchCalls.length, 1);
+  const params = new URLSearchParams(fetchCalls[0].options.body);
+  assert.strictEqual(params.get('scope'), 'api://child/.default');
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.mode, 'downscope');
+  assert.strictEqual(result.credentials.access_token.value, 'downscoped-token');
+  assert.strictEqual(result.credentials.access_token.audience, 'api://child');
+  assert.strictEqual(result.provider_assertions.downscoped_from, 'parent-session');
+});
+
+test('entra-agent-id validateDelegation detects cycles and missing grants', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/entra-agent-id.js');
+  const provider = getIdentityProvider('entra-agent-id');
+
+  const validation = provider.validateDelegation([
+    { kind: 'agent', principal: 'agent://root', grant: 'client-credentials', validated: true },
+    { kind: 'agent', principal: 'agent://mid', grant: '', validated: true },
+    { kind: 'agent', principal: 'agent://root', grant: 'on-behalf-of', validated: true },
+  ], { max_depth: 5 }, {});
+
+  assert.strictEqual(validation.valid, false);
+  assert.strictEqual(validation.depth, 3);
+  assert.strictEqual(validation.acyclic, false);
+  assert.strictEqual(validation.all_grants_present, false);
+  assert.strictEqual(validation.hop_status[1].grant_present, false);
+});
+
 // -- Session Utilities Tests --
 
 test('resolveSourcePath navigates session objects', async () => {
