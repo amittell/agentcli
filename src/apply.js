@@ -92,6 +92,17 @@ function schedulerJobSpec(job) {
   );
 }
 
+function duplicateNames(items) {
+  const counts = new Map();
+  for (const item of items) {
+    if (!item?.name) continue;
+    counts.set(item.name, (counts.get(item.name) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name);
+}
+
 export function createSchedulerCliRunner(options = {}) {
   const invocation = resolveSchedulerInvocation(options);
   const baseEnv = { ...process.env, ...(options.env || {}) };
@@ -242,7 +253,36 @@ export async function applyManifestToScheduler(
 
   const existingJobs = schedulerRunner.listJobs();
   const existingById = new Map(existingJobs.map(job => [job.id, job]));
-  const existingByName = new Map(existingJobs.map(job => [job.name, job]));
+  const existingByName = new Map();
+  for (const job of existingJobs) {
+    if (!job?.name) continue;
+    const bucket = existingByName.get(job.name) || [];
+    bucket.push(job);
+    existingByName.set(job.name, bucket);
+  }
+
+  if (adoptBy === 'name') {
+    const duplicateCompiledNames = duplicateNames(compiled.jobs);
+    if (duplicateCompiledNames.length > 0) {
+      throw Object.assign(
+        new Error(
+          `Cannot use --adopt-by name when compiled job names are not unique: ${duplicateCompiledNames.join(', ')}`
+        ),
+        { code: 'invalid_argument' }
+      );
+    }
+
+    const duplicateExistingNames = duplicateNames(existingJobs)
+      .filter(name => compiled.jobs.some(job => job.name === name));
+    if (duplicateExistingNames.length > 0) {
+      throw Object.assign(
+        new Error(
+          `Cannot use --adopt-by name because existing scheduler jobs have duplicate names: ${duplicateExistingNames.join(', ')}`
+        ),
+        { code: 'invalid_argument' }
+      );
+    }
+  }
 
   const actions = [];
   for (const job of compiled.jobs) {
@@ -256,7 +296,7 @@ export async function applyManifestToScheduler(
     let existingId;
 
     if (adoptBy === 'name') {
-      const existingJob = existingByName.get(job.name);
+      const existingJob = existingByName.get(job.name)?.[0];
       if (existingJob) {
         action = 'adopted';
         existingId = existingJob.id;

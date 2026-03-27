@@ -1001,6 +1001,82 @@ test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler w
   assert.equal(result.actions[0].job_id, compiled.jobs[0].id);
 });
 
+test('applyManifestToScheduler adopt-by-name rejects ambiguous existing scheduler names', async () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const duplicateName = compiled.jobs[0].name;
+
+  await assert.rejects(
+    () => applyManifestToScheduler(exampleManifest, {
+      runner: {
+        invocation: { label: 'fake-scheduler' },
+        listJobs() {
+          return [
+            { id: 'old-1', name: duplicateName },
+            { id: 'old-2', name: duplicateName }
+          ];
+        },
+        addJob() { throw new Error('should not add jobs'); },
+        updateJob() { throw new Error('should not update jobs'); }
+      },
+      adoptBy: 'name'
+    }),
+    (err) => {
+      assert.strictEqual(err.code, 'invalid_argument');
+      assert.match(err.message, /duplicate names/);
+      return true;
+    }
+  );
+});
+
+test('applyManifestToScheduler adopt-by-name rejects duplicate compiled job names', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'one',
+        name: 'Same',
+        tasks: [{
+          id: 'first',
+          name: 'Task',
+          prompt: 'one',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      },
+      {
+        id: 'two',
+        name: 'Same',
+        tasks: [{
+          id: 'second',
+          name: 'Task',
+          prompt: 'two',
+          target: { session_target: 'isolated' },
+          schedule: { cron: '5 * * * *' }
+        }]
+      }
+    ]
+  };
+
+  await assert.rejects(
+    () => applyManifestToScheduler(manifest, {
+      runner: {
+        invocation: { label: 'fake-scheduler' },
+        listJobs() {
+          return [];
+        },
+        addJob() { throw new Error('should not add jobs'); },
+        updateJob() { throw new Error('should not update jobs'); }
+      },
+      adoptBy: 'name'
+    }),
+    (err) => {
+      assert.strictEqual(err.code, 'invalid_argument');
+      assert.match(err.message, /compiled job names are not unique/);
+      return true;
+    }
+  );
+});
+
 test('cli apply --adopt-by with invalid value throws', async () => {
   await assert.rejects(
     runCli(['apply', JSON.stringify(exampleManifest), '--adopt-by', 'uuid']),
@@ -2963,6 +3039,29 @@ test('scheduler compilation emits identity and contract fields', () => {
   assert.equal(job.contract_max_cost_usd, 10);
   assert.equal(job.contract_network, null);
   assert.equal(job.contract_audit, null);
+});
+
+test('scheduler compilation omits synthesized v0.2 identity declarations when none are present', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        prompt: 'go',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.identity, null);
+  assert.strictEqual(job.identity_ref, null);
+  assert.strictEqual(job.identity_subject_principal, null);
 });
 
 test('on_failure handler propagates identity, contract, and v0.2 auth/evidence via shorthand expansion', () => {
@@ -6473,6 +6572,74 @@ test('validation rejects dangling identity ref', () => {
   const result = validateManifest(manifest);
   assert.strictEqual(result.ok, false);
   assert.ok(result.errors.some(e => e.message.includes('nonexistent-profile')));
+});
+
+test('validation rejects dangling on_failure profile refs', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{ id: 'real-identity', provider: 'none' }],
+    authorization_proof_profiles: [{ id: 'real-proof', method: 'none' }],
+    authorization_profiles: [{ id: 'real-authz', provider: 'none' }],
+    evidence_profiles: [{ id: 'real-evidence', provider: 'none' }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' },
+        on_failure: {
+          prompt: 'Handle it',
+          identity: { ref: 'missing-identity' },
+          authorization_proof: { ref: 'missing-proof' },
+          authorization: { ref: 'missing-authz' },
+          evidence: { ref: 'missing-evidence' }
+        }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.on_failure.identity.ref') && e.message.includes('missing-identity')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.on_failure.authorization_proof.ref') && e.message.includes('missing-proof')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.on_failure.authorization.ref') && e.message.includes('missing-authz')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.on_failure.evidence.ref') && e.message.includes('missing-evidence')));
+});
+
+test('validation rejects malformed v0.2 authorization overlay shapes', () => {
+  const manifest = {
+    version: '0.2',
+    authorization_proof_profiles: [{ id: 'proof', method: 'jwt' }],
+    authorization_profiles: [{ id: 'authz', provider: 'none' }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      authorization_proof: { ref: 'proof', claims: 'not-an-object' },
+      authorization: {
+        ref: 'authz',
+        provider_config: 'not-an-object',
+        request: 'not-an-object',
+        decision: 'not-an-object'
+      },
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.endsWith('.authorization_proof.claims')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.authorization.provider_config')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.authorization.request')));
+  assert.ok(result.errors.some(e => e.path.endsWith('.authorization.decision')));
 });
 
 test('v0.2 exec with file-bearer reads token from file', async () => {

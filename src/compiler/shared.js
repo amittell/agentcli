@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { normalizeShellExecution, renderShellExecution } from '../shell.js';
 
+function isObjectLike(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function stableId(workflowId, taskId) {
   return createHash('sha256').update(`${workflowId}:${taskId}`).digest('hex').slice(0, 32);
 }
@@ -194,8 +198,8 @@ export function resolveAuthorizationProof(workflow, task) {
   const ref = taskProof.ref ?? workflowProof.ref ?? null;
   if (!ref) return null;
 
-  const workflowClaims = workflowProof.claims || {};
-  const taskClaims = taskProof.claims || {};
+  const workflowClaims = isObjectLike(workflowProof.claims) ? workflowProof.claims : {};
+  const taskClaims = isObjectLike(taskProof.claims) ? taskProof.claims : {};
   const claims = { ...workflowClaims, ...taskClaims };
 
   const workflowRequired = workflowProof.verify?.required ?? null;
@@ -216,7 +220,10 @@ export function resolveAuthorization(workflow, task) {
   const ref = taskAuth.ref ?? workflowAuth.ref ?? null;
   if (!ref) return null;
 
-  const providerConfig = { ...(workflowAuth.provider_config || {}), ...(taskAuth.provider_config || {}) };
+  const providerConfig = {
+    ...(isObjectLike(workflowAuth.provider_config) ? workflowAuth.provider_config : {}),
+    ...(isObjectLike(taskAuth.provider_config) ? taskAuth.provider_config : {}),
+  };
 
   const workflowOnError = workflowAuth.on_error ?? null;
   const taskOnError = taskAuth.on_error ?? null;
@@ -227,8 +234,16 @@ export function resolveAuthorization(workflow, task) {
     onError = taskOnError ?? workflowOnError ?? null;
   }
 
-  const request = taskAuth.request ?? workflowAuth.request ?? null;
-  const decision = taskAuth.decision ?? workflowAuth.decision ?? null;
+  const request = isObjectLike(taskAuth.request)
+    ? taskAuth.request
+    : isObjectLike(workflowAuth.request)
+      ? workflowAuth.request
+      : null;
+  const decision = isObjectLike(taskAuth.decision)
+    ? taskAuth.decision
+    : isObjectLike(workflowAuth.decision)
+      ? workflowAuth.decision
+      : null;
 
   return {
     ref,
@@ -249,7 +264,11 @@ export function resolveEvidence(workflow, task) {
   const taskPayload = taskEvidence.payload || {};
   const payload = {
     bind: taskPayload.bind ?? workflowPayload.bind ?? null,
-    context: taskPayload.context ?? workflowPayload.context ?? null,
+    context: isObjectLike(taskPayload.context)
+      ? taskPayload.context
+      : isObjectLike(workflowPayload.context)
+        ? workflowPayload.context
+        : null,
     format: taskPayload.format ?? workflowPayload.format ?? null,
   };
 
@@ -295,12 +314,12 @@ export function mergeIdentityProfile(profile, identity) {
   const declarationPresentation = declaration.presentation || {};
 
   const providerConfig = {
-    ...(baseAuth.provider_config || {}),
-    ...(declarationAuth.provider_config || {}),
+    ...(isObjectLike(baseAuth.provider_config) ? baseAuth.provider_config : {}),
+    ...(isObjectLike(declarationAuth.provider_config) ? declarationAuth.provider_config : {}),
   };
   const inputs = {
-    ...(baseAuth.inputs || {}),
-    ...(declarationAuth.inputs || {}),
+    ...(isObjectLike(baseAuth.inputs) ? baseAuth.inputs : {}),
+    ...(isObjectLike(declarationAuth.inputs) ? declarationAuth.inputs : {}),
   };
 
   return {
@@ -352,7 +371,10 @@ export function mergeIdentityProfile(profile, identity) {
 export function mergeAuthorizationProofProfile(profile, declaration) {
   const base = profile || {};
   const overlay = declaration || {};
-  const claims = { ...(base.claims || {}), ...(overlay.claims || {}) };
+  const claims = {
+    ...(isObjectLike(base.claims) ? base.claims : {}),
+    ...(isObjectLike(overlay.claims) ? overlay.claims : {}),
+  };
 
   return {
     ref: overlay.ref ?? base.id ?? null,
@@ -373,8 +395,8 @@ export function mergeAuthorizationProfile(profile, declaration) {
   const base = profile || {};
   const overlay = declaration || {};
   const providerConfig = {
-    ...(base.provider_config || {}),
-    ...(overlay.provider_config || {}),
+    ...(isObjectLike(base.provider_config) ? base.provider_config : {}),
+    ...(isObjectLike(overlay.provider_config) ? overlay.provider_config : {}),
   };
 
   return {
@@ -382,8 +404,16 @@ export function mergeAuthorizationProfile(profile, declaration) {
     provider: base.provider ?? null,
     provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
     on_error: mergeDenyFirst(base.on_error ?? null, overlay.on_error ?? null),
-    request: overlay.request ?? base.request ?? null,
-    decision: overlay.decision ?? base.decision ?? null,
+    request: isObjectLike(overlay.request)
+      ? overlay.request
+      : isObjectLike(base.request)
+        ? base.request
+        : null,
+    decision: isObjectLike(overlay.decision)
+      ? overlay.decision
+      : isObjectLike(base.decision)
+        ? base.decision
+        : null,
   };
 }
 
@@ -397,10 +427,14 @@ export function mergeEvidenceProfile(profile, declaration) {
     ref: overlay.ref ?? base.id ?? null,
     provider: base.provider ?? null,
     methods: base.methods ?? null,
-    provider_config: base.provider_config ?? null,
+    provider_config: isObjectLike(base.provider_config) ? base.provider_config : null,
     payload: {
       bind: overlayPayload.bind ?? basePayload.bind ?? null,
-      context: overlayPayload.context ?? basePayload.context ?? null,
+      context: isObjectLike(overlayPayload.context)
+        ? overlayPayload.context
+        : isObjectLike(basePayload.context)
+          ? basePayload.context
+          : null,
       format: overlayPayload.format ?? basePayload.format ?? null,
     },
     verify: {

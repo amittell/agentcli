@@ -30,6 +30,17 @@ function schedulerOutputPolicy(plan) {
   };
 }
 
+function isV2IdentityDeclaration(identity) {
+  if (!identity || typeof identity !== 'object') return false;
+  return (
+    identity.ref != null ||
+    identity.subject != null ||
+    identity.auth != null ||
+    identity.trust != null ||
+    identity.presentation != null
+  );
+}
+
 function sanitizeIdentityDeclaration(identity) {
   if (!identity) return null;
   return {
@@ -166,7 +177,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         ? expanded.evidence_profiles?.find(profile => profile.id === plan.evidence.ref) ?? null
         : null;
 
-      const resolvedIdentity = plan.identity
+      const resolvedIdentity = isV2IdentityDeclaration(plan.identity)
         ? mergeIdentityProfile(identityProfile, plan.identity)
         : null;
       const resolvedAuthorizationProof = plan.authorization_proof

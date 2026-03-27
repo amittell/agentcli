@@ -374,8 +374,39 @@ function validateIdentity(errors, path, value) {
 function validateAuthorizationProofRef(errors, path, value) {
   if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
   checkString(errors, `${path}.ref`, value.ref);
+  if (value.claims != null && !isObject(value.claims)) {
+    addError(errors, `${path}.claims`, 'must be an object');
+  }
   if (checkOptionalObject(errors, `${path}.verify`, value.verify)) {
     checkBoolean(errors, `${path}.verify.required`, value.verify.required);
+  }
+}
+
+function validateAuthorizationRequest(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  if (value.include != null) {
+    if (!Array.isArray(value.include)) {
+      addError(errors, `${path}.include`, 'must be an array');
+    } else {
+      for (const [index, item] of value.include.entries()) {
+        checkString(errors, `${path}.include[${index}]`, item);
+      }
+    }
+  }
+}
+
+function validateAuthorizationDecision(errors, path, value) {
+  if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
+  for (const field of ['allow_values', 'deny_values', 'escalate_values']) {
+    if (value[field] != null) {
+      if (!Array.isArray(value[field])) {
+        addError(errors, `${path}.${field}`, 'must be an array');
+      } else {
+        for (const [index, item] of value[field].entries()) {
+          checkString(errors, `${path}.${field}[${index}]`, item);
+        }
+      }
+    }
   }
 }
 
@@ -383,6 +414,15 @@ function validateAuthorizationRef(errors, path, value) {
   if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
   checkString(errors, `${path}.ref`, value.ref);
   checkEnum(errors, `${path}.on_error`, value.on_error, ['deny', 'warn']);
+  if (value.provider_config != null && !isObject(value.provider_config)) {
+    addError(errors, `${path}.provider_config`, 'must be an object');
+  }
+  if (checkOptionalObject(errors, `${path}.request`, value.request)) {
+    validateAuthorizationRequest(errors, `${path}.request`, value.request);
+  }
+  if (checkOptionalObject(errors, `${path}.decision`, value.decision)) {
+    validateAuthorizationDecision(errors, `${path}.decision`, value.decision);
+  }
 }
 
 function validateEvidenceRef(errors, path, value) {
@@ -391,6 +431,9 @@ function validateEvidenceRef(errors, path, value) {
   if (checkOptionalObject(errors, `${path}.payload`, value.payload)) {
     if (value.payload.bind != null && !Array.isArray(value.payload.bind)) {
       addError(errors, `${path}.payload.bind`, 'must be an array');
+    }
+    if (value.payload.context != null && !isObject(value.payload.context)) {
+      addError(errors, `${path}.payload.context`, 'must be an object');
     }
     checkEnum(errors, `${path}.payload.format`, value.payload.format, ['canonical-json', 'json']);
   }
@@ -660,7 +703,16 @@ export function validateManifest(manifest) {
           if (authzIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
           authzIds.add(profile.id);
         }
+        if (profile.provider_config != null && !isObject(profile.provider_config)) {
+          addError(errors, `${pp}.provider_config`, 'must be an object');
+        }
         checkEnum(errors, `${pp}.on_error`, profile.on_error, ['deny', 'warn']);
+        if (checkOptionalObject(errors, `${pp}.request`, profile.request)) {
+          validateAuthorizationRequest(errors, `${pp}.request`, profile.request);
+        }
+        if (checkOptionalObject(errors, `${pp}.decision`, profile.decision)) {
+          validateAuthorizationDecision(errors, `${pp}.decision`, profile.decision);
+        }
       }
     }
   }
@@ -679,9 +731,15 @@ export function validateManifest(manifest) {
           if (evidIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
           evidIds.add(profile.id);
         }
+        if (profile.provider_config != null && !isObject(profile.provider_config)) {
+          addError(errors, `${pp}.provider_config`, 'must be an object');
+        }
         if (checkOptionalObject(errors, `${pp}.payload`, profile.payload)) {
           if (profile.payload.bind != null && !Array.isArray(profile.payload.bind)) {
             addError(errors, `${pp}.payload.bind`, 'must be an array');
+          }
+          if (profile.payload.context != null && !isObject(profile.payload.context)) {
+            addError(errors, `${pp}.payload.context`, 'must be an object');
           }
           checkEnum(errors, `${pp}.payload.format`, profile.payload.format, ['canonical-json', 'json']);
         }
@@ -864,6 +922,25 @@ export function validateManifest(manifest) {
         if (task.authorization_proof?.ref) checkRef(`${tp}.authorization_proof.ref`, task.authorization_proof.ref, proofProfileIds, 'authorization_proof');
         if (task.authorization?.ref) checkRef(`${tp}.authorization.ref`, task.authorization.ref, authzProfileIds, 'authorization');
         if (task.evidence?.ref) checkRef(`${tp}.evidence.ref`, task.evidence.ref, evidProfileIds, 'evidence');
+        if (isObject(task.on_failure)) {
+          if (task.on_failure.identity?.ref) {
+            checkRef(`${tp}.on_failure.identity.ref`, task.on_failure.identity.ref, identityProfileIds, 'identity');
+          }
+          if (task.on_failure.authorization_proof?.ref) {
+            checkRef(
+              `${tp}.on_failure.authorization_proof.ref`,
+              task.on_failure.authorization_proof.ref,
+              proofProfileIds,
+              'authorization_proof'
+            );
+          }
+          if (task.on_failure.authorization?.ref) {
+            checkRef(`${tp}.on_failure.authorization.ref`, task.on_failure.authorization.ref, authzProfileIds, 'authorization');
+          }
+          if (task.on_failure.evidence?.ref) {
+            checkRef(`${tp}.on_failure.evidence.ref`, task.on_failure.evidence.ref, evidProfileIds, 'evidence');
+          }
+        }
       }
     }
   }
