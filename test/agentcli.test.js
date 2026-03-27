@@ -389,6 +389,20 @@ test('public bot health example validates and compiles chained diagnosis flow', 
   assert.equal(diagnose.max_queued_dispatches, 8);
 });
 
+test('published public shell examples do not reference missing repo-local scripts', () => {
+  for (const [name, manifest] of [
+    ['public-bot-health.json', publicBotHealthManifest],
+    ['public-shell-failure-triage.json', publicFailureTriageManifest],
+  ]) {
+    for (const task of manifest.workflows[0].tasks) {
+      const program = task.shell && task.shell.program;
+      if (typeof program === 'string' && program.includes('/')) {
+        assert.ok(existsSync(program), `${name} references missing shell program: ${program}`);
+      }
+    }
+  }
+});
+
 test('public report publish example validates and compiles approval-gated publish flow', () => {
   const result = validateManifest(publicReportPublishManifest);
   assert.equal(result.ok, true);

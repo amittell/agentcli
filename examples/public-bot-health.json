@@ -9,7 +9,8 @@
           "id": "check-bot-health",
           "name": "Check Bot Health",
           "shell": {
-            "program": "scripts/check_bot_health.sh"
+            "program": "sh",
+            "args": ["-lc", "printf 'ALERT: simulated bot health regression\nlatency_ms=250\n'"]
           },
           "target": {
             "session_target": "shell"

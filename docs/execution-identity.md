@@ -2314,9 +2314,9 @@ The following decisions were made during implementation and differ from or exten
 
 The original plan called for renaming `src/signing/` to `src/evidence/`. Instead, `src/signing/` was preserved unchanged for v0.1 backward compatibility, and `src/evidence/` was created as a new parallel directory. The SSH evidence provider in `src/evidence/ssh.js` reimplements the signing logic cleanly rather than importing from `src/signing/ssh.js`. This avoids coupling the v0.2 evidence system to the v0.1 signing interface.
 
-#### MANIFEST_VERSION Kept at '0.1'
+#### MANIFEST_VERSION Raised to '0.2'
 
-The exported `MANIFEST_VERSION` constant remains `'0.1'` rather than changing to `'0.2'`. This is intentional: existing code that checks `manifest.version !== MANIFEST_VERSION` continues to work for v0.1 manifests. The validator uses a separate `SUPPORTED_VERSIONS = ['0.1', '0.2']` array for version acceptance. The schema's version field accepts both values via an enum.
+The exported `MANIFEST_VERSION` constant is now `'0.2'`, which matches the public discovery surface exposed by `agentcli version`, `agentcli schema manifest`, and the JSON-RPC `agentcli.version` method. Backward compatibility for existing v0.1 manifests is preserved in validation: the validator accepts both `'0.1'` and `'0.2'`, while the schema and compile output use `'0.2'` as the canonical current spec version.
 
 #### Async Identity Resolution
 

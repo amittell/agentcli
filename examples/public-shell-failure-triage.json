@@ -14,8 +14,8 @@
           "id": "collect-health",
           "name": "Collect Health",
           "shell": {
-            "program": "scripts/collect_health.sh",
-            "args": ["--mode", "db-unreachable"]
+            "program": "sh",
+            "args": ["-lc", "printf 'db unreachable\n' >&2; exit 2"]
           },
           "target": {
             "session_target": "shell"
