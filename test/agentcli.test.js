@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
@@ -623,6 +623,51 @@ test('package entry exports the public API', () => {
   assert.equal(MANIFEST_VERSION, '0.2');
   const compiled = compileStandaloneFromIndex(exampleManifest);
   assert.equal(compiled.target, 'standalone');
+});
+
+test('npm global install exposes the agentcli alias on PATH', (t) => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'agentcli-npm-global-'));
+  const prefix = join(sandbox, 'prefix');
+  const packDir = join(sandbox, 'pack');
+  t.after(() => rmSync(sandbox, { recursive: true, force: true }));
+  mkdirSync(packDir, { recursive: true });
+
+  const pack = spawnSync('npm', ['pack', '--json', '--pack-destination', packDir], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(pack.status, 0, pack.stderr || pack.stdout);
+
+  const packed = JSON.parse(pack.stdout);
+  assert.equal(Array.isArray(packed), true);
+  assert.equal(packed.length > 0, true);
+  const tarball = join(packDir, packed[0].filename);
+
+  const install = spawnSync('npm', ['install', '-g', '--prefix', prefix, tarball], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+
+  const execResult = spawnSync('agentcli', ['version', '--json'], {
+    cwd: sandbox,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    shell: process.platform === 'win32',
+    env: {
+      ...process.env,
+      PATH: `${join(prefix, 'bin')}${delimiter}${process.env.PATH || ''}`,
+    },
+  });
+  assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+
+  const version = JSON.parse(execResult.stdout);
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  assert.equal(version.ok, true);
+  assert.equal(version.package_version, pkg.version);
+  assert.equal(version.manifest_version, MANIFEST_VERSION);
 });
 
 test('cli schema returns json', async () => {

@@ -47,6 +47,8 @@ agentcli audit --limit 10
 agentcli verify <execution-id>
 ```
 
+`npm install -g agentcli` installs the `agentcli` command on your PATH so you can run `agentcli ...` from any directory. If you install it into a project instead, use `npx agentcli ...`.
+
 ### `agentcli` with `openclaw-scheduler`
 
 ```bash
