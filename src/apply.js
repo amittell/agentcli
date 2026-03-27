@@ -124,7 +124,7 @@ const SCHEDULER_CREATE_FIELDS = [
   'delete_after_run'
 ];
 
-const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id');
+const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id' && field !== 'origin');
 
 function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   const spec = {};
@@ -138,9 +138,13 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   return spec;
 }
 
-function schedulerCreateSpec(job) {
+function schedulerCreateSpec(job, { originOverride } = {}) {
   const { source, ...spec } = job;
-  return projectSchedulerSpec(spec, SCHEDULER_CREATE_FIELDS, { includeNulls: false });
+  const projected = projectSchedulerSpec(spec, SCHEDULER_CREATE_FIELDS, { includeNulls: false });
+  if (originOverride != null) {
+    projected.origin = originOverride;
+  }
+  return projected;
 }
 
 function schedulerUpdateSpec(job) {
@@ -181,6 +185,9 @@ export function createSchedulerCliRunner(options = {}) {
     },
     updateJob(id, spec) {
       return invoke(['jobs', 'update', id, JSON.stringify(spec)]);
+    },
+    deleteJob(id) {
+      return invoke(['jobs', 'delete', id]);
     }
   };
 }
@@ -346,19 +353,26 @@ export async function applyManifestToScheduler(
 
     let action;
     let existingId;
+    let existingJob;
 
     if (adoptBy === 'name') {
-      const existingJob = existingByName.get(job.name)?.[0];
-      if (existingJob) {
-        action = 'adopted';
-        existingId = existingJob.id;
-      } else if (existingById.has(job.id)) {
+      if (existingById.has(job.id)) {
+        action = 'updated';
+      } else {
+        existingJob = existingByName.get(job.name)?.[0];
+        if (existingJob) {
+          action = 'adopted';
+          existingId = existingJob.id;
+        } else {
+          action = 'created';
+        }
+      }
+    } else {
+      if (existingById.has(job.id)) {
         action = 'updated';
       } else {
         action = 'created';
       }
-    } else {
-      action = existingById.has(job.id) ? 'updated' : 'created';
     }
 
     if (!dryRun) {
@@ -367,14 +381,23 @@ export async function applyManifestToScheduler(
       } else if (action === 'updated') {
         schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
       } else if (action === 'adopted') {
-        // Current scheduler updates are partial and cannot re-key IDs.
-        schedulerRunner.updateJob(existingId, schedulerUpdateSpec(job));
+        if (typeof schedulerRunner.deleteJob !== 'function') {
+          throw Object.assign(
+            new Error('Scheduler runner does not support deleteJob(); cannot adopt legacy rows by name'),
+            { code: 'scheduler_error' }
+          );
+        }
+        schedulerRunner.addJob(
+          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system' })
+        );
+        schedulerRunner.deleteJob(existingId);
       }
     }
 
     actions.push({
       action,
       job_id: job.id,
+      ...(existingId ? { adopted_from_job_id: existingId } : {}),
       name: job.name,
       invocation_mode: job.parent_id ? 'trigger' : 'schedule',
       ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})

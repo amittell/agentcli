@@ -906,7 +906,8 @@ test('applyManifestToScheduler uses replace-style updates for manifest-managed s
   const existing = [{
     ...compiled.jobs[0],
     delivery_channel: 'telegram',
-    delivery_to: '@owner_dm'
+    delivery_to: '@owner_dm',
+    origin: 'telegram:123'
   }];
   const calls = [];
   const runner = {
@@ -930,6 +931,7 @@ test('applyManifestToScheduler uses replace-style updates for manifest-managed s
   assert.equal(calls[0].spec.delivery_to, null);
   assert.equal(calls[0].spec.approval_auto, 'reject');
   assert.equal(calls[0].spec.approval_timeout_s, 3600);
+  assert.equal('origin' in calls[0].spec, false);
 });
 
 test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', async () => {
@@ -1003,7 +1005,7 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
   const stableJob = compiled.jobs[0];
   // Simulate existing job with same name but a legacy UUID
   const legacyId = 'legacy-uuid-aaaa-bbbb-cccc-000000000000';
-  const existing = [{ ...stableJob, id: legacyId }];
+  const existing = [{ ...stableJob, id: legacyId, origin: 'telegram:123' }];
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
@@ -1015,6 +1017,10 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
     updateJob(id, spec) {
       calls.push({ action: 'update', id, spec });
       return { ok: true, job: spec };
+    },
+    deleteJob(id) {
+      calls.push({ action: 'delete', id });
+      return { ok: true };
     }
   };
 
@@ -1029,15 +1035,18 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
   // The adopted action's job_id should be the stable compiled id, not the legacy UUID
   assert.equal(result.actions[0].job_id, stableJob.id);
   assert.notEqual(result.actions[0].job_id, legacyId);
+  assert.equal(result.actions[0].adopted_from_job_id, legacyId);
 
-  // updateJob is still issued against the legacy row because scheduler updates are partial
-  const updateCall = calls.find(c => c.action === 'update');
-  assert.ok(updateCall, 'updateJob should have been called for the adopted job');
-  assert.equal(updateCall.id, legacyId);
-  assert.equal('id' in updateCall.spec, false);
+  const adoptedCreateCall = calls.find(c => c.action === 'create' && c.spec.id === stableJob.id);
+  assert.ok(adoptedCreateCall, 'addJob should create the adopted job under the stable compiled id');
+  assert.equal(adoptedCreateCall.spec.origin, 'telegram:123');
+
+  const deleteCall = calls.find(c => c.action === 'delete');
+  assert.ok(deleteCall, 'deleteJob should remove the legacy row after adoption');
+  assert.equal(deleteCall.id, legacyId);
 
   // addJob was called for the unmatched second job
-  const createCall = calls.find(c => c.action === 'create');
+  const createCall = calls.find(c => c.action === 'create' && c.spec.id !== stableJob.id);
   assert.ok(createCall, 'addJob should have been called for the unmatched job');
 });
 
@@ -1054,6 +1063,9 @@ test('applyManifestToScheduler adopt-by-name creates when no name matches', asyn
     },
     updateJob() {
       throw new Error('should not update when no name matches');
+    },
+    deleteJob() {
+      throw new Error('should not delete when no name matches');
     }
   };
 
@@ -1080,6 +1092,9 @@ test('applyManifestToScheduler adopt-by-id (default) still works correctly', asy
     updateJob(id, spec) {
       calls.push({ action: 'update', id, spec });
       return { ok: true, job: spec };
+    },
+    deleteJob() {
+      throw new Error('should not delete on adopt-by-id');
     }
   };
 
@@ -1100,7 +1115,8 @@ test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler w
     invocation: { label: 'fake-scheduler' },
     listJobs() { return existing; },
     addJob() { throw new Error('dry-run should not add jobs'); },
-    updateJob() { throw new Error('dry-run should not update jobs'); }
+    updateJob() { throw new Error('dry-run should not update jobs'); },
+    deleteJob() { throw new Error('dry-run should not delete jobs'); }
   };
 
   const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name', dryRun: true });
@@ -1111,6 +1127,7 @@ test('applyManifestToScheduler adopt-by-name dry-run does not invoke scheduler w
   assert.deepEqual(result.actions.map(a => a.action), ['adopted', 'created']);
   // job_id in plan reflects the stable id, not the legacy UUID
   assert.equal(result.actions[0].job_id, compiled.jobs[0].id);
+  assert.equal(result.actions[0].adopted_from_job_id, legacyId);
 });
 
 test('applyManifestToScheduler adopt-by-name rejects ambiguous existing scheduler names', async () => {
