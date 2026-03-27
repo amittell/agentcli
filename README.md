@@ -571,6 +571,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [trust-enforcement.json](examples/trust-enforcement.json) | Graduated trust levels with strict and advisory enforcement across multiple tasks. |
 | [authorization-proof.json](examples/authorization-proof.json) | JWT-based manifest authorization proof with claims verification. |
 | [cloud-workload.json](examples/cloud-workload.json) | Azure managed identity for cloud workload authentication with evidence and compliance context. |
+| [stripe-ops.json](examples/stripe-ops.json) | Wrapping the Stripe CLI with API key binding, JSON output parsing, evidence, and failure triage. |
 
 ### Putting it together: a v0.2 manifest
 

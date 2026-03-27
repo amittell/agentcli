@@ -1,0 +1,156 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "stripe-api-key",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/stripe",
+        "display_name": "Stripe Operations Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "STRIPE_API_KEY"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": {
+              "kind": "env",
+              "name": "STRIPE_API_KEY"
+            },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": {
+        "required": false
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "stripe-ops",
+      "name": "Stripe Operations",
+      "identity": {
+        "ref": "stripe-api-key"
+      },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "list-recent-charges",
+          "name": "List Recent Charges",
+          "shell": {
+            "program": "stripe",
+            "args": ["charges", "list", "--limit", "5"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "evidence": {
+            "ref": "ssh-evidence"
+          },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000,
+            "offload": "auto",
+            "retrieve": "on-demand"
+          },
+          "schedule": {
+            "cron": "0 */4 * * *"
+          }
+        },
+        {
+          "id": "check-balance",
+          "name": "Check Account Balance",
+          "shell": {
+            "program": "stripe",
+            "args": ["balance", "retrieve"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "evidence": {
+            "ref": "ssh-evidence"
+          },
+          "output": {
+            "format": "json"
+          },
+          "schedule": {
+            "cron": "0 8 * * *"
+          }
+        },
+        {
+          "id": "list-failed-payments",
+          "name": "List Failed Payment Intents",
+          "shell": {
+            "program": "stripe",
+            "args": ["payment_intents", "list", "--limit", "10", "--query", "status:'requires_payment_method'"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "schedule": {
+            "cron": "0 9 * * *"
+          },
+          "on_failure": {
+            "id": "triage-stripe-failure",
+            "name": "Triage Stripe API Failure",
+            "prompt": "The Stripe API call failed. Review the error, determine whether it is an authentication issue, rate limit, or API error, and recommend the next step without making changes.",
+            "target": {
+              "session_target": "isolated",
+              "agent_id": "main"
+            },
+            "intent": {
+              "mode": "plan",
+              "read_only": true
+            },
+            "context": {
+              "retrieval": "recent",
+              "limit": 3
+            },
+            "delivery": {
+              "mode": "announce"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
