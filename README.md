@@ -239,16 +239,16 @@ For local `agentcli exec`, some contract fields are enforced directly today and 
 | Mode | Plain-English meaning | Current `agentcli exec` behavior |
 |---|---|---|
 | `none` | No sandboxing intent is declared. | No sandbox warning. |
-| `permissive` | Run with low-friction local access, but still record that the task is not meant to be tightly isolated. | Emits a warning and proceeds. |
-| `strict` | The task is supposed to run in a stronger sandbox. | Emits a warning because OS-level sandboxing is not yet enforced by local `exec`. |
+| `permissive` | Run with low-friction local access, but still record that the task is not meant to be tightly isolated. | Emits an advisory warning and proceeds. |
+| `strict` | The task is supposed to run in a stronger sandbox. | Enforced on macOS when `sandbox-exec` is available. Other OSes emit a warning and proceed without local OS-level sandbox enforcement. |
 
 #### Network modes
 
 | Mode | Plain-English meaning | Current `agentcli exec` behavior |
 |---|---|---|
 | `unrestricted` | The task may use the network normally. | No network warning. |
-| `restricted` | The task should run with a narrower network posture. | Emits a warning and proceeds. |
-| `none` | The task should not reach the network. | Emits a warning because local `exec` does not yet block the network at the OS level. |
+| `restricted` | The task should run with a narrower network posture. | On macOS with `sandbox-exec`, local `exec` denies inbound network access. Other OSes emit a warning and proceed. |
+| `none` | The task should not reach the network. | On macOS with `sandbox-exec`, local `exec` blocks network access. Other OSes emit a warning and proceed. |
 
 #### Audit modes
 
@@ -271,27 +271,28 @@ For local `agentcli exec`, some contract fields are enforced directly today and 
 If you see a warning like:
 
 ```text
-contract.sandbox is "permissive"; execution proceeds with advisory logging
+contract.sandbox is "permissive"; execution proceeds without additional OS-level isolation
 ```
 
 or:
 
 ```text
-contract.sandbox is "strict" but OS-level sandboxing is not yet enforced by agentcli exec
+contract.sandbox is "strict" but no supported local sandbox runner is available; execution proceeds without OS-level sandbox enforcement
 ```
 
 it means:
 
 - your manifest is valid
 - `agentcli` recorded the contract intent correctly
-- local `exec` is not yet the component enforcing OS-level sandbox boundaries
+- the local machine does not currently have a supported sandbox backend for that contract
 
 What to do:
 
-- If you are using `agentcli exec` for local development or operator-run checks, it is usually fine to proceed.
-- If you do not want the warning for a local workflow, declare `sandbox: "none"` and `network: "unrestricted"` instead of implying isolation that local `exec` does not yet provide.
-- If you need hard enforcement, rely on a runtime or environment that enforces those boundaries, and keep `contract` as the portable declaration of that intent.
-- Use `allowed_paths` today when you need a local filesystem boundary that `agentcli exec` can actually enforce.
+- On macOS, install or keep access to `sandbox-exec` if you want local `strict` / `restricted` / `none` enforcement.
+- On other OSes, treat `contract` as the portable declaration and rely on a backend or environment that can enforce it until an OS-specific adapter is available.
+- If you are using `agentcli exec` for local development or operator-run checks, it is usually fine to proceed with the warning.
+- If you do not want the warning for a local workflow, declare `sandbox: "none"` and `network: "unrestricted"` instead of implying isolation your local executor cannot provide.
+- `allowed_paths` remains locally enforced across platforms and is the right way to express a portable filesystem boundary today.
 
 ### Credential presentation
 

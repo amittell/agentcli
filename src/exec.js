@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import { validateManifest } from './validate.js';
 import { expandManifestShorthands } from './shorthand.js';
 import { normalizeShellExecution } from './shell.js';
@@ -54,34 +55,28 @@ import './authorization-proof/certificate.js';
 import { resolveAuthorizationProvider, normalizeAuthorizationRequest, normalizeDecision } from './authorization/index.js';
 import './authorization/none.js';
 import './authorization/opa.js';
+import { prepareSandboxedShellCommand } from './sandbox.js';
 
-function preflightContractChecks(contract, shell) {
+function isPathWithin(targetPath, rootPath) {
+  const rel = relative(rootPath, targetPath);
+  return rel === '' || (!rel.startsWith('..') && rel !== '..' && !isAbsolute(rel));
+}
+
+function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) {
   const violations = [];
   const warnings = [];
+  const executionCwd = resolvePath(cwd, shell.cwd || '.');
 
-  if (contract.allowed_paths && shell.cwd) {
+  if (contract.allowed_paths?.length) {
     const allowed = contract.allowed_paths.some(p =>
-      shell.cwd === p || shell.cwd.startsWith(p.endsWith('/') ? p : `${p}/`)
+      isPathWithin(executionCwd, resolvePath(cwd, p))
     );
     if (!allowed) {
       violations.push({
         field: 'contract.allowed_paths',
-        message: `shell.cwd "${shell.cwd}" is not under any allowed path`
+        message: `execution cwd "${executionCwd}" is not under any allowed path`
       });
     }
-  }
-
-  if (contract.sandbox === 'strict') {
-    warnings.push('contract.sandbox is "strict" but OS-level sandboxing is not yet enforced by agentcli exec');
-  }
-  if (contract.sandbox === 'permissive') {
-    warnings.push('contract.sandbox is "permissive"; execution proceeds with advisory logging');
-  }
-  if (contract.network === 'none') {
-    warnings.push('contract.network is "none" but network blocking is not yet enforced by agentcli exec');
-  }
-  if (contract.network === 'restricted') {
-    warnings.push('contract.network is "restricted"; execution proceeds with advisory logging');
   }
 
   return { violations, warnings };
@@ -218,7 +213,9 @@ function resolveCommonState(manifest, {
   const auditPolicy = contract.audit ?? 'always';
   const shell = normalizeShellExecution(task.shell);
   const effectiveTimeout = timeoutMs ?? task.runtime?.timeout_ms ?? null;
-  const { violations, warnings } = preflightContractChecks(contract, shell);
+  const { violations, warnings: preflightWarnings } = preflightContractChecks(contract, shell, { cwd });
+  const sandboxCommand = prepareSandboxedShellCommand(shell, contract, { cwd, env });
+  const warnings = [...preflightWarnings, ...sandboxCommand.warnings];
 
   if (violations.length > 0) {
     throw Object.assign(
@@ -232,7 +229,7 @@ function resolveCommonState(manifest, {
 
   return {
     expanded, workflow, task, isV2, identity, contract,
-    auditPolicy, shell, effectiveTimeout, violations, warnings,
+    auditPolicy, shell, sandboxCommand, effectiveTimeout, violations, warnings,
     provider, providerConfig, cwd, env,
   };
 }
@@ -288,8 +285,8 @@ export function executeTask(manifest, {
 
 function executeV1(common, { dryRun }) {
   const {
-    workflow, task, identity, contract, auditPolicy, shell,
-    effectiveTimeout, warnings, provider, providerConfig, cwd,
+    workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
+    effectiveTimeout, warnings, provider, providerConfig, cwd, env,
   } = common;
 
   let declaredIdentity = null;
@@ -391,8 +388,8 @@ function executeV1(common, { dryRun }) {
   }
 
   const spawnEnv = Object.keys(shell.env).length > 0
-    ? { ...process.env, ...shell.env }
-    : process.env;
+    ? { ...process.env, ...env, ...shell.env }
+    : { ...process.env, ...env };
 
   const spawnOpts = {
     cwd: shell.cwd || cwd,
@@ -410,7 +407,7 @@ function executeV1(common, { dryRun }) {
   }
 
   const startMs = Date.now();
-  const proc = spawnSync(shell.program, shell.args, spawnOpts);
+  const proc = spawnSync(sandboxCommand.program, sandboxCommand.args, spawnOpts);
   const durationMs = Date.now() - startMs;
 
   const stdout = proc.stdout || '';
@@ -538,7 +535,7 @@ async function executeV2(common, {
   env,
 }) {
   const {
-    expanded, workflow, task, identity, contract, auditPolicy, shell,
+    expanded, workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd,
   } = common;
 
@@ -998,7 +995,7 @@ async function executeV2(common, {
   }
 
   const startMs = Date.now();
-  const proc = spawnSync(shell.program, shell.args, spawnOpts);
+  const proc = spawnSync(sandboxCommand.program, sandboxCommand.args, spawnOpts);
   const durationMs = Date.now() - startMs;
 
   const stdout = proc.stdout || '';

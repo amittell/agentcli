@@ -32,6 +32,11 @@ import { executeTask } from '../src/exec.js';
 import { readAuditLog } from '../src/audit.js';
 import { buildAttestationPayload, commandHash } from '../src/attestation.js';
 import {
+  buildMacOSSandboxProfile,
+  prepareSandboxedShellCommand,
+  resolveSandboxSupport,
+} from '../src/sandbox.js';
+import {
   registerProvider,
   getProvider,
   listProviders,
@@ -3230,7 +3235,59 @@ test('exec allows cwd under an allowed path', () => {
   }
 });
 
-test('exec returns advisory warnings for strict sandbox and network none', () => {
+test('prepareSandboxedShellCommand falls back with warnings on unsupported platforms', () => {
+  const result = prepareSandboxedShellCommand(
+    { program: 'echo', args: ['hi'] },
+    { sandbox: 'strict', network: 'none' },
+    { cwd: process.cwd(), env: {}, platform: 'linux' }
+  );
+
+  assert.equal(result.sandboxed, false);
+  assert.ok(result.warnings.some(w => w.includes('no supported local sandbox runner')));
+  assert.ok(result.warnings.some(w => w.includes('network')));
+});
+
+test('prepareSandboxedShellCommand keeps permissive sandbox advisory', () => {
+  const result = prepareSandboxedShellCommand(
+    { program: 'echo', args: ['hi'] },
+    { sandbox: 'permissive', network: 'unrestricted' },
+    { cwd: process.cwd(), env: {}, platform: 'linux' }
+  );
+
+  assert.equal(result.sandboxed, false);
+  assert.ok(result.warnings.some(w => w.includes('permissive')));
+});
+
+test('buildMacOSSandboxProfile restricts inbound network for strict contracts', () => {
+  const profile = buildMacOSSandboxProfile({
+    contract: { sandbox: 'strict', network: 'restricted' },
+    cwd: '/tmp',
+    shellCwd: '/tmp/agentcli',
+  });
+
+  assert.match(profile, /\(allow network-outbound\)/);
+  assert.doesNotMatch(profile, /\(allow network\*\)/);
+});
+
+test('prepareSandboxedShellCommand wraps strict contracts on supported darwin runners', () => {
+  const support = resolveSandboxSupport();
+  if (process.platform !== 'darwin' || !support) {
+    return;
+  }
+
+  const result = prepareSandboxedShellCommand(
+    { program: 'echo', args: ['hi'] },
+    { sandbox: 'strict', network: 'none' },
+    { cwd: process.cwd(), env: process.env, platform: process.platform }
+  );
+
+  assert.equal(result.sandboxed, true);
+  assert.equal(result.program, support.command);
+  assert.equal(result.args[0], '-p');
+  assert.equal(result.args[2], 'echo');
+});
+
+test('exec returns fallback warnings for strict sandbox and network none when sandboxing is disabled', () => {
   const manifest = {
     version: '0.1',
     workflows: [{
@@ -3244,9 +3301,92 @@ test('exec returns advisory warnings for strict sandbox and network none', () =>
       }]
     }]
   };
-  const result = executeTask(manifest, { taskId: 't' });
-  assert.ok(result.warnings.some(w => w.includes('sandbox')));
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { ...process.env, AGENTCLI_SANDBOX: 'off' },
+  });
+  assert.ok(result.warnings.some(w => w.includes('no supported local sandbox runner')));
   assert.ok(result.warnings.some(w => w.includes('network')));
+});
+
+test('exec strict sandbox allows writes inside cwd on supported darwin runners', () => {
+  const support = resolveSandboxSupport();
+  if (process.platform !== 'darwin' || !support) {
+    return;
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-sandbox-allow-'));
+  const outputPath = join(workdir, 'allowed.txt');
+  try {
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-lc', 'printf ok > allowed.txt'],
+            cwd: workdir,
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { sandbox: 'strict', network: 'none', audit: 'none' }
+        }]
+      }]
+    };
+
+    const result = executeTask(manifest, { taskId: 't' });
+    assert.equal(result.ok, true);
+    assert.ok(existsSync(outputPath));
+    assert.equal(readFileSync(outputPath, 'utf8'), 'ok');
+    assert.ok(!result.warnings.some(w => w.includes('no supported local sandbox runner')));
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('exec strict sandbox blocks writes outside cwd on supported darwin runners', () => {
+  const support = resolveSandboxSupport();
+  if (process.platform !== 'darwin' || !support) {
+    return;
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-sandbox-deny-'));
+  const outsideRoot = process.env.HOME && !process.env.HOME.startsWith(tmpdir())
+    ? process.env.HOME
+    : process.cwd();
+  const deniedPath = join(outsideRoot, `agentcli-sandbox-denied-${Date.now()}.txt`);
+
+  try {
+    rmSync(deniedPath, { force: true });
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-lc', 'printf blocked > "$TARGET"'],
+            cwd: workdir,
+            env: { TARGET: deniedPath },
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { sandbox: 'strict', network: 'none', audit: 'none' }
+        }]
+      }]
+    };
+
+    const result = executeTask(manifest, { taskId: 't' });
+    assert.equal(result.ok, false);
+    assert.ok(!existsSync(deniedPath));
+    assert.match(result.result.stderr, /Operation not permitted|sandbox/i);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(deniedPath, { force: true });
+  }
 });
 
 test('exec writes audit record when contract.audit is always', (t) => {

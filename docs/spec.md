@@ -663,8 +663,9 @@ A conforming implementation MAY support direct task execution via an `exec` comm
 
 - `exec` MUST only execute tasks with `target.session_target` equal to `shell`. Prompt-based tasks require an agent runtime and are not executable by agentcli directly.
 - `exec` MUST resolve identity and contract by inheriting from the workflow level, with task-level fields overriding key by key.
-- `exec` MUST perform pre-flight contract checks before spawning a process. If `contract.allowed_paths` is declared and `shell.cwd` is not under any allowed path, `exec` MUST reject the execution with a contract violation error.
-- `exec` SHOULD emit advisory warnings for contract constraints it cannot yet enforce at the OS level (such as `sandbox: strict` or `network: none`).
+- `exec` MUST perform pre-flight contract checks before spawning a process. If `contract.allowed_paths` is declared and the effective execution cwd (`shell.cwd` when set, otherwise the caller cwd) is not under any allowed path, `exec` MUST reject the execution with a contract violation error.
+- `exec` SHOULD enforce `contract.sandbox` and `contract.network` when a supported local sandbox backend is available.
+- `exec` SHOULD emit advisory warnings for contract constraints it cannot enforce on the current machine (for example, `sandbox: strict` or `network: none` on an unsupported OS).
 - `exec` MUST respect `runtime.timeout_ms` as a process execution timeout.
 - `exec` MUST record an audit trail governed by `contract.audit`:
   - `always`: write an audit record for every execution

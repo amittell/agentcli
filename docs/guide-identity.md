@@ -475,28 +475,29 @@ Local `agentcli exec` fully enforces some contract checks, and records others as
 - `allowed_paths`: enforced
 - `required_trust_level` + `trust_enforcement`: enforced
 - `audit`: enforced
-- `sandbox`: advisory warning only
-- `network`: advisory warning only
+- `sandbox`: enforced on macOS when `sandbox-exec` is available; advisory on other OSes
+- `network`: enforced on macOS when `sandbox-exec` is available for `restricted` and `none`; advisory on other OSes
 
 That is why you may see warnings such as:
 
 ```text
-contract.sandbox is "strict" but OS-level sandboxing is not yet enforced by agentcli exec
+contract.sandbox is "strict" but no supported local sandbox runner is available; execution proceeds without OS-level sandbox enforcement
 ```
 
 or:
 
 ```text
-contract.network is "none" but network blocking is not yet enforced by agentcli exec
+contract.network is "none" but no supported local sandbox runner is available; execution proceeds without OS-level network enforcement
 ```
 
-These warnings do not mean the manifest is invalid. They mean the declaration is valid, but the local executor is not the component enforcing that boundary yet.
+These warnings do not mean the manifest is invalid. They mean the declaration is valid, but the local machine does not currently have a supported sandbox backend for that boundary.
 
 Use this rule of thumb:
 
 - local testing: `permissive` / `unrestricted` is usually fine
-- real enforcement needs: keep the contract declaration, but run in an environment or backend that can enforce it
-- if you want no warning during local runs, use `sandbox: "none"` and `network: "unrestricted"`
+- macOS local enforcement: use `strict`, `restricted`, or `none` and let `sandbox-exec` enforce the boundary
+- other OSes: keep the contract declaration, but rely on a backend or environment that can enforce it until an OS-specific adapter is available
+- if you want no warning during local runs on an unsupported machine, use `sandbox: "none"` and `network: "unrestricted"`
 
 ### Example: require supervised trust for production tasks
 

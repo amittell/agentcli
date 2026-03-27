@@ -8,6 +8,12 @@ export { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 export { TARGETS, getTarget, listTargets, registerTarget } from './targets.js';
 export { ensureAgentcliHome, getAgentcliPaths, resolveAgentcliHome, resolveManifestCandidate } from './home.js';
 export { normalizeShellExecution, renderShellExecution } from './shell.js';
+export {
+  resolveSandboxSupport,
+  needsSandboxEnforcement,
+  buildMacOSSandboxProfile,
+  prepareSandboxedShellCommand,
+} from './sandbox.js';
 export { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 export { describeTarget } from './describe.js';
 export { sanitizeForAgent } from './sanitize.js';
