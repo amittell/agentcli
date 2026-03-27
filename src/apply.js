@@ -81,15 +81,71 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
   }
 }
 
-function schedulerJobSpec(job) {
+const SCHEDULER_CREATE_FIELDS = [
+  'id',
+  'name',
+  'enabled',
+  'schedule_cron',
+  'schedule_tz',
+  'session_target',
+  'agent_id',
+  'payload_kind',
+  'payload_message',
+  'payload_model',
+  'payload_thinking',
+  'execution_intent',
+  'execution_read_only',
+  'run_timeout_ms',
+  'overlap_policy',
+  'max_retries',
+  'max_queued_dispatches',
+  'max_pending_approvals',
+  'max_trigger_fanout',
+  'delivery_mode',
+  'delivery_channel',
+  'delivery_to',
+  'delivery_opt_out_reason',
+  'delivery_guarantee',
+  'origin',
+  'parent_id',
+  'trigger_on',
+  'trigger_delay_s',
+  'trigger_condition',
+  'approval_required',
+  'approval_timeout_s',
+  'approval_auto',
+  'context_retrieval',
+  'context_retrieval_limit',
+  'output_store_limit_bytes',
+  'output_excerpt_limit_bytes',
+  'output_summary_limit_bytes',
+  'output_offload_threshold_bytes',
+  'preferred_session_key',
+  'delete_after_run'
+];
+
+const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id');
+
+function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
+  const spec = {};
+  for (const field of fields) {
+    if (!(field in job)) continue;
+    const value = field === 'enabled' ? Boolean(job[field]) : job[field];
+    if (value === undefined) continue;
+    if (value === null && !includeNulls) continue;
+    spec[field] = value;
+  }
+  return spec;
+}
+
+function schedulerCreateSpec(job) {
   const { source, ...spec } = job;
-  const normalized = {
-    ...spec,
-    enabled: Boolean(spec.enabled)
-  };
-  return Object.fromEntries(
-    Object.entries(normalized).filter(([, value]) => value !== null && value !== undefined)
-  );
+  return projectSchedulerSpec(spec, SCHEDULER_CREATE_FIELDS, { includeNulls: false });
+}
+
+function schedulerUpdateSpec(job) {
+  const { source, ...spec } = job;
+  return projectSchedulerSpec(spec, SCHEDULER_UPDATE_FIELDS, { includeNulls: true });
 }
 
 function duplicateNames(items) {
@@ -287,10 +343,6 @@ export async function applyManifestToScheduler(
   const actions = [];
   for (const job of compiled.jobs) {
     const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
-    const spec = schedulerJobSpec({
-      ...job,
-      ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})
-    });
 
     let action;
     let existingId;
@@ -311,12 +363,12 @@ export async function applyManifestToScheduler(
 
     if (!dryRun) {
       if (action === 'created') {
-        schedulerRunner.addJob(spec);
+        schedulerRunner.addJob(schedulerCreateSpec(job));
       } else if (action === 'updated') {
-        schedulerRunner.updateJob(job.id, spec);
+        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
       } else if (action === 'adopted') {
-        // Re-key the job: update by old UUID but spec contains the new stable id
-        schedulerRunner.updateJob(existingId, spec);
+        // Current scheduler updates are partial and cannot re-key IDs.
+        schedulerRunner.updateJob(existingId, schedulerUpdateSpec(job));
       }
     }
 
@@ -324,7 +376,8 @@ export async function applyManifestToScheduler(
       action,
       job_id: job.id,
       name: job.name,
-      invocation_mode: job.parent_id ? 'trigger' : 'schedule'
+      invocation_mode: job.parent_id ? 'trigger' : 'schedule',
+      ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})
     });
   }
 

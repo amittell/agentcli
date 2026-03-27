@@ -12,6 +12,12 @@ import { expandManifestShorthands } from '../shorthand.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
 const TRIGGERED_SENTINEL_TZ = 'UTC';
+const SCHEDULER_DEFAULT_RUN_TIMEOUT_MS = 300000;
+const SCHEDULER_DEFAULT_APPROVAL_TIMEOUT_S = 3600;
+const SCHEDULER_DEFAULT_APPROVAL_AUTO = 'reject';
+const SCHEDULER_SYSTEM_ORIGIN = 'system';
+const DELIVERY_OPT_OUT_REASON =
+  'delivery intentionally disabled by the agentcli manifest';
 
 function schedulerOutputPolicy(plan) {
   const previewBytes = Math.max(64, plan.output.preview_bytes ?? 2000);
@@ -28,6 +34,16 @@ function schedulerOutputPolicy(plan) {
     output_summary_limit_bytes: Math.max(5000, previewBytes),
     output_offload_threshold_bytes: offloadThreshold,
   };
+}
+
+function schedulerDeliveryOptOutReason(plan) {
+  const isRootAgentTurn =
+    !plan.parent_compiled_id &&
+    plan.execution.payload_kind === 'agentTurn';
+  if (!isRootAgentTurn || plan.delivery.mode !== 'none') {
+    return null;
+  }
+  return DELIVERY_OPT_OUT_REASON;
 }
 
 function isV2IdentityDeclaration(identity) {
@@ -193,6 +209,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       const persistedAuthorizationProof = sanitizeAuthorizationProofDeclaration(resolvedAuthorizationProof);
       const persistedAuthorization = sanitizeAuthorizationDeclaration(resolvedAuthorization);
       const persistedEvidence = sanitizeEvidenceDeclaration(resolvedEvidence);
+      const deliveryOptOutReason = schedulerDeliveryOptOutReason(plan);
 
       jobs.push({
         id: plan.id,
@@ -208,8 +225,8 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         payload_model: plan.execution.model_policy.scheduler_model,
         payload_thinking: plan.execution.model_policy.thinking,
         execution_intent: plan.intent.mode,
-        execution_read_only: plan.intent.read_only == null ? null : (plan.intent.read_only ? 1 : 0),
-        run_timeout_ms: plan.runtime.timeout_ms,
+        execution_read_only: plan.intent.read_only ? 1 : 0,
+        run_timeout_ms: plan.runtime.timeout_ms ?? SCHEDULER_DEFAULT_RUN_TIMEOUT_MS,
         overlap_policy: plan.reliability.overlap_policy,
         max_retries: plan.reliability.max_retries,
         max_queued_dispatches: plan.budgets.max_queued_dispatches,
@@ -218,14 +235,16 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         delivery_mode: plan.delivery.mode,
         delivery_channel: plan.delivery.channel,
         delivery_to: plan.delivery.to,
+        delivery_opt_out_reason: deliveryOptOutReason,
         delivery_guarantee: plan.reliability.guarantee,
+        origin: SCHEDULER_SYSTEM_ORIGIN,
         parent_id: plan.parent_compiled_id,
         trigger_on: isTriggered ? plan.invocation.on : null,
-        trigger_delay_s: isTriggered ? plan.invocation.delay_s : null,
+        trigger_delay_s: isTriggered ? (plan.invocation.delay_s ?? 0) : 0,
         trigger_condition: isTriggered ? plan.invocation.condition : null,
         approval_required: plan.approval.required,
-        approval_timeout_s: plan.approval.timeout_s,
-        approval_auto: plan.approval.auto,
+        approval_timeout_s: plan.approval.timeout_s ?? SCHEDULER_DEFAULT_APPROVAL_TIMEOUT_S,
+        approval_auto: plan.approval.auto ?? SCHEDULER_DEFAULT_APPROVAL_AUTO,
         context_retrieval: plan.context.retrieval,
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
@@ -263,7 +282,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         contract_required_trust_level: plan.contract?.required_trust_level ?? null,
         contract_trust_enforcement: plan.contract?.trust_enforcement ?? null,
 
-        delete_after_run: plan.delete_after_run == null ? null : (plan.delete_after_run ? 1 : 0)
+        delete_after_run: plan.delete_after_run ? 1 : 0
       });
 
       explain.push({

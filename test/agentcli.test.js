@@ -816,8 +816,120 @@ test('applyManifestToScheduler plans and executes scheduler upserts', async () =
   assert.equal(calls.length, 2);
   assert.equal(calls[0].action, 'update');
   assert.equal(calls[1].action, 'create');
-  assert.equal('run_timeout_ms' in calls[0].spec, false);
+  assert.equal(calls[0].spec.run_timeout_ms, 300000);
+  assert.equal(calls[1].spec.origin, 'system');
+  assert.equal('delivery_opt_out_reason' in calls[1].spec, false);
   assert.equal(calls[0].spec.enabled, true);
+});
+
+test('openclaw-scheduler target does not advertise unsupported v0.2 runtime features', () => {
+  const target = listTargets().find(candidate => candidate.name === 'openclaw-scheduler');
+  assert.ok(target);
+  assert.equal(target.features.runtime_identity_resolution, false);
+  assert.equal(target.features.evidence_generation, false);
+  assert.equal(target.features.trust_evaluation, false);
+  assert.equal(target.features.delegation_validation, false);
+});
+
+test('applyManifestToScheduler strips non-runtime scheduler metadata from backend specs', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://example/test' }
+    }],
+    workflows: [{
+      id: 'apply-strip',
+      name: 'Apply Strip',
+      identity: { ref: 'profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+        required_trust_level: 'restricted',
+        trust_enforcement: 'advisory'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() { return []; },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  await applyManifestToScheduler(manifest, { runner });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].origin, 'system');
+  assert.equal(calls[0].run_timeout_ms, 300000);
+  assert.equal(calls[0].delivery_opt_out_reason, 'delivery intentionally disabled by the agentcli manifest');
+  assert.equal('identity_ref' in calls[0], false);
+  assert.equal('identity' in calls[0], false);
+  assert.equal('contract_sandbox' in calls[0], false);
+  assert.equal('authorization_proof' in calls[0], false);
+  assert.equal('evidence' in calls[0], false);
+});
+
+test('applyManifestToScheduler uses replace-style updates for manifest-managed scheduler fields', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'replace-style',
+      name: 'Replace Style',
+      tasks: [{
+        id: 'root',
+        name: 'Root',
+        prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const existing = [{
+    ...compiled.jobs[0],
+    delivery_channel: 'telegram',
+    delivery_to: '@owner_dm'
+  }];
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return existing;
+    },
+    addJob() {
+      throw new Error('should not add jobs');
+    },
+    updateJob(id, spec) {
+      calls.push({ id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  await applyManifestToScheduler(manifest, { runner });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].spec.delivery_channel, null);
+  assert.equal(calls[0].spec.delivery_to, null);
+  assert.equal(calls[0].spec.approval_auto, 'reject');
+  assert.equal(calls[0].spec.approval_timeout_s, 3600);
 });
 
 test('applyManifestToScheduler converts enabled flags to booleans for scheduler cli calls', async () => {
@@ -918,11 +1030,11 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
   assert.equal(result.actions[0].job_id, stableJob.id);
   assert.notEqual(result.actions[0].job_id, legacyId);
 
-  // updateJob was called with the OLD legacy id but the NEW stable id in spec
+  // updateJob is still issued against the legacy row because scheduler updates are partial
   const updateCall = calls.find(c => c.action === 'update');
   assert.ok(updateCall, 'updateJob should have been called for the adopted job');
   assert.equal(updateCall.id, legacyId);
-  assert.equal(updateCall.spec.id, stableJob.id);
+  assert.equal('id' in updateCall.spec, false);
 
   // addJob was called for the unmatched second job
   const createCall = calls.find(c => c.action === 'create');
@@ -1162,6 +1274,45 @@ test('inspect field masks can traverse JSON-valued columns', async (t) => {
     source: { workflow_id: 'w' },
     identity: { ref: 'identity-profile' },
   });
+});
+
+test('inspect rejects malformed integer limits instead of truncating them', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
+  const dbPath = join(workdir, 'scheduler.sqlite');
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE jobs (
+      id TEXT,
+      created_at TEXT
+    );
+  `);
+  db.prepare('INSERT INTO jobs (id, created_at) VALUES (?, ?)')
+    .run('job-1', '2026-03-06T12:00:00Z');
+  db.close();
+
+  for (const limit of ['3.5', '1e2', '2foo']) {
+    await assert.rejects(
+      () => inspectSchedulerState({ dbPath, entity: 'jobs', limit }),
+      /Invalid integer value/
+    );
+  }
+});
+
+test('inspect surfaces SQLite open failures instead of masking them as missing node:sqlite support', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  await assert.rejects(
+    () => inspectSchedulerState({ dbPath: workdir, entity: 'jobs' }),
+    (err) => {
+      assert.equal(err.code, 'invalid_argument');
+      assert.match(err.message, /Failed to open scheduler database/);
+      assert.doesNotMatch(err.message, /node:sqlite is not available/);
+      return true;
+    }
+  );
 });
 
 test('json-rpc compile request returns compiled output', async () => {
@@ -1503,7 +1654,7 @@ test('ndjson empty items returns empty string', async () => {
   assert.equal(parsed.ok, true);
 });
 
-test('tasks without approval block compile with null approval fields', () => {
+test('tasks without approval block compile with scheduler approval defaults', () => {
   const manifest = {
     version: '0.1',
     workflows: [
@@ -1525,12 +1676,12 @@ test('tasks without approval block compile with null approval fields', () => {
 
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs[0];
-  assert.equal(job.approval_auto, null);
-  assert.equal(job.approval_timeout_s, null);
+  assert.equal(job.approval_auto, 'reject');
+  assert.equal(job.approval_timeout_s, 3600);
   assert.equal(job.approval_required, 0);
 });
 
-test('tasks without intent block compile with null execution_read_only', () => {
+test('tasks without intent block compile with scheduler execution defaults', () => {
   const manifest = {
     version: '0.1',
     workflows: [
@@ -1552,8 +1703,9 @@ test('tasks without intent block compile with null execution_read_only', () => {
 
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs[0];
-  assert.equal(job.execution_read_only, null);
-  assert.equal(job.delete_after_run, null);
+  assert.equal(job.execution_read_only, 0);
+  assert.equal(job.delete_after_run, 0);
+  assert.equal(job.run_timeout_ms, 300000);
 });
 
 test('tasks with explicit intent compile with integer execution_read_only', () => {
@@ -1632,7 +1784,7 @@ test('cli --home flag overrides AGENTCLI_HOME for paths command', async () => {
   assert.equal(output.paths.root, homeRoot);
 });
 
-test('intent with mode but no read_only compiles with null execution_read_only', () => {
+test('intent with mode but no read_only compiles with scheduler execution defaults', () => {
   const manifest = {
     version: '0.1',
     workflows: [
@@ -1656,7 +1808,7 @@ test('intent with mode but no read_only compiles with null execution_read_only',
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs[0];
   assert.equal(job.execution_intent, 'plan');
-  assert.equal(job.execution_read_only, null);
+  assert.equal(job.execution_read_only, 0);
 });
 
 test('cli schema with unknown target produces invalid_argument error', async () => {
@@ -1853,7 +2005,7 @@ test('trigger with missing on field fails validation', () => {
   assert.ok(onError.message.includes('required'));
 });
 
-test('empty approval block compiles with null auto field', () => {
+test('empty approval block compiles with scheduler approval defaults', () => {
   const manifest = {
     version: '0.1',
     workflows: [{
@@ -1869,7 +2021,7 @@ test('empty approval block compiles with null auto field', () => {
   };
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs[0];
-  assert.equal(job.approval_auto, null, 'empty approval block should produce null auto');
+  assert.equal(job.approval_auto, 'reject', 'empty approval block should produce scheduler default auto');
   assert.equal(job.approval_timeout_s, 3600, 'empty approval block should use default timeout');
   assert.equal(job.approval_required, 0, 'empty approval block with no policy defaults required to 0');
 });
@@ -2799,7 +2951,7 @@ test('approval required false with no policy compiles to required 0', () => {
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs[0];
   assert.equal(job.approval_required, 0);
-  assert.equal(job.approval_auto, null);
+  assert.equal(job.approval_auto, 'reject');
 });
 
 test('json-rpc describe rpc target returns methods and notifications', async () => {
@@ -4350,7 +4502,7 @@ test('verify output includes method field', async (t) => {
 
 // -- registerTarget tests --
 
-import { registerTarget } from '../src/targets.js';
+import { listTargets, registerTarget } from '../src/targets.js';
 
 test('registerTarget rejects target without name', () => {
   assert.throws(() => registerTarget({}), /must have a non-empty string name/);
@@ -6087,8 +6239,8 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-me');
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
-  assert.ok(calls[0].authorization_proof_verification);
-  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+  assert.strictEqual('authorization_proof_verification' in calls[0], false);
+  assert.strictEqual('authorization_proof' in calls[0], false);
 });
 
 test('applyManifestToScheduler verifies literal authorization proofs without persisting them', async () => {
@@ -6136,8 +6288,8 @@ test('applyManifestToScheduler verifies literal authorization proofs without per
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
-  assert.strictEqual(calls[0].authorization_proof.proof.value_from, null);
-  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+  assert.strictEqual('authorization_proof' in calls[0], false);
+  assert.strictEqual('authorization_proof_verification' in calls[0], false);
 });
 
 test('applyManifestToScheduler rejects generated on_failure authorization when target lacks hook', async () => {
@@ -6208,8 +6360,8 @@ test('applyManifestToScheduler proof fallback uses resolved task proof declarati
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-override');
-  assert.deepStrictEqual(calls[0].authorization_proof.claims, { subject: 'agentcli-proof' });
-  assert.strictEqual(calls[0].authorization_proof_verification.verified, true);
+  assert.strictEqual('authorization_proof' in calls[0], false);
+  assert.strictEqual('authorization_proof_verification' in calls[0], false);
 });
 
 test('applyManifestToScheduler proof fallback covers generated on_failure tasks', async () => {
@@ -6236,11 +6388,10 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'primary.failure');
-  const failureSpec = calls.find(spec => spec.authorization_proof_ref === 'jwt-proof');
+  const failureSpec = calls.find(spec => spec.name === 'Apply Proof Failure: Handle Failure');
   assert.ok(failureSpec);
-  assert.strictEqual(failureSpec.authorization_proof.ref, 'jwt-proof');
-  assert.ok(failureSpec.authorization_proof_verification);
-  assert.strictEqual(failureSpec.authorization_proof_verification.verified, true);
+  assert.strictEqual('authorization_proof' in failureSpec, false);
+  assert.strictEqual('authorization_proof_verification' in failureSpec, false);
 });
 
 // ---------------------------------------------------------------------------

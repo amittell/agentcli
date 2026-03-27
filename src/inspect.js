@@ -23,20 +23,36 @@ const INSPECT_ENTITIES = {
 
 function integerFlag(value, fallback) {
   if (value == null) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`Invalid integer value: ${value}`);
+    }
+    return value;
+  }
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {
     throw new Error(`Invalid integer value: ${value}`);
   }
-  return parsed;
+  return Number.parseInt(value, 10);
 }
 
-async function openDatabase(dbPath) {
+async function loadDatabaseSync() {
   try {
-    const { DatabaseSync } = await import('node:sqlite');
-    return new DatabaseSync(dbPath);
+    return await import('node:sqlite');
   } catch {
     throw new Error(
       'node:sqlite is not available. The inspect command requires Node 23.4.0+ or Node 22.x with --experimental-sqlite.'
+    );
+  }
+}
+
+async function openDatabase(dbPath) {
+  const { DatabaseSync } = await loadDatabaseSync();
+  try {
+    return new DatabaseSync(dbPath);
+  } catch (err) {
+    throw Object.assign(
+      new Error(`Failed to open scheduler database: ${dbPath}: ${err.message}`),
+      { code: 'invalid_argument', cause: err }
     );
   }
 }
