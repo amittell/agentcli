@@ -2,6 +2,7 @@ import { MANIFEST_VERSION } from './schema.js';
 import { onFailureTaskId } from './shorthand.js';
 
 const SUPPORTED_VERSIONS = ['0.1', MANIFEST_VERSION];
+const TRUST_LEVELS = ['untrusted', 'restricted', 'supervised', 'autonomous'];
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
@@ -611,6 +612,46 @@ function validateOnFailure(errors, warnings, path, task) {
   validateOptionalBlocks(errors, warnings, path, handler);
 }
 
+function compareTrustLevels(a, b) {
+  const indexA = TRUST_LEVELS.indexOf(a);
+  const indexB = TRUST_LEVELS.indexOf(b);
+  if (indexA === -1 || indexB === -1) return null;
+  if (indexA < indexB) return -1;
+  if (indexA > indexB) return 1;
+  return 0;
+}
+
+function hasV2IdentityShape(identity) {
+  return isObject(identity) && (
+    identity.ref != null ||
+    identity.subject != null ||
+    identity.auth != null ||
+    identity.trust != null ||
+    identity.presentation != null
+  );
+}
+
+function resolveTrustSatisfiability(identityProfilesById, workflowIdentity, taskIdentity, workflowContract, taskContract) {
+  const profileRef = taskIdentity?.ref ?? workflowIdentity?.ref ?? null;
+  const profile = profileRef ? identityProfilesById.get(profileRef) ?? null : null;
+  const profileTrust = profile?.trust || {};
+  const workflowTrust = hasV2IdentityShape(workflowIdentity) ? workflowIdentity.trust || {} : {};
+  const taskTrust = hasV2IdentityShape(taskIdentity) ? taskIdentity.trust || {} : {};
+  const profileConstraints = profileTrust.constraints || {};
+  const workflowConstraints = workflowTrust.constraints || {};
+  const taskConstraints = taskTrust.constraints || {};
+  const maxAutonomy =
+    taskConstraints.max_autonomy ??
+    workflowConstraints.max_autonomy ??
+    profileConstraints.max_autonomy ??
+    null;
+  const requiredTrustLevel =
+    taskContract?.required_trust_level ??
+    workflowContract?.required_trust_level ??
+    null;
+  return { maxAutonomy, requiredTrustLevel };
+}
+
 export function validateManifest(manifest) {
   const errors = [];
   const warnings = [];
@@ -897,9 +938,11 @@ export function validateManifest(manifest) {
 
   // Cross-reference validation: verify ref targets exist in profile arrays
   const identityProfileIds = new Set((manifest.identity_profiles || []).filter(p => p.id).map(p => p.id));
+  const identityProfilesById = new Map((manifest.identity_profiles || []).filter(p => p.id).map(p => [p.id, p]));
   const proofProfileIds = new Set((manifest.authorization_proof_profiles || []).filter(p => p.id).map(p => p.id));
   const authzProfileIds = new Set((manifest.authorization_profiles || []).filter(p => p.id).map(p => p.id));
   const evidProfileIds = new Set((manifest.evidence_profiles || []).filter(p => p.id).map(p => p.id));
+  const trustSatisfiabilityErrors = new Set();
 
   function checkRef(refPath, ref, profileSet, profileType) {
     if (ref != null && typeof ref === 'string' && !profileSet.has(ref)) {
@@ -939,6 +982,52 @@ export function validateManifest(manifest) {
           }
           if (task.on_failure.evidence?.ref) {
             checkRef(`${tp}.on_failure.evidence.ref`, task.on_failure.evidence.ref, evidProfileIds, 'evidence');
+          }
+        }
+
+        const taskTrust = resolveTrustSatisfiability(
+          identityProfilesById,
+          wf.identity || null,
+          task.identity || null,
+          wf.contract || null,
+          task.contract || null
+        );
+        if (taskTrust.requiredTrustLevel && taskTrust.maxAutonomy) {
+          const cmp = compareTrustLevels(taskTrust.requiredTrustLevel, taskTrust.maxAutonomy);
+          if (cmp != null && cmp > 0) {
+            const errorPath = task.contract?.required_trust_level != null
+              ? `${tp}.contract.required_trust_level`
+              : `${wp}.contract.required_trust_level`;
+            const message = `must not exceed resolved identity max_autonomy "${taskTrust.maxAutonomy}"`;
+            const errorKey = `${errorPath}:${message}`;
+            if (!trustSatisfiabilityErrors.has(errorKey)) {
+              addError(errors, errorPath, message);
+              trustSatisfiabilityErrors.add(errorKey);
+            }
+          }
+        }
+
+        if (isObject(task.on_failure)) {
+          const handlerTrust = resolveTrustSatisfiability(
+            identityProfilesById,
+            wf.identity || null,
+            task.on_failure.identity || null,
+            wf.contract || null,
+            task.on_failure.contract || null
+          );
+          if (handlerTrust.requiredTrustLevel && handlerTrust.maxAutonomy) {
+            const cmp = compareTrustLevels(handlerTrust.requiredTrustLevel, handlerTrust.maxAutonomy);
+            if (cmp != null && cmp > 0) {
+              const errorPath = task.on_failure.contract?.required_trust_level != null
+                ? `${tp}.on_failure.contract.required_trust_level`
+                : `${wp}.contract.required_trust_level`;
+              const message = `must not exceed resolved identity max_autonomy "${handlerTrust.maxAutonomy}"`;
+              const errorKey = `${errorPath}:${message}`;
+              if (!trustSatisfiabilityErrors.has(errorKey)) {
+                addError(errors, errorPath, message);
+                trustSatisfiabilityErrors.add(errorKey);
+              }
+            }
           }
         }
       }

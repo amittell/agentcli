@@ -133,6 +133,14 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
   const taskAuth = taskIdentity.auth || {};
   const workflowDelegation = workflowAuth.delegation_policy || {};
   const taskDelegation = taskAuth.delegation_policy || {};
+  const providerConfig = {
+    ...(isObjectLike(workflowAuth.provider_config) ? workflowAuth.provider_config : {}),
+    ...(isObjectLike(taskAuth.provider_config) ? taskAuth.provider_config : {}),
+  };
+  const inputs = {
+    ...(isObjectLike(workflowAuth.inputs) ? workflowAuth.inputs : {}),
+    ...(isObjectLike(taskAuth.inputs) ? taskAuth.inputs : {}),
+  };
   const auth = {
     mode: taskAuth.mode ?? workflowAuth.mode ?? null,
     scopes: taskAuth.scopes ?? workflowAuth.scopes ?? null,
@@ -146,8 +154,8 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
       allowed_delegators: taskDelegation.allowed_delegators ?? workflowDelegation.allowed_delegators ?? null,
       require_grant_per_hop: taskDelegation.require_grant_per_hop ?? workflowDelegation.require_grant_per_hop ?? null,
     },
-    provider_config: taskAuth.provider_config ?? workflowAuth.provider_config ?? null,
-    inputs: taskAuth.inputs ?? workflowAuth.inputs ?? null,
+    provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
+    inputs: Object.keys(inputs).length > 0 ? inputs : null,
   };
 
   // trust: merge key by key, constraints merge key by key

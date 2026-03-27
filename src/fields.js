@@ -1,6 +1,22 @@
+function maybeParseJson(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 function getPathValue(value, segments) {
   let cursor = value;
   for (const segment of segments) {
+    if (typeof cursor === 'string') {
+      cursor = maybeParseJson(cursor);
+    }
     if (cursor == null || typeof cursor !== 'object') {
       return undefined;
     }

@@ -1126,6 +1126,44 @@ test('inspect applies field masks and sanitization', async (t) => {
   assert.equal(result.items[0].payload_message.includes('\u0007'), false);
 });
 
+test('inspect field masks can traverse JSON-valued columns', async (t) => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-'));
+  const dbPath = join(workdir, 'scheduler.sqlite');
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE jobs (
+      id TEXT,
+      source TEXT,
+      identity TEXT,
+      created_at TEXT
+    );
+  `);
+  db.prepare('INSERT INTO jobs (id, source, identity, created_at) VALUES (?, ?, ?, ?)')
+    .run(
+      'job-1',
+      JSON.stringify({ workflow_id: 'w', task_id: 't' }),
+      JSON.stringify({ ref: 'identity-profile' }),
+      '2026-03-06T12:00:00Z'
+    );
+  db.close();
+
+  const result = await inspectSchedulerState({
+    dbPath,
+    entity: 'jobs',
+    fields: ['id', 'source.workflow_id', 'identity.ref'],
+    sanitize: 'none'
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.items[0], {
+    id: 'job-1',
+    source: { workflow_id: 'w' },
+    identity: { ref: 'identity-profile' },
+  });
+});
+
 test('json-rpc compile request returns compiled output', async () => {
   const response = await handleJsonRpcRequest({
     jsonrpc: '2.0',
@@ -5636,6 +5674,35 @@ test('resolveIdentityV2 merges auth fields', () => {
   assert.deepStrictEqual(result.auth.provider_config, { token_env: 'TOK' });
 });
 
+test('resolveIdentityV2 merges auth provider_config and inputs key by key', () => {
+  const workflowIdentity = {
+    auth: {
+      provider_config: { token_env: 'TOK', audience: 'workflow-audience' },
+      inputs: {
+        client_secret: { value_from: { env: 'WORKFLOW_SECRET' } },
+        certificate: { value_from: { env: 'WORKFLOW_CERT' } },
+      },
+    },
+  };
+  const taskIdentity = {
+    auth: {
+      provider_config: { audience: 'task-audience' },
+      inputs: {
+        client_secret: { value_from: { env: 'TASK_SECRET' } },
+      },
+    },
+  };
+  const result = resolveIdentityV2(workflowIdentity, taskIdentity);
+  assert.deepStrictEqual(result.auth.provider_config, {
+    token_env: 'TOK',
+    audience: 'task-audience',
+  });
+  assert.deepStrictEqual(result.auth.inputs, {
+    client_secret: { value_from: { env: 'TASK_SECRET' } },
+    certificate: { value_from: { env: 'WORKFLOW_CERT' } },
+  });
+});
+
 test('resolveIdentityV2 merges presentation bindings replace', () => {
   const workflowIdentity = {
     presentation: { bindings: [{ source: 'a' }], handoff: 'none' }
@@ -6301,6 +6368,76 @@ test('v0.2 exec with advisory trust enforcement allows execution with warning', 
   const result = await executeTask(manifest, { taskId: 'warned-task', signer: 'none' });
   assert.strictEqual(result.ok, true);
   assert.ok(result.warnings.some(w => w.includes('advisory')));
+});
+
+test('v0.2 exec rejects strict trust contract when no trust level is declared', async () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'strict-trust-wf',
+      name: 'Strict Trust Workflow',
+      tasks: [{
+        id: 'untrusted-task',
+        name: 'Untrusted Task',
+        shell: { program: 'echo', args: ['should-not-run'] },
+        target: { session_target: 'shell' },
+        contract: {
+          required_trust_level: 'restricted',
+          trust_enforcement: 'strict'
+        },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 'untrusted-task', signer: 'none' }),
+    (err) => {
+      assert.strictEqual(err.code, 'trust_level_insufficient');
+      assert.match(err.message, /Trust level is not declared/);
+      return true;
+    }
+  );
+});
+
+test('validation rejects contract trust floor above resolved identity max_autonomy', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'low-trust',
+      provider: 'none',
+      subject: { kind: 'agent', principal: 'agent://test/low-trust' },
+      trust: {
+        level: 'restricted',
+        constraints: { max_autonomy: 'restricted' }
+      }
+    }],
+    workflows: [{
+      id: 'trust-wf',
+      name: 'Trust Workflow',
+      identity: { ref: 'low-trust' },
+      tasks: [{
+        id: 'blocked-task',
+        name: 'Blocked Task',
+        shell: { program: 'echo', args: ['should-not-run'] },
+        target: { session_target: 'shell' },
+        contract: {
+          required_trust_level: 'autonomous',
+          trust_enforcement: 'strict'
+        },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(
+    result.errors.some(error =>
+      error.path === '$.workflows[0].tasks[0].contract.required_trust_level' &&
+      error.message.includes('must not exceed resolved identity max_autonomy "restricted"')
+    )
+  );
 });
 
 test('v0.2 exec rejects JWT authorization proof with wrong claims', async () => {

@@ -754,11 +754,22 @@ async function executeV2(common, {
   // ------------------------------------------------------------------
 
   if (contract.required_trust_level && trustInfo) {
-    const effectiveLevel = trustInfo.effective_level || 'supervised';
+    const effectiveLevel = trustInfo.effective_level || null;
+    const enforcement = contract.trust_enforcement || 'none';
+    if (!effectiveLevel) {
+      if (enforcement === 'advisory') {
+        warnings.push(`Trust level is not declared but contract requires "${contract.required_trust_level}" (advisory)`);
+      } else if (enforcement === 'strict') {
+        throw Object.assign(
+          new Error(`Trust level is not declared but contract requires "${contract.required_trust_level}"`),
+          { code: 'trust_level_insufficient' }
+        );
+      }
+      // enforcement === 'none': just record for audit
+    } else {
     try {
       const cmp = compareTrustLevels(effectiveLevel, contract.required_trust_level);
       if (cmp < 0) {
-        const enforcement = contract.trust_enforcement || 'none';
         if (enforcement === 'advisory') {
           warnings.push(`Trust level "${effectiveLevel}" is below required "${contract.required_trust_level}" (advisory)`);
         } else if (enforcement === 'strict') {
@@ -775,6 +786,7 @@ async function executeV2(common, {
       }
       // Unknown trust levels: treat as warning
       warnings.push(`Trust level comparison failed: ${trustError.message}`);
+    }
     }
   }
 
