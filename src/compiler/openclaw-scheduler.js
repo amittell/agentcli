@@ -18,6 +18,19 @@ const SCHEDULER_DEFAULT_APPROVAL_AUTO = 'reject';
 const SCHEDULER_SYSTEM_ORIGIN = 'system';
 const DELIVERY_OPT_OUT_REASON =
   'delivery intentionally disabled by the agentcli manifest';
+const SCHEDULER_STRING_LIMITS = {
+  name: 200,
+  payload_message: 100000,
+  agent_id: 128,
+  schedule_cron: 128,
+  schedule_tz: 128,
+  delivery_channel: 64,
+  delivery_to: 256,
+  trigger_condition: 1024,
+  payload_model: 256,
+  payload_thinking: 64,
+  preferred_session_key: 512,
+};
 
 function schedulerOutputPolicy(plan) {
   const previewBytes = Math.max(64, plan.output.preview_bytes ?? 2000);
@@ -159,6 +172,23 @@ function sanitizeEvidenceProfile(profile) {
   };
 }
 
+function addTargetValidationError(errors, path, message) {
+  errors.push({ path, message });
+}
+
+function validateSchedulerStringLimits(errors, taskPath, job) {
+  for (const [field, maxLength] of Object.entries(SCHEDULER_STRING_LIMITS)) {
+    const value = job[field];
+    if (typeof value === 'string' && value.length > maxLength) {
+      addTargetValidationError(
+        errors,
+        `${taskPath}.${field}`,
+        `compiled openclaw-scheduler ${field} exceeds max length of ${maxLength}`
+      );
+    }
+  }
+}
+
 export function compileManifestToScheduler(manifest, { includeExplain = false } = {}) {
   const validation = validateManifest(manifest);
   if (!validation.ok) {
@@ -170,13 +200,15 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
   const jobs = [];
   const explain = [];
-  for (const workflow of expanded.workflows) {
+  const targetErrors = [];
+  for (const [workflowIndex, workflow] of expanded.workflows.entries()) {
     const taskIdToJobId = new Map();
     for (const task of workflow.tasks) {
       taskIdToJobId.set(task.id, stableId(workflow.id, task.id));
     }
 
-    for (const task of workflow.tasks) {
+    for (const [taskIndex, task] of workflow.tasks.entries()) {
+      const taskPath = `$.workflows[${workflowIndex}].tasks[${taskIndex}]`;
       const plan = normalizedTaskPlan(workflow, task, taskIdToJobId);
       const isTriggered = plan.invocation.mode === 'trigger';
       const outputPolicy = schedulerOutputPolicy(plan);
@@ -210,8 +242,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       const persistedAuthorization = sanitizeAuthorizationDeclaration(resolvedAuthorization);
       const persistedEvidence = sanitizeEvidenceDeclaration(resolvedEvidence);
       const deliveryOptOutReason = schedulerDeliveryOptOutReason(plan);
-
-      jobs.push({
+      const job = {
         id: plan.id,
         source: plan.source,
         name: plan.name,
@@ -283,7 +314,9 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         contract_trust_enforcement: plan.contract?.trust_enforcement ?? null,
 
         delete_after_run: plan.delete_after_run ? 1 : 0
-      });
+      };
+      validateSchedulerStringLimits(targetErrors, taskPath, job);
+      jobs.push(job);
 
       explain.push({
         workflow_id: workflow.id,
@@ -303,6 +336,16 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         budgets: plan.budgets,
       });
     }
+  }
+
+  if (targetErrors.length > 0) {
+    const err = new Error('Manifest validation failed');
+    err.validation = {
+      ok: false,
+      errors: targetErrors,
+      warnings: validation.warnings || [],
+    };
+    throw err;
   }
 
   const profiles = {};

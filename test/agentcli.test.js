@@ -207,7 +207,7 @@ test('on_failure without explicit id validates and compiles with synthesized id'
             delivery: { mode: 'none' },
             on_failure: {
               prompt: 'Diagnose the failure and suggest a fix.',
-              delivery: { mode: 'announce' }
+              delivery: { mode: 'announce', to: '@owner_dm' }
             }
           }
         ]
@@ -462,7 +462,7 @@ test('disabled tasks and runtime timeouts compile through the scheduler target',
             prompt: 'Review the parent task and summarize the issue.',
             target: { session_target: 'isolated', agent_id: 'main' },
             trigger: { parent: 'check-health', on: 'failure' },
-            delivery: { mode: 'announce' }
+            delivery: { mode: 'announce', to: '@owner_dm' }
           }
         ]
       }
@@ -1155,6 +1155,45 @@ test('applyManifestToScheduler adopt-by-name rejects ambiguous existing schedule
       return true;
     }
   );
+});
+
+test('applyManifestToScheduler adopt-by-name updates stable rows and removes duplicate legacy name matches', async () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const stableJob = compiled.jobs[0];
+  const legacyId = 'legacy-duplicate-0000';
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [
+        { ...stableJob, origin: 'system' },
+        { ...stableJob, id: legacyId, origin: 'telegram:123' },
+      ];
+    },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      calls.push({ action: 'update', id, spec });
+      return { ok: true, job: spec };
+    },
+    deleteJob(id) {
+      calls.push({ action: 'delete', id });
+      return { ok: true };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.actions[0].action, 'updated');
+  assert.deepEqual(result.actions[0].removed_duplicate_job_ids, [legacyId]);
+  assert.equal(calls[0].action, 'update');
+  assert.equal(calls[0].id, stableJob.id);
+  assert.equal(calls[1].action, 'delete');
+  assert.equal(calls[1].id, legacyId);
+  assert.ok(calls.some(call => call.action === 'create' && call.spec.id !== stableJob.id));
 });
 
 test('applyManifestToScheduler adopt-by-name rejects duplicate compiled job names', async () => {
@@ -2336,7 +2375,7 @@ test('on_failure handler inherits enabled: false from parent task', () => {
         delivery: { mode: 'none' },
         on_failure: {
           prompt: 'Diagnose the failure.',
-          delivery: { mode: 'announce' }
+          delivery: { mode: 'announce', to: '@owner_dm' }
         }
       }]
     }]
@@ -2372,6 +2411,31 @@ test('adopt-by-name falls back to id match when name does not match', async () =
   assert.equal(result.actions[0].action, 'updated', 'should fall back to id match when name does not match');
   assert.equal(calls[0].action, 'update');
   assert.equal(calls[0].id, compiled.jobs[0].id);
+});
+
+test('announce delivery without delivery.to fails validation', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'announce-missing-target',
+      name: 'Announce Missing Target',
+      tasks: [{
+        id: 'notify',
+        name: 'Notify',
+        prompt: 'hello',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'announce' }
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => (
+    error.path.endsWith('.delivery.to') &&
+    /required when delivery\.mode/.test(error.message)
+  )));
 });
 
 test('json-rpc compile uses defaults.target when no target is specified', async () => {
@@ -2541,7 +2605,7 @@ test('on_failure inherits agent_id from parent target', () => {
         schedule: { cron: '0 * * * *' },
         on_failure: {
           prompt: 'Diagnose.',
-          delivery: { mode: 'announce' }
+          delivery: { mode: 'announce', to: '@owner_dm' }
         }
       }]
     }]
@@ -6228,6 +6292,36 @@ test('v0.2 scheduler compilation redacts provider inputs from durable specs', ()
   assert.strictEqual(compiled.identity_profiles[0].auth.inputs, null);
   assert.strictEqual(compiled.authorization_profiles[0].provider_config, null);
   assert.strictEqual(compiled.evidence_profiles[0].provider_config, null);
+});
+
+test('scheduler compilation rejects compiled string fields that exceed backend limits', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'wf',
+      name: 'Workflow',
+      tasks: [{
+        id: 'task',
+        name: 'x'.repeat(201),
+        prompt: 'hello',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(err.validation);
+      assert.ok(err.validation.errors.some(error => (
+        error.path.endsWith('.name') &&
+        /compiled openclaw-scheduler name exceeds max length of 200/.test(error.message)
+      )));
+      return true;
+    }
+  );
 });
 
 test('applyManifestToScheduler returns authorization proof verification summaries', async () => {

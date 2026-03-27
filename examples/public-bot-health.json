@@ -53,7 +53,8 @@
             "limit": 3
           },
           "delivery": {
-            "mode": "announce"
+            "mode": "announce",
+            "to": "@owner_dm"
           }
         }
       ]

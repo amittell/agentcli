@@ -525,6 +525,13 @@ function validateOptionalBlocks(errors, warnings, path, value) {
     checkEnum(errors, `${path}.delivery.mode`, value.delivery.mode, ['announce', 'announce-always', 'none']);
     checkToken(errors, `${path}.delivery.channel`, value.delivery.channel, { required: false });
     checkToken(errors, `${path}.delivery.to`, value.delivery.to, { required: false });
+    if (
+      value.delivery.mode &&
+      ['announce', 'announce-always'].includes(value.delivery.mode) &&
+      (value.delivery.to == null || value.delivery.to === '')
+    ) {
+      addError(errors, `${path}.delivery.to`, 'is required when delivery.mode is "announce" or "announce-always"');
+    }
   }
 
   if (checkOptionalObject(errors, `${path}.reliability`, value.reliability)) {

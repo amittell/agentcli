@@ -53,7 +53,8 @@
               "retrieval": "recent"
             },
             "delivery": {
-              "mode": "announce"
+              "mode": "announce",
+              "to": "@owner_dm"
             }
           }
         }

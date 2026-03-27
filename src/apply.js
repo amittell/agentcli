@@ -334,17 +334,6 @@ export async function applyManifestToScheduler(
         { code: 'invalid_argument' }
       );
     }
-
-    const duplicateExistingNames = duplicateNames(existingJobs)
-      .filter(name => compiled.jobs.some(job => job.name === name));
-    if (duplicateExistingNames.length > 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot use --adopt-by name because existing scheduler jobs have duplicate names: ${duplicateExistingNames.join(', ')}`
-        ),
-        { code: 'invalid_argument' }
-      );
-    }
   }
 
   const actions = [];
@@ -354,12 +343,26 @@ export async function applyManifestToScheduler(
     let action;
     let existingId;
     let existingJob;
+    let duplicateLegacyJobs = [];
 
     if (adoptBy === 'name') {
-      if (existingById.has(job.id)) {
+      const sameNameJobs = existingByName.get(job.name) || [];
+      const exactMatch = existingById.get(job.id) || null;
+      duplicateLegacyJobs = sameNameJobs.filter(candidate => candidate.id !== job.id);
+
+      if (!exactMatch && duplicateLegacyJobs.length > 1) {
+        throw Object.assign(
+          new Error(
+            `Cannot use --adopt-by name because existing scheduler jobs have duplicate names: ${job.name}`
+          ),
+          { code: 'invalid_argument' }
+        );
+      }
+
+      if (exactMatch) {
         action = 'updated';
       } else {
-        existingJob = existingByName.get(job.name)?.[0];
+        existingJob = duplicateLegacyJobs[0];
         if (existingJob) {
           action = 'adopted';
           existingId = existingJob.id;
@@ -380,6 +383,19 @@ export async function applyManifestToScheduler(
         schedulerRunner.addJob(schedulerCreateSpec(job));
       } else if (action === 'updated') {
         schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
+        if (duplicateLegacyJobs.length > 0) {
+          if (typeof schedulerRunner.deleteJob !== 'function') {
+            throw Object.assign(
+              new Error(
+                `Scheduler runner does not support deleteJob(); cannot reconcile duplicate legacy rows for "${job.name}"`
+              ),
+              { code: 'scheduler_error' }
+            );
+          }
+          for (const duplicateJob of duplicateLegacyJobs) {
+            schedulerRunner.deleteJob(duplicateJob.id);
+          }
+        }
       } else if (action === 'adopted') {
         if (typeof schedulerRunner.deleteJob !== 'function') {
           throw Object.assign(
@@ -398,6 +414,9 @@ export async function applyManifestToScheduler(
       action,
       job_id: job.id,
       ...(existingId ? { adopted_from_job_id: existingId } : {}),
+      ...(action === 'updated' && duplicateLegacyJobs.length > 0
+        ? { removed_duplicate_job_ids: duplicateLegacyJobs.map(candidate => candidate.id) }
+        : {}),
       name: job.name,
       invocation_mode: job.parent_id ? 'trigger' : 'schedule',
       ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})
