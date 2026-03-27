@@ -1,0 +1,105 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "fly-api-token",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/flyctl",
+        "display_name": "Flyctl Operations Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": false,
+        "provider_config": {
+          "token_env": "FLY_API_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": {
+              "kind": "env",
+              "name": "FLY_API_TOKEN"
+            },
+            "required": false,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "flyctl-ops",
+      "name": "Flyctl Operations",
+      "identity": {
+        "ref": "fly-api-token"
+      },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "advisory"
+      },
+      "tasks": [
+        {
+          "id": "check-app-status",
+          "name": "Check Fly App Status",
+          "shell": {
+            "program": "flyctl",
+            "args": ["status", "--app", "my-app"]
+          },
+          "target": {
+            "session_target": "shell"
+          },
+          "schedule": {
+            "cron": "*/10 * * * *"
+          },
+          "output": {
+            "format": "text",
+            "preview_bytes": 1200,
+            "offload": "auto",
+            "retrieve": "on-demand"
+          },
+          "delivery": {
+            "mode": "none"
+          },
+          "on_failure": {
+            "id": "triage-flyctl-failure",
+            "name": "Triage Flyctl Failure",
+            "prompt": "Review the parent flyctl failure, explain the most likely cause, and propose the safest next step without making changes.",
+            "target": {
+              "session_target": "isolated",
+              "agent_id": "main"
+            },
+            "intent": {
+              "mode": "plan",
+              "read_only": true
+            },
+            "context": {
+              "retrieval": "recent",
+              "limit": 3
+            },
+            "delivery": {
+              "mode": "announce"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

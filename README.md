@@ -1,35 +1,110 @@
 # agentcli
 
-`agentcli` is an agent-native workflow manifest standard, execution identity framework, and reference CLI. It gives agents and operators a declarative way to describe workflows, bind execution identity, acquire credentials, produce verifiable evidence, and compile manifests into runtime-specific artifacts -- all without coupling authors to any single execution engine or identity provider.
+`agentcli` is an agent-native workflow manifest standard, execution identity framework, and reference CLI. It gives agents and operators a declarative way to describe workflows, bind execution identity, acquire credentials, produce verifiable evidence, and compile manifests into runtime-specific artifacts.
 
-If you are building or operating agent workflows that need to be safe, auditable, and portable, `agentcli` provides the control plane contract between authoring, identity, and execution.
+Use `agentcli` on its own when you want a clean authoring, validation, local execution, and audit surface.
+
+Use `agentcli` with `openclaw-scheduler` when you want that same manifest contract backed by a durable runtime with scheduling, queueing, retries, approvals, delivery, and SQLite state.
+
+Together, `agentcli` is the control plane and `openclaw-scheduler` is the runtime.
+
+| If you need... | Start here |
+| --- | --- |
+| Fast local authoring, validation, and execution | `agentcli` |
+| Durable schedules, retries, approvals, and runtime state | `agentcli` + `openclaw-scheduler` |
 
 ## Quick Start
+
+If you just want to try the manifest model locally, start with the first path.
+
+If you want to run the same workflows on a durable scheduler, use the second path.
+
+### `agentcli` on its own
 
 ```bash
 # Install
 npm install -g agentcli
 
-# Initialize local home directory
+# Create a local home directory with a starter manifest
 agentcli init
 
-# Validate a manifest
+# Validate a simple manifest
 agentcli validate examples/hello-world.json
 
-# Compile to a standalone plan with explanation
+# See the portable standalone plan
 agentcli compile examples/hello-world.json --target standalone --explain
 
-# Execute a task locally with attestation
-agentcli exec examples/identity-v2.json echo-identity --signer ssh
+# Run a task locally
+agentcli exec examples/trust-enforcement.json collect-data --dry-run --signer none
 
-# View audit records
+# Inspect identity resolution
+agentcli identity resolve examples/identity-v2.json echo-identity
+
+# View recent audit records
 agentcli audit --limit 10
 
 # Verify execution evidence
 agentcli verify <execution-id>
 ```
 
+### `agentcli` with `openclaw-scheduler`
+
+```bash
+# Install and initialize the scheduler runtime
+mkdir -p ~/.openclaw/scheduler
+npm install --prefix ~/.openclaw/scheduler openclaw-scheduler@latest
+npm exec --prefix ~/.openclaw/scheduler openclaw-scheduler -- setup
+
+# Compile the same manifest for the durable runtime
+agentcli compile examples/hello-world.json --target openclaw-scheduler --explain
+
+# Preview the jobs that would be created or updated
+agentcli apply examples/hello-world.json \
+  --db ~/.openclaw/scheduler/scheduler.db \
+  --scheduler-prefix ~/.openclaw/scheduler \
+  --dry-run
+
+# Inspect the runtime state through agentcli
+AGENTCLI_SCHEDULER_DB=~/.openclaw/scheduler/scheduler.db \
+  agentcli inspect jobs --fields id,name,last_status
+```
+
 Node 22.5.0 or newer is required. Scheduler inspection uses `node:sqlite`, which became stable in Node 23.4.0.
+
+## Better Together
+
+`agentcli` and `openclaw-scheduler` are complementary:
+
+- `agentcli` gives you the authoring contract: schema, validation, examples, discovery, identity binding, local execution, audit, and machine-readable CLI / JSON-RPC surfaces.
+- `openclaw-scheduler` gives you the durable runtime: schedules, queueing, retries, approvals, delivery, and persistent state.
+- The same manifest can start as a local, portable workflow in `agentcli` and then be compiled and applied into `openclaw-scheduler` without rewriting it into a runtime-specific format.
+
+If you want to start simple, start with `agentcli` alone. If you want durable operation, pair it with `openclaw-scheduler`.
+
+## Wrapping Existing CLI Tools
+
+`agentcli` works well as a stable wrapper around existing CLI tools such as `flyctl`, `kubectl`, `gh`, or `terraform`.
+
+The pattern is:
+
+1. Put the exact tool invocation in `shell.program` and `shell.args[]`.
+2. Bind credentials declaratively when the tool expects environment variables or temp files.
+3. Validate and run the workflow locally with `agentcli exec`.
+4. Compile and apply the same manifest into `openclaw-scheduler` when you want durable execution.
+
+For example, [flyctl-ops.json](examples/flyctl-ops.json) wraps a simple `flyctl status --app my-app` check, binds `FLY_API_TOKEN` through an identity profile, and escalates failures into a read-only triage step.
+
+```bash
+agentcli validate examples/flyctl-ops.json
+agentcli exec examples/flyctl-ops.json check-app-status --dry-run --identity-debug
+agentcli compile examples/flyctl-ops.json --target openclaw-scheduler --explain
+```
+
+If the tool only needs a direct wrapper, you can also scaffold the starting point with:
+
+```bash
+agentcli init --tool flyctl
+```
 
 ## Core Model
 
@@ -421,6 +496,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [public-shell-failure-triage.json](examples/public-shell-failure-triage.json) | Shell failure triage with model policy, plan intent, output offload, and budgets. |
 | [public-report-publish.json](examples/public-report-publish.json) | Multi-step report pipeline: capture, analyze, publish with approval gates. |
 | [public-bot-health.json](examples/public-bot-health.json) | Bot health monitoring with plan/read-only intent and context retrieval. |
+| [flyctl-ops.json](examples/flyctl-ops.json) | Wrapping `flyctl` as a structured tool invocation with token binding and failure triage. |
 | [identity-contract.json](examples/identity-contract.json) | v0.1 identity and contract fields with approval and attestation. |
 | [identity-v2.json](examples/identity-v2.json) | Full v0.2 identity: profiles, trust levels, credential presentation, evidence, and authorization proof. |
 | [oidc-service-auth.json](examples/oidc-service-auth.json) | OIDC client credentials authentication with token materialization into the process environment. |

@@ -28,7 +28,7 @@
 - `standalone`: portable plan, validation, schema, describe, JSON-RPC
 - `openclaw-scheduler`: compile target, apply/upsert path, and runtime inspection
 
-This keeps the control plane useful by itself without forcing a second durable runtime into the repo.
+This makes the standalone control plane useful on its own while also giving `openclaw-scheduler` a clean authoring and integration surface.
 
 ## Execution Identity Architecture
 
