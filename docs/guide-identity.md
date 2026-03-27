@@ -446,6 +446,58 @@ Set `required_trust_level` and `trust_enforcement` on the workflow or task contr
 | `advisory` | A warning is emitted and recorded. Execution proceeds. |
 | `strict` | Execution fails with error code `trust_level_insufficient`. |
 
+## Sandbox and Network Contract Modes
+
+The trust settings above answer "is this identity trusted enough to run this task?"
+
+The `contract` block also answers "what execution boundary is this task supposed to run inside?"
+
+### Sandbox modes
+
+| Mode | Meaning |
+|---|---|
+| `none` | No sandboxing intent is declared. |
+| `permissive` | The task may run locally without strong isolation, but the manifest still records boundary intent. |
+| `strict` | The task is intended to run in a stronger sandbox. |
+
+### Network modes
+
+| Mode | Meaning |
+|---|---|
+| `unrestricted` | Normal network access is allowed. |
+| `restricted` | Network access should be narrowed by the runtime or environment. |
+| `none` | The task should run without network access. |
+
+### What local `agentcli exec` enforces today
+
+Local `agentcli exec` fully enforces some contract checks, and records others as advisory intent:
+
+- `allowed_paths`: enforced
+- `required_trust_level` + `trust_enforcement`: enforced
+- `audit`: enforced
+- `sandbox`: advisory warning only
+- `network`: advisory warning only
+
+That is why you may see warnings such as:
+
+```text
+contract.sandbox is "strict" but OS-level sandboxing is not yet enforced by agentcli exec
+```
+
+or:
+
+```text
+contract.network is "none" but network blocking is not yet enforced by agentcli exec
+```
+
+These warnings do not mean the manifest is invalid. They mean the declaration is valid, but the local executor is not the component enforcing that boundary yet.
+
+Use this rule of thumb:
+
+- local testing: `permissive` / `unrestricted` is usually fine
+- real enforcement needs: keep the contract declaration, but run in an environment or backend that can enforce it
+- if you want no warning during local runs, use `sandbox: "none"` and `network: "unrestricted"`
+
 ### Example: require supervised trust for production tasks
 
 ```json

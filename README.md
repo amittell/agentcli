@@ -228,6 +228,71 @@ Trust levels express graduated autonomy. They control what an agent is allowed t
 
 Trust levels are declared in the identity profile and enforced against the contract's `required_trust_level`. When a task's effective trust level is below the contract requirement, execution fails or escalates depending on `trust_enforcement` policy.
 
+### Execution contract modes
+
+The `contract` block declares the execution boundary you intend the runtime to enforce.
+
+For local `agentcli exec`, some contract fields are enforced directly today and some are still advisory.
+
+#### Sandbox modes
+
+| Mode | Plain-English meaning | Current `agentcli exec` behavior |
+|---|---|---|
+| `none` | No sandboxing intent is declared. | No sandbox warning. |
+| `permissive` | Run with low-friction local access, but still record that the task is not meant to be tightly isolated. | Emits a warning and proceeds. |
+| `strict` | The task is supposed to run in a stronger sandbox. | Emits a warning because OS-level sandboxing is not yet enforced by local `exec`. |
+
+#### Network modes
+
+| Mode | Plain-English meaning | Current `agentcli exec` behavior |
+|---|---|---|
+| `unrestricted` | The task may use the network normally. | No network warning. |
+| `restricted` | The task should run with a narrower network posture. | Emits a warning and proceeds. |
+| `none` | The task should not reach the network. | Emits a warning because local `exec` does not yet block the network at the OS level. |
+
+#### Audit modes
+
+| Mode | Meaning |
+|---|---|
+| `none` | Do not write an audit record. |
+| `on-failure` | Write an audit record only when the task exits non-zero. |
+| `always` | Always write an audit record. |
+
+#### Trust enforcement modes
+
+| Mode | Meaning |
+|---|---|
+| `none` | Record the trust requirement but do not act on mismatches. |
+| `advisory` | Warn on trust mismatch and continue. |
+| `strict` | Fail execution when the resolved trust level is below `required_trust_level`. |
+
+#### What the sandbox warning means
+
+If you see a warning like:
+
+```text
+contract.sandbox is "permissive"; execution proceeds with advisory logging
+```
+
+or:
+
+```text
+contract.sandbox is "strict" but OS-level sandboxing is not yet enforced by agentcli exec
+```
+
+it means:
+
+- your manifest is valid
+- `agentcli` recorded the contract intent correctly
+- local `exec` is not yet the component enforcing OS-level sandbox boundaries
+
+What to do:
+
+- If you are using `agentcli exec` for local development or operator-run checks, it is usually fine to proceed.
+- If you do not want the warning for a local workflow, declare `sandbox: "none"` and `network: "unrestricted"` instead of implying isolation that local `exec` does not yet provide.
+- If you need hard enforcement, rely on a runtime or environment that enforces those boundaries, and keep `contract` as the portable declaration of that intent.
+- Use `allowed_paths` today when you need a local filesystem boundary that `agentcli exec` can actually enforce.
+
 ### Credential presentation
 
 Credentials are materialized into the task's execution environment through explicit bindings. Each binding maps a path in the credential session to an environment variable, file, or header that the wrapped tool consumes.
