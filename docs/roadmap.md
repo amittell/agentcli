@@ -19,7 +19,7 @@
 - Stronger sanitization policies beyond `basic`
 - Identity profiles and provider system (`none`, `env-bearer`, `oidc-client-credentials`, `oidc-token-exchange`)
 - Trust levels (`untrusted`, `restricted`, `supervised`, `autonomous`) and escalation (`fail`, `human-approval`, `log-and-proceed`)
-- Authorization proof verification (`jwt`, `certificate`, `signature` verifiers)
+- Authorization proof verification (`jwt`, `certificate`, `detached-signature` verifiers)
 - External authorization via OPA provider (Phase 4.5 hook point)
 - Evidence generation (`ssh`, `none` evidence providers, separate from v0.1 signing)
 - Credential handoff (downscope and transaction modes)

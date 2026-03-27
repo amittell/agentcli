@@ -867,8 +867,8 @@ async function executeV2(common, {
 
   let materialization = null;
   const spawnEnv = Object.keys(shell.env).length > 0
-    ? { ...process.env, ...shell.env }
-    : { ...process.env };
+    ? { ...process.env, ...common.env, ...shell.env }
+    : { ...process.env, ...common.env };
 
   if (identitySession && identityProviderInstance) {
     const presentation = identityDeclaration.presentation || {};

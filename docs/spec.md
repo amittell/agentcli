@@ -33,12 +33,21 @@ A manifest MUST be a JSON object with:
 A manifest MAY also contain:
 
 - `identity_profiles` (v0.2)
+- `authorization_proof_profiles` (v0.2)
+- `authorization_profiles` (v0.2)
+- `evidence_profiles` (v0.2)
 
 `version` MUST equal `0.1` or `0.2`.
 
 `workflows` MUST be a non-empty array.
 
 `identity_profiles`, if present, MUST be an array (see Identity Profiles below).
+
+`authorization_proof_profiles`, if present, MUST be an array (see Authorization Proof Profiles below).
+
+`authorization_profiles`, if present, MUST be an array (see Authorization Profiles below).
+
+`evidence_profiles`, if present, MUST be an array (see Evidence Profiles below).
 
 ## Workflow Object
 
