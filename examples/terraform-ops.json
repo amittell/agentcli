@@ -1,0 +1,169 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "tf-readonly",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/terraform-readonly",
+        "display_name": "Terraform Read-Only Agent"
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      }
+    },
+    {
+      "id": "tf-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/terraform",
+        "display_name": "Terraform Apply Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "TF_TOKEN_app_terraform_io"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "TF_TOKEN_app_terraform_io" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "tf-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "resolved_identity",
+          "contract",
+          "command",
+          "result"
+        ],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "terraform-ops",
+      "name": "Terraform Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "init",
+          "name": "Terraform Init",
+          "shell": {
+            "program": "terraform",
+            "args": ["init", "-no-color"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "tf-readonly" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "0 6 * * *" }
+        },
+        {
+          "id": "plan",
+          "name": "Terraform Plan",
+          "shell": {
+            "program": "terraform",
+            "args": ["plan", "-no-color", "-out=tfplan"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "tf-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 8000
+          },
+          "trigger": {
+            "parent": "init",
+            "on": "success"
+          }
+        },
+        {
+          "id": "apply",
+          "name": "Terraform Apply",
+          "shell": {
+            "program": "terraform",
+            "args": ["apply", "-no-color", "-auto-approve", "tfplan"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "tf-credentials" },
+          "evidence": { "ref": "tf-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "output": {
+            "format": "text",
+            "preview_bytes": 8000
+          },
+          "trigger": {
+            "parent": "plan",
+            "on": "success"
+          },
+          "on_failure": {
+            "id": "triage-apply",
+            "name": "Triage Apply Failure",
+            "prompt": "A terraform apply failed. Analyze the error output to determine whether this is a provider authentication issue, resource conflict, state lock, or quota limit, and recommend recovery steps without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "show-state",
+          "name": "Show Terraform State",
+          "shell": {
+            "program": "terraform",
+            "args": ["show", "-json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "tf-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000,
+            "offload": "auto"
+          },
+          "trigger": {
+            "parent": "apply",
+            "on": "success"
+          }
+        }
+      ]
+    }
+  ]
+}

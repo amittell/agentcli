@@ -1,0 +1,181 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "k8s-readonly",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/k8s-readonly",
+        "display_name": "Kubernetes Read-Only Agent"
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      }
+    },
+    {
+      "id": "k8s-deploy",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/k8s-deploy",
+        "display_name": "Kubernetes Deploy Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": false,
+        "provider_config": {
+          "token_env": "KUBECONFIG"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "KUBECONFIG" },
+            "required": false,
+            "redact": false
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "k8s-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "kubectl-ops",
+      "name": "Kubernetes Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "check-pods",
+          "name": "List All Pods",
+          "shell": {
+            "program": "kubectl",
+            "args": ["get", "pods", "--all-namespaces", "-o", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "k8s-readonly" },
+          "evidence": { "ref": "k8s-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "*/5 * * * *" }
+        },
+        {
+          "id": "check-deployments",
+          "name": "List All Deployments",
+          "shell": {
+            "program": "kubectl",
+            "args": ["get", "deployments", "--all-namespaces", "-o", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "k8s-readonly" },
+          "evidence": { "ref": "k8s-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "check-nodes",
+          "name": "Check Cluster Node Health",
+          "shell": {
+            "program": "kubectl",
+            "args": ["get", "nodes", "-o", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "k8s-readonly" },
+          "evidence": { "ref": "k8s-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "check-events",
+          "name": "Check Warning Events",
+          "shell": {
+            "program": "kubectl",
+            "args": ["get", "events", "--sort-by=.lastTimestamp", "--field-selector", "type=Warning", "-o", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "k8s-readonly" },
+          "evidence": { "ref": "k8s-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "*/5 * * * *" },
+          "on_failure": {
+            "id": "triage-events-failure",
+            "name": "Triage Events Check Failure",
+            "prompt": "The kubectl warning events check failed. Determine whether this is a kubeconfig issue, RBAC permissions problem, API server connectivity error, or cluster-level failure, and recommend the safest next step.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "apply-manifest",
+          "name": "Apply Deployment Manifest (Dry Run)",
+          "shell": {
+            "program": "kubectl",
+            "args": ["apply", "-f", "k8s/deployment.yaml", "--dry-run=client", "-o", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "k8s-deploy" },
+          "evidence": { "ref": "k8s-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 9 * * 1-5" }
+        }
+      ]
+    }
+  ]
+}

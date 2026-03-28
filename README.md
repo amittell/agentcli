@@ -433,6 +433,13 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [stripe-projects.json](examples/stripe-projects.json) | Wrapping [Stripe Projects](https://projects.dev): credential sync, status checks, and database migrations with two identity profiles at different trust levels. |
 | [full-stack-deploy.json](examples/full-stack-deploy.json) | Full deployment pipeline chaining Stripe, Prisma, and Fly.io with three identities, trust enforcement, evidence, and failure triage. |
 | [aws-ops.json](examples/aws-ops.json) | AWS infrastructure monitoring: caller identity, S3 buckets, EC2 instances, CloudWatch alarms, and cost estimates with trust enforcement. |
+| [kubectl-ops.json](examples/kubectl-ops.json) | Kubernetes operations: pods, deployments, nodes, warning events, and manifest apply with approval gates. |
+| [terraform-ops.json](examples/terraform-ops.json) | Terraform pipeline: init, plan, apply, and state show chained via triggers with strict trust on apply. |
+| [gh-ops.json](examples/gh-ops.json) | GitHub CLI: list PRs, check CI, list issues, and create releases with approval and trust enforcement. |
+| [docker-ops.json](examples/docker-ops.json) | Docker operations: containers, images, disk usage, build, and prune with network isolation on destructive tasks. |
+| [gcloud-ops.json](examples/gcloud-ops.json) | Google Cloud: identity check, compute instances, GKE clusters, and billing with evidence on all tasks. |
+| [curl-api.json](examples/curl-api.json) | Generic REST API operations: health checks, authenticated data fetch, and webhook posts with token binding. |
+| [psql-ops.json](examples/psql-ops.json) | PostgreSQL: connection check, table sizes, active queries, and migrations with strict trust and approval. |
 
 ### Putting it together: a v0.2 manifest
 

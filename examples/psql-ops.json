@@ -1,0 +1,173 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "db-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://db/readonly",
+        "display_name": "Database Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "DATABASE_URL"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "db-migrate",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://db/migrate",
+        "display_name": "Database Migration Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "DATABASE_URL"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "db-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "psql-ops",
+      "name": "PostgreSQL Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "restricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "check-connection",
+          "name": "Check Database Connection",
+          "shell": {
+            "program": "psql",
+            "args": ["-c", "SELECT 1 AS connected", "-t"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "db-readonly" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "table-sizes",
+          "name": "Report Table Sizes",
+          "shell": {
+            "program": "psql",
+            "args": [
+              "-c",
+              "SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC LIMIT 20",
+              "--csv"
+            ]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "db-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "active-queries",
+          "name": "List Active Queries",
+          "shell": {
+            "program": "psql",
+            "args": [
+              "-c",
+              "SELECT pid, state, query_start, query FROM pg_stat_activity WHERE state != 'idle' ORDER BY query_start",
+              "--csv"
+            ]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "db-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 8000
+          },
+          "schedule": { "cron": "*/5 * * * *" }
+        },
+        {
+          "id": "run-migration",
+          "name": "Run Database Migration",
+          "shell": {
+            "program": "psql",
+            "args": ["-f", "migrations/latest.sql"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "db-migrate" },
+          "evidence": { "ref": "db-evidence" },
+          "output": { "format": "text" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 3 * * 0" }
+        }
+      ]
+    }
+  ]
+}

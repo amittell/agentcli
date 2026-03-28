@@ -1,0 +1,113 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "gcp-agent",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/gcp",
+        "display_name": "GCP Operations Agent",
+        "delegation_mode": "none"
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "gcp-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "gcloud-ops",
+      "name": "Google Cloud Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "whoami",
+          "name": "Check GCP Auth",
+          "shell": {
+            "program": "gcloud",
+            "args": ["auth", "print-identity-token"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "gcp-agent" },
+          "evidence": { "ref": "gcp-evidence" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "list-instances",
+          "name": "List Compute Instances",
+          "shell": {
+            "program": "gcloud",
+            "args": ["compute", "instances", "list", "--format=json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "gcp-agent" },
+          "evidence": { "ref": "gcp-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "schedule": { "cron": "0 */4 * * *" },
+          "on_failure": {
+            "id": "triage-list-instances",
+            "name": "Triage Instance List Failure",
+            "prompt": "The gcloud compute instances list command failed. Determine whether this is an authentication issue, project configuration problem, or API error, and recommend the next step.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "list-clusters",
+          "name": "List GKE Clusters",
+          "shell": {
+            "program": "gcloud",
+            "args": ["container", "clusters", "list", "--format=json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "gcp-agent" },
+          "evidence": { "ref": "gcp-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "check-billing",
+          "name": "Check Billing Accounts",
+          "shell": {
+            "program": "gcloud",
+            "args": ["billing", "accounts", "list", "--format=json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "gcp-agent" },
+          "evidence": { "ref": "gcp-evidence" },
+          "output": { "format": "json" },
+          "schedule": { "cron": "0 9 * * 1" }
+        }
+      ]
+    }
+  ]
+}
