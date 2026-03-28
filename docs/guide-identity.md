@@ -402,6 +402,631 @@ The file-bearer provider checks file permissions at resolution time. If the toke
 world-readable, a warning is included in `provider_assertions.permission_warning` and
 appears in the audit record. Restrict token files to mode `0600`.
 
+## Quick Setup: oidc-token-exchange
+
+Use this when you have an existing token (from another identity provider, CI system, or
+upstream service) and need to exchange it for a new token with different scope, audience,
+or type. Implements OAuth 2.0 Token Exchange (RFC 8693).
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "exchange-service",
+      "provider": "oidc-token-exchange",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://myorg/mesh-worker",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "exchange",
+        "scopes": ["api.read"],
+        "audience": "https://downstream.example.com",
+        "required": true,
+        "provider_config": {
+          "token_endpoint": "https://auth.example.com/oauth/token",
+          "subject_token_env": "UPSTREAM_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "EXCHANGED_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "mesh-call",
+      "name": "Service Mesh Call",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "call-downstream",
+          "name": "Call Downstream Service",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $EXCHANGED_TOKEN\" https://downstream.example.com/api"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "exchange-service" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `token_endpoint` | `auth.provider_config.token_endpoint` | Yes |
+| `subject_token_env` | `auth.provider_config.subject_token_env` | Yes (or use `auth.inputs.subject_token.value_from`) |
+| `client_id` | `auth.provider_config.client_id` | No |
+| `client_secret` | `auth.provider_config.client_secret` or `auth.inputs.client_secret` | No |
+| `subject_token_type` | `auth.provider_config.subject_token_type` | No (defaults to `urn:ietf:params:oauth:token-type:access_token`) |
+| `scopes` | `auth.scopes` | No |
+| `audience` | `auth.audience` | No |
+
+### Run it
+
+```bash
+export UPSTREAM_TOKEN="eyJhbGciOi..."
+agentcli exec manifest.json call-downstream
+```
+
+Preview without executing:
+
+```bash
+agentcli exec manifest.json call-downstream --dry-run --identity-debug
+```
+
+### When to use this provider
+
+Use `oidc-token-exchange` for service mesh token exchange, cross-tenant delegation, or
+scope reduction. The token endpoint must support the RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange`
+grant type. The provider also supports downscope handoff for passing a reduced-privilege
+token to downstream tasks.
+
+## Quick Setup: azure-managed-identity
+
+Use this when running on Azure VMs, App Service, or Container Instances with managed
+identity enabled. The provider acquires tokens from the Azure Instance Metadata Service
+(IMDS) at `169.254.169.254`.
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "azure-service",
+      "provider": "azure-managed-identity",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://myorg/azure-worker",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "resource": "https://management.azure.com/"
+        }
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "AZURE_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "azure-ops",
+      "name": "Azure Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "list-resources",
+          "name": "List Resources",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $AZURE_ACCESS_TOKEN\" \"https://management.azure.com/subscriptions?api-version=2022-12-01\""]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "azure-service" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `resource` | `auth.provider_config.resource` | Yes (e.g. `https://management.azure.com/`, `https://vault.azure.net/`, `https://graph.microsoft.com/`) |
+| `client_id` | `auth.provider_config.client_id` | No (required for user-assigned managed identities) |
+
+### Run it
+
+```bash
+agentcli exec manifest.json list-resources
+```
+
+Preview the identity resolution:
+
+```bash
+agentcli identity resolve manifest.json list-resources
+```
+
+### When to use this provider
+
+This provider only works inside Azure environments where managed identity is enabled.
+Outside Azure, the IMDS endpoint at `169.254.169.254` is not reachable and the provider
+fails with: `Azure IMDS endpoint not reachable. This provider requires an Azure environment
+with managed identity enabled.` For user-assigned managed identities, set `client_id` to
+the managed identity's client ID. For system-assigned identities, omit `client_id`.
+
+## Quick Setup: aws-sts-assume-role
+
+Use this to assume an IAM role via AWS Security Token Service. The provider implements
+AWS Signature Version 4 signing with no external dependencies.
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "aws-service",
+      "provider": "aws-sts-assume-role",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://myorg/aws-deployer",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "role_arn": "arn:aws:iam::123456789012:role/AgentDeployRole"
+        }
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_key_id.value",
+            "target": { "kind": "env", "name": "AWS_ACCESS_KEY_ID" },
+            "required": true,
+            "redact": true
+          },
+          {
+            "source": "credentials.secret_access_key.value",
+            "target": { "kind": "env", "name": "AWS_SECRET_ACCESS_KEY" },
+            "required": true,
+            "redact": true
+          },
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "AWS_SESSION_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "aws-deploy",
+      "name": "AWS Deploy",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "list-buckets",
+          "name": "List S3 Buckets",
+          "shell": {
+            "program": "aws",
+            "args": ["s3", "ls"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "aws-service" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `role_arn` | `auth.provider_config.role_arn` | Yes |
+| `region` | `auth.provider_config.region` | No (defaults to `AWS_DEFAULT_REGION`, `AWS_REGION`, or `us-east-1`) |
+| `session_name` | `auth.provider_config.session_name` | No (defaults to `agentcli-session`) |
+| `duration_seconds` | `auth.provider_config.duration_seconds` | No (defaults to `3600`) |
+| `external_id` | `auth.provider_config.external_id` | No |
+
+Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the environment. If you are
+chaining from an existing session, `AWS_SESSION_TOKEN` is also accepted.
+
+### Run it
+
+```bash
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="wJalr..."
+agentcli exec manifest.json list-buckets
+```
+
+Preview the assumed role session:
+
+```bash
+agentcli exec manifest.json list-buckets --dry-run --identity-debug
+```
+
+### When to use this provider
+
+Use `aws-sts-assume-role` for cross-account access, limited-privilege role assumption,
+or when you need temporary credentials scoped to a specific role. The provider includes
+full AWS Signature V4 signing and does not require the AWS SDK. The three credential
+values (access key, secret key, session token) are materialized into the subprocess
+environment via separate presentation bindings, matching the standard AWS credential
+environment variables.
+
+## Quick Setup: gcp-workload-identity
+
+Use this when running on GCP Compute Engine, Cloud Run, or GKE with a service account
+attached. The provider acquires tokens from the GCP metadata server at
+`metadata.google.internal`.
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "gcp-service",
+      "provider": "gcp-workload-identity",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://myorg/gcp-worker",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+        "required": true
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "GCP_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "gcp-ops",
+      "name": "GCP Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "list-instances",
+          "name": "List Compute Instances",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $GCP_ACCESS_TOKEN\" \"https://compute.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances\""]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "gcp-service" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `scopes` | `auth.scopes` or `auth.provider_config.scopes` | Yes (non-empty array, e.g. `["https://www.googleapis.com/auth/cloud-platform"]`) |
+| `service_account_email` | `auth.provider_config.service_account_email` | No (for impersonating a specific service account) |
+
+### Run it
+
+```bash
+agentcli exec manifest.json list-instances
+```
+
+Resolve identity without executing:
+
+```bash
+agentcli identity resolve manifest.json list-instances
+```
+
+### When to use this provider
+
+This provider only works inside GCP environments where the metadata server is reachable.
+Outside GCP, the provider fails with: `GCP metadata server not reachable. This provider
+requires a GCP environment with workload identity enabled.` When `service_account_email`
+is specified, the metadata server returns a token for that specific service account
+(impersonation). Otherwise it uses the default service account attached to the instance.
+
+## Quick Setup: spiffe-jwt-svid
+
+Use this in SPIFFE-enabled Kubernetes clusters running SPIRE or Istio. The provider
+acquires JWT-SVIDs (SPIFFE Verifiable Identity Documents) from a file on disk or the
+SPIFFE Workload API.
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "spiffe-service",
+      "provider": "spiffe-jwt-svid",
+      "subject": {
+        "kind": "service",
+        "principal": "spiffe://example.org/my-agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "audience": "spiffe://example.org/downstream",
+        "required": true,
+        "provider_config": {
+          "svid_file": "/var/run/secrets/spiffe/svid.jwt"
+        }
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SPIFFE_JWT_SVID" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "mesh-ops",
+      "name": "Service Mesh Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "call-peer",
+          "name": "Call Peer Service",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $SPIFFE_JWT_SVID\" https://peer.example.svc.cluster.local/api"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "spiffe-service" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `audience` | `auth.audience` or `auth.provider_config.audience` | Yes |
+| `svid_file` | `auth.provider_config.svid_file` | No (path to a file containing the JWT-SVID, e.g. Kubernetes projected volume) |
+| `workload_api_socket` | `auth.provider_config.workload_api_socket` | No (defaults to `SPIFFE_ENDPOINT_SOCKET` env var; supports `http://` or `https://` endpoints) |
+
+The provider tries `svid_file` first, then falls back to the Workload API socket. For
+Unix domain sockets (the standard SPIRE agent configuration), use the file-based approach
+since standard Node `fetch()` does not support UDS connections.
+
+### Run it
+
+```bash
+agentcli exec manifest.json call-peer
+```
+
+Preview identity resolution:
+
+```bash
+agentcli exec manifest.json call-peer --dry-run --identity-debug
+```
+
+### When to use this provider
+
+Use `spiffe-jwt-svid` in Kubernetes clusters with SPIRE agent or Istio that project
+JWT-SVIDs into pod volumes. The `svid_file` approach works with Kubernetes projected
+service account tokens and SPIRE agent projected volumes. The HTTP-based Workload API
+approach works with SPIRE agents or Envoy SDS sidecars configured with TCP listeners.
+The provider parses JWT claims (sub, aud, exp, iss) from the SVID for audit purposes
+but does not verify the signature, as that is the responsibility of the consuming service's
+SPIFFE trust bundle verifier.
+
+## Quick Setup: entra-agent-id
+
+Use this for enterprise agent identities registered in the Microsoft Entra Agent Registry.
+This is distinct from `azure-managed-identity`: Entra Agent ID uses JWT bearer client
+assertions and supports agent-specific Conditional Access policies and lifecycle governance.
+
+### Manifest
+
+```json
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "entra-agent",
+      "provider": "entra-agent-id",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://entra/contoso/my-agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "scopes": ["https://graph.microsoft.com/.default"],
+        "required": true,
+        "provider_config": {
+          "tenant_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "blueprint_app_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+          "agent_identity_id": "c3d4e5f6-a7b8-9012-cdef-123456789012"
+        }
+      },
+      "trust": {
+        "level": "supervised"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "ENTRA_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "entra-ops",
+      "name": "Entra Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "query-graph",
+          "name": "Query Microsoft Graph",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $ENTRA_ACCESS_TOKEN\" https://graph.microsoft.com/v1.0/me"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "entra-agent" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Required fields
+
+| Field | Location | Required |
+|---|---|---|
+| `tenant_id` | `auth.provider_config.tenant_id` | Yes (Entra tenant GUID) |
+| `blueprint_app_id` | `auth.provider_config.blueprint_app_id` | Yes (blueprint application GUID, used as `client_id`) |
+| `agent_identity_id` | `auth.provider_config.agent_identity_id` | Yes (agent identity GUID) |
+| `authority` | `auth.provider_config.authority` | No (defaults to `https://login.microsoftonline.com/{tenant_id}`) |
+
+The client assertion (a platform-issued JWT) is resolved in this order:
+
+1. `AGENTCLI_ENTRA_CLIENT_ASSERTION` environment variable
+2. `auth.inputs.client_assertion.value_from` (env, file, or command indirection)
+3. `auth.provider_config.client_assertion` (inline string or `value_from`)
+4. IMDS fallback (acquires a managed identity token for the blueprint app)
+
+### Run it
+
+```bash
+export AGENTCLI_ENTRA_CLIENT_ASSERTION="eyJhbGciOi..."
+agentcli exec manifest.json query-graph
+```
+
+Preview the resolved identity session:
+
+```bash
+agentcli exec manifest.json query-graph --dry-run --identity-debug
+```
+
+### When to use this provider
+
+Use `entra-agent-id` when your agent is registered in the Microsoft Entra Agent Registry
+and needs to authenticate using agent-specific credentials. The provider uses client
+credentials flow with a JWT bearer assertion (`urn:ietf:params:oauth:client-assertion-type:jwt-bearer`),
+which is distinct from the IMDS-based flow used by `azure-managed-identity`. On Azure
+infrastructure, the provider can fall back to IMDS to acquire the client assertion
+automatically. Outside Azure, you must provide the assertion via environment variable,
+file, or command source.
+
 ## Dynamic Credential Acquisition
 
 The `value_from` pattern supports four sources for resolving sensitive values without

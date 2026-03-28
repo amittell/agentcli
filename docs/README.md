@@ -12,6 +12,7 @@
 
 | Document | Audience | Purpose |
 |----------|----------|---------|
+| [Field Reference](field-reference.md) | Everyone | Complete reference for every JSON field, type, enum value, and default |
 | [Manifest Spec](spec.md) | Implementers | Normative schema definition with MUST/SHOULD/MAY language |
 | [JSON-RPC Protocol](protocol.md) | Integration developers | RPC method signatures, params, results, error model |
 | [Execution Identity Architecture](execution-identity.md) | System designers | Full architectural proposal, six-layer model, standards alignment |
