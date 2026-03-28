@@ -85,7 +85,7 @@ If you want to start simple, start with `agentcli` alone. If you want durable op
 
 ## Wrapping Existing CLI Tools
 
-`agentcli` works well as a stable wrapper around existing CLI tools such as `flyctl`, `kubectl`, `gh`, or `terraform`.
+`agentcli` works well as a stable wrapper around existing CLI tools such as `flyctl`, `kubectl`, `gh`, `terraform`, and the Stripe CLI. See [Wrapping CLI Tools](docs/guide-wrapping-tools.md) for the full guide, including a complete multi-tool deployment pipeline that chains Stripe Projects, Prisma, and Fly.io under agentcli governance.
 
 The pattern is:
 
@@ -606,6 +606,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [cloud-workload.json](examples/cloud-workload.json) | Azure managed identity for cloud workload authentication with evidence and compliance context. |
 | [stripe-ops.json](examples/stripe-ops.json) | Wrapping the Stripe CLI with API key binding, JSON output parsing, evidence, and failure triage. |
 | [stripe-projects.json](examples/stripe-projects.json) | Stripe Projects with dynamic credential acquisition via `command` value_from, database migrations, and failure triage. |
+| [full-stack-deploy.json](examples/full-stack-deploy.json) | Full deployment pipeline chaining Stripe, Prisma, and Fly.io with three identities, trust enforcement, evidence, and failure triage. |
 
 ### Putting it together: a v0.2 manifest
 

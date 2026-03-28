@@ -1,0 +1,268 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "stripe-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://deploy/stripe",
+        "display_name": "Stripe Service Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "STRIPE_API_KEY"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "STRIPE_API_KEY" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "fly-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://deploy/flyctl",
+        "display_name": "Fly.io Deploy Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "FLY_API_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "autonomous",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "FLY_API_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "database-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://deploy/database",
+        "display_name": "Database Migration Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "DATABASE_URL"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "authorization_proof_profiles": [
+    {
+      "id": "ci-approval",
+      "method": "jwt",
+      "issuer": "https://ci.example.com",
+      "proof": {
+        "value_from": { "env": "CI_DEPLOY_TOKEN" }
+      },
+      "claims": {
+        "audience": "agentcli",
+        "subject": "deploy-pipeline"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "deploy-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "resolved_identity",
+          "authorization_proof",
+          "contract",
+          "command",
+          "result"
+        ],
+        "context": {
+          "model_version": true,
+          "tool_versions": true
+        },
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "full-stack-deploy",
+      "name": "Full-Stack Deployment Pipeline",
+      "authorization_proof": { "ref": "ci-approval" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "sync-credentials",
+          "name": "Sync Project Credentials",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "env", "--pull", "--yes"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "stripe-credentials" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "0 0 * * *" }
+        },
+        {
+          "id": "run-migrations",
+          "name": "Run Database Migrations",
+          "shell": {
+            "program": "sh",
+            "args": ["-c", "npx prisma migrate deploy --skip-generate"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "database-credentials" },
+          "evidence": { "ref": "deploy-evidence" },
+          "contract": {
+            "required_trust_level": "restricted",
+            "trust_enforcement": "strict"
+          },
+          "output": { "format": "text" },
+          "trigger": {
+            "parent": "sync-credentials",
+            "on": "success"
+          },
+          "on_failure": {
+            "id": "triage-migration",
+            "name": "Triage Migration Failure",
+            "prompt": "A database migration failed during deployment. Analyze the error output, determine whether this is a connection issue, schema conflict, or permission error, and recommend recovery steps without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "deploy-app",
+          "name": "Deploy Application to Fly.io",
+          "shell": {
+            "program": "flyctl",
+            "args": ["deploy", "--remote-only", "--strategy", "rolling"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "fly-credentials" },
+          "evidence": { "ref": "deploy-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "trigger": {
+            "parent": "run-migrations",
+            "on": "success"
+          },
+          "on_failure": {
+            "id": "triage-deploy",
+            "name": "Triage Deploy Failure",
+            "prompt": "A Fly.io deployment failed. Review the flyctl output, determine the failure category (build error, health check failure, resource limit, or network issue), and recommend the safest recovery action.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "verify-health",
+          "name": "Verify Application Health",
+          "shell": {
+            "program": "flyctl",
+            "args": ["checks", "list", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "fly-credentials" },
+          "evidence": { "ref": "deploy-evidence" },
+          "output": { "format": "json" },
+          "trigger": {
+            "parent": "deploy-app",
+            "on": "success",
+            "delay_s": 30
+          }
+        },
+        {
+          "id": "verify-payments",
+          "name": "Verify Stripe Payment Flow",
+          "shell": {
+            "program": "stripe",
+            "args": ["charges", "list", "--limit", "1"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "stripe-credentials" },
+          "evidence": { "ref": "deploy-evidence" },
+          "output": { "format": "json" },
+          "trigger": {
+            "parent": "deploy-app",
+            "on": "success",
+            "delay_s": 30
+          }
+        }
+      ]
+    }
+  ]
+}
