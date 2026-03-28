@@ -326,68 +326,162 @@ Or use the built-in `aws-sts-assume-role` identity provider for role-based acces
 }
 ```
 
-## Wrapping other tools
+## Tool-by-tool reference
 
-The pattern generalizes to any CLI tool that reads credentials from the environment.
+Each example below has a corresponding manifest in `examples/` that can be validated,
+dry-run, and executed immediately. Every example was live-tested against real
+infrastructure.
 
-### kubectl
+### kubectl ([kubectl-ops.json](../examples/kubectl-ops.json))
 
-```json
-{
-  "id": "k8s-deploy",
-  "provider": "env-bearer",
-  "auth": { "provider_config": { "token_env": "KUBECONFIG" } },
-  "presentation": {
-    "bindings": [{
-      "source": "credentials.access_token.value",
-      "target": { "kind": "env", "name": "KUBECONFIG" }
-    }]
-  }
-}
+**What it wraps**: Kubernetes cluster monitoring and deployment operations.
+
+**What agentcli adds**: Without agentcli, `kubectl apply` is a shell command that
+anyone with a kubeconfig can run. With agentcli, the apply operation requires a
+`supervised` trust level, manual approval at `high` risk, and produces an SSH-signed
+evidence record. Read-only operations (pod listing, node health, warning events)
+run under a `restricted` identity that cannot be used for writes.
+
+**Key pattern**: Two identity profiles separate monitoring from mutation. The
+`k8s-deploy` profile binds `KUBECONFIG` through env-bearer so credentials are
+materialized, audited, and cleaned up. The `k8s-readonly` profile uses `none`
+because kubectl reads `~/.kube/config` directly for read operations.
+
+```bash
+agentcli exec examples/kubectl-ops.json check-pods --signer none
+agentcli exec examples/kubectl-ops.json check-events --signer none
+agentcli whoami examples/kubectl-ops.json apply-manifest
 ```
 
-```json
-"shell": { "program": "kubectl", "args": ["apply", "-f", "k8s/deployment.yaml"] }
+### terraform ([terraform-ops.json](../examples/terraform-ops.json))
+
+**What it wraps**: A four-stage Terraform pipeline: init, plan, apply, show-state.
+
+**What agentcli adds**: The stages are chained via triggers (plan fires on init
+success, apply fires on plan success). This means the pipeline is declarative and
+auditable -- you can see exactly which stage ran, with what identity, and whether
+the trust contract was satisfied. The apply stage requires `supervised` trust
+with `strict` enforcement, so a `restricted` agent cannot accidentally apply
+infrastructure changes. Evidence is generated on apply for post-facto verification.
+
+**Key pattern**: Trigger chaining turns a sequential pipeline into a manifest
+declaration. The `tf-credentials` profile binds `TF_TOKEN_app_terraform_io` for
+Terraform Cloud operations; the `tf-readonly` profile uses `none` for init/plan
+where no remote token is needed.
+
+```bash
+agentcli exec examples/terraform-ops.json init --signer none
+agentcli compile examples/terraform-ops.json --target standalone --explain
 ```
 
-### terraform
+### gh ([gh-ops.json](../examples/gh-ops.json))
 
-```json
-{
-  "id": "tf-credentials",
-  "provider": "env-bearer",
-  "auth": { "provider_config": { "token_env": "TF_TOKEN_app_terraform_io" } },
-  "presentation": {
-    "bindings": [{
-      "source": "credentials.access_token.value",
-      "target": { "kind": "env", "name": "TF_TOKEN_app_terraform_io" }
-    }]
-  }
-}
+**What it wraps**: GitHub CLI operations: PR listing, CI run checks, issue
+tracking, and release creation.
+
+**What agentcli adds**: The `gh release create` operation requires `supervised`
+trust, manual approval, and produces evidence. An agent that can list PRs
+(`restricted` trust, `GH_TOKEN` optional) cannot create releases without an
+explicit trust upgrade. CI check failures trigger agent-based triage that
+diagnoses whether the failure is a flaky test, a real regression, or a
+configuration issue.
+
+**Key pattern**: `required: false` on the read-only token means the example
+works even without `GH_TOKEN` set (gh falls back to browser auth). The write
+profile uses `required: true` because release creation must have a valid token.
+
+```bash
+agentcli exec examples/gh-ops.json list-prs --signer none
+agentcli exec examples/gh-ops.json check-ci --signer none
+agentcli whoami examples/gh-ops.json create-release
 ```
 
-```json
-"shell": { "program": "terraform", "args": ["apply", "-auto-approve"] }
+### docker ([docker-ops.json](../examples/docker-ops.json))
+
+**What it wraps**: Container monitoring, image builds, and system cleanup.
+
+**What agentcli adds**: The `prune-unused` task (`docker system prune -f`) is
+destructive -- it deletes all unused containers, networks, and dangling images.
+agentcli enforces `supervised` trust with `strict` enforcement, requires manual
+approval at `high` risk level, and sets `network: "none"` on the contract (the
+prune operation should not need network access). Evidence is generated on both
+build and prune for auditability.
+
+**Key pattern**: Contract-level `network: "none"` on a destructive operation.
+On macOS, agentcli enforces this via `sandbox-exec`, actually blocking network
+access during the prune. On other platforms, it records the contract intent for
+backend enforcement.
+
+```bash
+agentcli exec examples/docker-ops.json list-containers --signer none
+agentcli exec examples/docker-ops.json check-images --signer none
+agentcli exec examples/docker-ops.json system-df --signer none
 ```
 
-### gh (GitHub CLI)
+### gcloud ([gcloud-ops.json](../examples/gcloud-ops.json))
 
-```json
-{
-  "id": "github-token",
-  "provider": "env-bearer",
-  "auth": { "provider_config": { "token_env": "GH_TOKEN" } },
-  "presentation": {
-    "bindings": [{
-      "source": "credentials.access_token.value",
-      "target": { "kind": "env", "name": "GH_TOKEN" }
-    }]
-  }
-}
+**What it wraps**: Google Cloud identity verification, compute instance listing,
+GKE cluster inventory, and billing account checks.
+
+**What agentcli adds**: Every gcloud operation generates SSH-signed evidence,
+creating a verifiable record of what the agent queried and what the cloud returned.
+The billing check is separated so it can have a tighter trust requirement in future
+iterations. Failure triage on instance listing catches authentication expiry,
+project misconfiguration, and API quota issues.
+
+**Key pattern**: Single identity profile for all tasks because gcloud uses
+application default credentials (`~/.config/gcloud/`), not env var injection.
+The `none` provider declares the identity for audit purposes without injecting
+credentials.
+
+```bash
+gcloud auth login
+agentcli exec examples/gcloud-ops.json whoami --signer none
+agentcli exec examples/gcloud-ops.json list-instances --signer none
 ```
 
-```json
-"shell": { "program": "gh", "args": ["pr", "create", "--fill"] }
+### curl ([curl-api.json](../examples/curl-api.json))
+
+**What it wraps**: Generic REST API operations: health checks, authenticated
+data retrieval, and webhook delivery.
+
+**What agentcli adds**: The `API_TOKEN` is bound through env-bearer and injected
+into the `Authorization: Bearer $API_TOKEN` header. The token never appears in
+the audit log (redacted by the presentation binding). The webhook POST generates
+evidence, creating a verifiable record that the notification was sent. Health
+checks run every 5 minutes with no credentials required (`required: false`).
+
+**Key pattern**: This is the generic template for wrapping any HTTP API. Replace
+the URLs and token env var name for your specific API. Works with any service
+that accepts bearer tokens in the Authorization header.
+
+```bash
+agentcli exec examples/curl-api.json health-check --signer none
+agentcli whoami examples/curl-api.json fetch-data
+```
+
+### psql ([psql-ops.json](../examples/psql-ops.json))
+
+**What it wraps**: PostgreSQL database monitoring and migrations.
+
+**What agentcli adds**: The migration task requires `supervised` trust with
+`strict` enforcement and manual approval at `high` risk. A read-only monitoring
+agent (`restricted` trust) can check connections, table sizes, and active queries
+but cannot run migrations. `DATABASE_URL` is bound through env-bearer and passed
+to psql via `sh -c` so the connection string is materialized, audited, and cleaned
+up. The migration failure triage handler diagnoses connection issues, schema
+conflicts, and permission errors.
+
+**Key pattern**: Database credentials are the highest-value secrets in most
+systems. Binding them through agentcli means they are redacted from audit logs,
+cleaned up after execution, and only available to tasks whose identity and trust
+level meet the contract requirements.
+
+```bash
+export DATABASE_URL="postgresql://user:pass@host/db"
+agentcli exec examples/psql-ops.json check-connection --signer none
+agentcli exec examples/psql-ops.json table-sizes --signer none
+agentcli whoami examples/psql-ops.json run-migration
 ```
 
 ## Why the manifest matters
