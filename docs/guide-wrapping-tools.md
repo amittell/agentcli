@@ -332,6 +332,54 @@ Each example below has a corresponding manifest in `examples/` that can be valid
 dry-run, and executed immediately. Every example was live-tested against real
 infrastructure.
 
+### flyctl ([flyctl-ops.json](../examples/flyctl-ops.json))
+
+**What it wraps**: Fly.io application status monitoring with failure triage.
+
+**What agentcli adds**: `flyctl status` is a read-only check, but without
+agentcli there is no record of who checked, when, or what the result was.
+With agentcli, every status check produces an audit record with the
+`agent://ops/flyctl` principal, trust level, and execution result. When the
+check fails (app down, deploy stuck), the on-failure handler spawns an agent
+that reads the recent context and proposes recovery without making changes.
+
+**Key pattern**: `FLY_API_TOKEN` is bound through env-bearer with
+`required: false`, so the example works for dry-run and validation without
+a token set. When executed with a real token, agentcli materializes it into
+the spawned flyctl process, redacts it from audit logs, and cleans it up
+after execution. The `delivery.to: "@owner_dm"` on the failure handler sends
+the triage result to the operator.
+
+```bash
+export FLY_API_TOKEN="fo1_..."
+agentcli exec examples/flyctl-ops.json check-app-status --signer none
+agentcli audit --limit 1
+```
+
+### stripe ([stripe-ops.json](../examples/stripe-ops.json))
+
+**What it wraps**: Stripe CLI operations: listing charges, checking balance,
+and listing failed payment intents.
+
+**What agentcli adds**: `STRIPE_API_KEY` is bound through env-bearer with
+`required: true` and `redact: true`, so the key is materialized into the
+spawned stripe process but never appears in audit records. The failed
+payments task has an on-failure handler that diagnoses whether the error
+is authentication, rate limiting, or an API issue. Trust enforcement is
+`strict` at `restricted` level, so only agents with at least `restricted`
+trust can access billing data. Every charge listing generates SSH evidence.
+
+**Key pattern**: JSON output parsing. The Stripe CLI returns structured
+JSON that agentcli parses via `output.format: "json"`. The parsed result
+is available in the execution response as `result.structured`, making it
+consumable by downstream automation without re-parsing.
+
+```bash
+export STRIPE_API_KEY="sk_test_..."
+agentcli exec examples/stripe-ops.json check-balance --signer none
+agentcli exec examples/stripe-ops.json list-recent-charges --signer none
+```
+
 ### kubectl ([kubectl-ops.json](../examples/kubectl-ops.json))
 
 **What it wraps**: Kubernetes cluster monitoring and deployment operations.
