@@ -13,6 +13,19 @@ function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
 }
 
+export function shellCommandInvocation(command, platform = process.platform) {
+  if (platform === 'win32') {
+    return {
+      program: 'cmd.exe',
+      args: ['/d', '/s', '/c', command],
+    };
+  }
+  return {
+    program: 'sh',
+    args: ['-c', command],
+  };
+}
+
 function formatCommand(invocation, extraArgs = []) {
   return [invocation.command, ...invocation.prefixArgs, ...extraArgs].join(' ');
 }
@@ -266,7 +279,8 @@ export async function applyManifestToScheduler(
         proofValue = proof.proof.value_from.literal;
       } else if (proof.proof?.value_from?.command) {
         try {
-          const cmdResult = spawnSync('sh', ['-c', proof.proof.value_from.command], {
+          const invocation = shellCommandInvocation(proof.proof.value_from.command);
+          const cmdResult = spawnSync(invocation.program, invocation.args, {
             encoding: 'utf8',
             timeout: 30000,
             stdio: ['pipe', 'pipe', 'pipe'],

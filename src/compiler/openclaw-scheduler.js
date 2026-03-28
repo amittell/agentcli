@@ -189,6 +189,16 @@ function validateSchedulerStringLimits(errors, taskPath, job) {
   }
 }
 
+function validateSchedulerReservedValues(errors, taskPath, job) {
+  if (!job.parent_id && job.schedule_cron === TRIGGERED_SENTINEL_CRON) {
+    addTargetValidationError(
+      errors,
+      `${taskPath}.schedule.cron`,
+      'schedule_cron cannot use the reserved at-job sentinel for root cron jobs'
+    );
+  }
+}
+
 export function compileManifestToScheduler(manifest, { includeExplain = false } = {}) {
   const validation = validateManifest(manifest);
   if (!validation.ok) {
@@ -316,6 +326,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         delete_after_run: plan.delete_after_run ? 1 : 0
       };
       validateSchedulerStringLimits(targetErrors, taskPath, job);
+      validateSchedulerReservedValues(targetErrors, taskPath, job);
       jobs.push(job);
 
       explain.push({

@@ -19,7 +19,7 @@ import {
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
-import { applyManifestToScheduler, resolveSchedulerInvocation } from '../src/apply.js';
+import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation } from '../src/apply.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
@@ -6353,6 +6353,47 @@ test('scheduler compilation rejects compiled string fields that exceed backend l
   );
 });
 
+test('scheduler compilation rejects the reserved root cron sentinel before apply', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'wf',
+      name: 'Workflow',
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'hello',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 0 31 2 *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(err.validation);
+      assert.ok(err.validation.errors.some(error => (
+        error.path.endsWith('.schedule.cron') &&
+        /reserved at-job sentinel/.test(error.message)
+      )));
+      return true;
+    }
+  );
+});
+
+test('shellCommandInvocation uses cmd.exe on Windows and sh elsewhere', () => {
+  assert.deepEqual(
+    shellCommandInvocation('echo hi', 'win32'),
+    { program: 'cmd.exe', args: ['/d', '/s', '/c', 'echo hi'] }
+  );
+  assert.deepEqual(
+    shellCommandInvocation('echo hi', 'linux'),
+    { program: 'sh', args: ['-c', 'echo hi'] }
+  );
+});
+
 test('applyManifestToScheduler returns authorization proof verification summaries', async () => {
   const calls = [];
   const runner = {
@@ -6380,6 +6421,54 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-me');
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
   assert.strictEqual('authorization_proof_verification' in calls[0], false);
+  assert.strictEqual('authorization_proof' in calls[0], false);
+});
+
+test('applyManifestToScheduler resolves command-sourced authorization proofs', async () => {
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  const result = await applyManifestToScheduler({
+    version: '0.2',
+    authorization_proof_profiles: [{
+      id: 'jwt-proof',
+      method: 'jwt',
+      proof: { value_from: { command: `printf '%s' '${unsignedJwt({ sub: 'agentcli-proof' })}'` } },
+      claims: { subject: 'agentcli-proof' },
+      verify: { required: true }
+    }],
+    workflows: [{
+      id: 'apply-proof-command',
+      name: 'Apply Proof Command',
+      authorization_proof: { ref: 'jwt-proof' },
+      tasks: [{
+        id: 'verify-me',
+        name: 'Verify Me',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['apply-proof'] },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  }, {
+    runner,
+    env: process.env
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.authorization_proof_verifications.length, 1);
+  assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
   assert.strictEqual('authorization_proof' in calls[0], false);
 });
 
