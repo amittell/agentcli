@@ -1,0 +1,161 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "project-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/stripe-project",
+        "display_name": "Stripe Projects Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "STRIPE_API_KEY"
+        },
+        "inputs": {
+          "credential_sync": {
+            "value_from": {
+              "command": "stripe projects env --pull --format env 2>/dev/null | grep STRIPE_API_KEY | cut -d= -f2"
+            }
+          }
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "STRIPE_API_KEY" },
+            "required": true,
+            "redact": true
+          },
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "STRIPE_SECRET_KEY" },
+            "required": false,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "database-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/project-db",
+        "display_name": "Project Database Agent"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "DATABASE_URL"
+        }
+      },
+      "trust": {
+        "level": "restricted"
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "project-ops",
+      "name": "Stripe Project Operations",
+      "identity": { "ref": "project-credentials" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "advisory"
+      },
+      "tasks": [
+        {
+          "id": "sync-credentials",
+          "name": "Sync Project Credentials",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "env", "--pull"]
+          },
+          "target": { "session_target": "shell" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "0 */2 * * *" }
+        },
+        {
+          "id": "check-project-status",
+          "name": "Check Project Status",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "status"]
+          },
+          "target": { "session_target": "shell" },
+          "output": { "format": "text" },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "run-migrations",
+          "name": "Run Database Migrations",
+          "shell": {
+            "program": "sh",
+            "args": ["-c", "npx prisma migrate deploy"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "database-credentials" },
+          "evidence": { "ref": "ssh-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "0 3 * * 1" },
+          "on_failure": {
+            "id": "triage-migration-failure",
+            "name": "Triage Migration Failure",
+            "prompt": "A database migration failed. Review the error output, determine whether it is a connection issue, schema conflict, or permission error, and recommend the safest recovery step without making changes.",
+            "target": {
+              "session_target": "isolated",
+              "agent_id": "main"
+            },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { registerProvider } from './index.js';
 import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
 
@@ -30,6 +31,22 @@ function resolveValueFrom(valueFrom, env = process.env) {
   if (valueFrom.file) {
     try {
       return readFileSync(valueFrom.file, 'utf8').trim();
+    } catch {
+      return null;
+    }
+  }
+  if (valueFrom.command) {
+    try {
+      const result = spawnSync('sh', ['-c', valueFrom.command], {
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+      });
+      if (result.status === 0 && result.stdout) {
+        return result.stdout.trim();
+      }
+      return null;
     } catch {
       return null;
     }

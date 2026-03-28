@@ -120,6 +120,27 @@ If the tool only needs a direct wrapper, you can also scaffold the starting poin
 agentcli init --tool flyctl
 ```
 
+### Dynamic credentials via `command`
+
+When credentials are managed by an external tool, use `value_from: { command }` to
+acquire them at execution time:
+
+```json
+"inputs": {
+  "client_secret": {
+    "value_from": {
+      "command": "vault kv get -field=api_key secret/myapp"
+    }
+  }
+}
+```
+
+This works with any CLI that prints a credential to stdout: Vault, 1Password, AWS SSM,
+Stripe Projects, Doppler, macOS Keychain, and others. See
+[stripe-projects.json](examples/stripe-projects.json) for a full example and
+[docs/guide-identity.md](docs/guide-identity.md#dynamic-credential-acquisition) for the
+complete reference.
+
 ## Core Model
 
 A manifest is a declarative description of one or more workflows. Each workflow contains tasks that define what to execute, when, and under what identity and constraints.
@@ -584,6 +605,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [authorization-proof.json](examples/authorization-proof.json) | JWT-based manifest authorization proof with claims verification. |
 | [cloud-workload.json](examples/cloud-workload.json) | Azure managed identity for cloud workload authentication with evidence and compliance context. |
 | [stripe-ops.json](examples/stripe-ops.json) | Wrapping the Stripe CLI with API key binding, JSON output parsing, evidence, and failure triage. |
+| [stripe-projects.json](examples/stripe-projects.json) | Stripe Projects with dynamic credential acquisition via `command` value_from, database migrations, and failure triage. |
 
 ### Putting it together: a v0.2 manifest
 

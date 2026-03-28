@@ -106,6 +106,22 @@ function resolveValueFrom(valueFrom, envObj) {
     catch { return null; }
   }
   if (valueFrom.literal) return valueFrom.literal;
+  if (valueFrom.command) {
+    try {
+      const result = spawnSync('sh', ['-c', valueFrom.command], {
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: envObj,
+      });
+      if (result.status === 0 && result.stdout) {
+        return result.stdout.trim();
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
   return null;
 }
 

@@ -402,6 +402,71 @@ The file-bearer provider checks file permissions at resolution time. If the toke
 world-readable, a warning is included in `provider_assertions.permission_warning` and
 appears in the audit record. Restrict token files to mode `0600`.
 
+## Dynamic Credential Acquisition
+
+The `value_from` pattern supports four sources for resolving sensitive values without
+embedding them in the manifest:
+
+| Source | Usage | Example |
+|---|---|---|
+| `env` | Read from an environment variable | `{ "env": "MY_SECRET" }` |
+| `file` | Read from a file on disk | `{ "file": "/run/secrets/token" }` |
+| `literal` | Inline value (use sparingly) | `{ "literal": "static-value" }` |
+| `command` | Run a shell command and capture stdout | `{ "command": "vault kv get -field=token secret/app" }` |
+
+The `command` source runs the specified string through `sh -c` with a 30-second
+timeout. It captures stdout, trims whitespace, and returns the result. If the
+command fails (non-zero exit), the value resolves to null.
+
+### When to use `command`
+
+Use `command` when credentials are managed by an external tool that exposes them
+via CLI:
+
+```json
+"inputs": {
+  "client_secret": {
+    "value_from": {
+      "command": "vault kv get -field=api_key secret/myapp"
+    }
+  }
+}
+```
+
+Common patterns:
+
+| Tool | Command |
+|---|---|
+| HashiCorp Vault | `vault kv get -field=token secret/path` |
+| 1Password CLI | `op item get "API Key" --fields credential` |
+| AWS SSM | `aws ssm get-parameter --name /app/secret --with-decryption --query Parameter.Value --output text` |
+| Stripe Projects | `stripe projects env --pull --format env 2>/dev/null \| grep STRIPE_API_KEY \| cut -d= -f2` |
+| macOS Keychain | `security find-generic-password -a account -s service -w` |
+| Doppler | `doppler secrets get API_KEY --plain` |
+
+### Security considerations
+
+- The command inherits the current environment, so tools that use env-based auth
+  (like `VAULT_TOKEN` for Vault) will work transparently.
+- The command runs with the same permissions as the `agentcli` process.
+- Stdout is captured and trimmed. Stderr is discarded.
+- The 30-second timeout prevents hanging on interactive prompts.
+- Command values are NOT persisted in audit records. Only the fact that a command
+  source was used is recorded.
+
+### Example: Stripe Projects credential sync
+
+[stripe-projects.json](../examples/stripe-projects.json) demonstrates using
+`stripe projects env --pull` as a credential source alongside direct `STRIPE_API_KEY`
+binding. The workflow syncs project credentials, checks project status, and runs
+database migrations with strict trust enforcement and failure triage.
+
+```bash
+stripe projects env --pull          # populate local .env
+agentcli validate examples/stripe-projects.json
+agentcli exec examples/stripe-projects.json check-project-status --signer none
+```
+
 ## Trust Levels
 
 Trust levels declare how much autonomy a task's identity is granted. There are four levels,

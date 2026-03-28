@@ -11,6 +11,7 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { registerProvider } from './index.js';
 import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
 
@@ -45,6 +46,22 @@ function resolveValueFrom(valueFrom, env) {
     try {
       return readFileSync(valueFrom.file, 'utf8').trim();
     } catch (_e) {
+      return undefined;
+    }
+  }
+  if (valueFrom.command) {
+    try {
+      const result = spawnSync('sh', ['-c', valueFrom.command], {
+        encoding: 'utf8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+      });
+      if (result.status === 0 && result.stdout) {
+        return result.stdout.trim();
+      }
+      return undefined;
+    } catch {
       return undefined;
     }
   }
@@ -111,12 +128,13 @@ const fileBearerProvider = {
       inputs.token_file.value_from &&
       typeof inputs.token_file.value_from === 'object' &&
       (typeof inputs.token_file.value_from.env === 'string' ||
-       typeof inputs.token_file.value_from.file === 'string');
+       typeof inputs.token_file.value_from.file === 'string' ||
+       typeof inputs.token_file.value_from.command === 'string');
 
     if (!hasTokenFile && !hasTokenFileInput) {
       errors.push(
         'file-bearer provider requires auth.provider_config.token_file (non-empty string path to the token file) ' +
-        'or auth.inputs.token_file.value_from with env or file source providing the file path'
+        'or auth.inputs.token_file.value_from with env, file, or command source providing the file path'
       );
     }
 

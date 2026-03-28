@@ -393,6 +393,7 @@ export const valueFromField = {
     env: nullableString,
     file: nullableString,
     literal: nullableString,
+    command: nullableString,
   },
 };
 

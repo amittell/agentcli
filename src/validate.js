@@ -491,15 +491,17 @@ function validateValueFrom(errors, path, value, { allowLiteral = true } = {}) {
   } else if (value.literal != null) {
     addError(errors, `${path}.literal`, 'is not supported here');
   }
+  checkString(errors, `${path}.command`, value.command, { required: false });
 
   const hasSupportedSource = Boolean(
     value.env != null ||
     value.file != null ||
-    (allowLiteral && value.literal != null)
+    (allowLiteral && value.literal != null) ||
+    value.command != null
   );
 
   if (!hasSupportedSource) {
-    const supported = allowLiteral ? 'env, file, or literal' : 'env or file';
+    const supported = allowLiteral ? 'env, file, literal, or command' : 'env, file, or command';
     addError(errors, path, `must include at least one of: ${supported}`);
   }
 }

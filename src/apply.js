@@ -264,6 +264,20 @@ export async function applyManifestToScheduler(
         }
       } else if (proof.proof?.value_from?.literal) {
         proofValue = proof.proof.value_from.literal;
+      } else if (proof.proof?.value_from?.command) {
+        try {
+          const cmdResult = spawnSync('sh', ['-c', proof.proof.value_from.command], {
+            encoding: 'utf8',
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env,
+          });
+          if (cmdResult.status === 0 && cmdResult.stdout) {
+            proofValue = cmdResult.stdout.trim();
+          }
+        } catch {
+          proofValue = null;
+        }
       }
 
       if (!proofValue) {

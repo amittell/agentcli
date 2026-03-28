@@ -604,8 +604,9 @@ Proposed `value_from` sources:
 
 - `env` -- read the value from the named environment variable at resolution time
 - `file` -- read the value from the named file path at resolution time; the file MUST have restrictive permissions (0600 or equivalent)
+- `command` -- run the specified shell command and use the trimmed stdout as the value; the command runs with a 30-second timeout and inherits the current environment
 
-Future implementations MAY add additional sources (e.g., `vault`, `command`) without changing the manifest schema. The runtime resolves `value_from` at the latest safe moment before the value is needed.
+The `command` source runs the specified string through `sh -c` with a 30-second timeout and captures stdout. This enables integration with external credential managers such as HashiCorp Vault CLI, 1Password CLI, AWS SSM, Stripe Projects, and macOS Keychain.
 
 Rules:
 

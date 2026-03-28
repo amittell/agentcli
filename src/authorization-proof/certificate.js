@@ -107,10 +107,10 @@ const certificateVerifier = {
         });
       } else {
         const vf = profile.proof.value_from;
-        if (!vf.env && !vf.file && !vf.literal) {
+        if (!vf.env && !vf.file && !vf.literal && !vf.command) {
           errors.push({
             field: 'proof.value_from',
-            message: 'value_from must specify env, file, or literal source',
+            message: 'value_from must specify env, file, literal, or command source',
           });
         }
       }
