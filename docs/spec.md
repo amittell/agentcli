@@ -502,9 +502,12 @@ See [execution-identity.md](execution-identity.md) for full architectural detail
 
 `authorization_proof`, if present on a workflow or task, MUST be an object.
 
-It MAY define:
+It MUST define:
 
 - `ref` -- a reference to a named authorization proof profile
+
+It MAY additionally define:
+
 - `claims` -- an object describing expected claims
 - `verify` -- an object describing verification requirements
 
@@ -519,9 +522,9 @@ Authorization proof supports the following methods:
 - `certificate` -- an X.509 or SPIFFE certificate presented as proof of identity
 - `none` -- no authorization proof is required
 
-`authorization_proof.verify.method`, if present, MUST be one of the above values.
+`authorization_proof_profiles[].method`, if present, MUST be one of the above values.
 
-Implementations MUST verify the proof before executing a task when `verify` is present and `method` is not `none`. Verification failure MUST prevent execution.
+Workflow/task `authorization_proof` blocks are scoped overlays on reusable `authorization_proof_profiles[]` entries. Implementations MUST verify the referenced proof before executing a task when `verify` is present and the resolved profile method is not `none`. Verification failure MUST prevent execution.
 
 See [execution-identity.md](execution-identity.md) for full architectural details.
 
@@ -531,9 +534,12 @@ See [execution-identity.md](execution-identity.md) for full architectural detail
 
 `authorization`, if present on a workflow or task, MUST be an object.
 
-It MAY define:
+It MUST define:
 
 - `ref` -- a reference to a named authorization provider
+
+It MAY additionally define:
+
 - `provider_config` -- provider-specific configuration (e.g., OPA endpoint, Cedar policy store)
 - `on_error` -- behavior when the authorization provider is unreachable; MUST be one of `deny`, `warn`
 - `request` -- an object describing the authorization request shape

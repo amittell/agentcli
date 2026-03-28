@@ -520,6 +520,7 @@ export const identityProfileField = {
 export const authorizationProofRefField = {
   type: 'object',
   nullable: true,
+  required: ['ref'],
   fields: {
     ref: nullableString,
     claims: { type: 'object', nullable: true },
@@ -570,6 +571,7 @@ export const authorizationProofProfileField = {
 export const authorizationRefField = {
   type: 'object',
   nullable: true,
+  required: ['ref'],
   fields: {
     ref: nullableString,
     provider_config: { type: 'object', nullable: true },

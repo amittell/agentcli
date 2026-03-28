@@ -697,6 +697,18 @@ test('cli schema manifest exposes authorization proof value_from sources', async
   assert.ok(proofValueFrom.literal);
 });
 
+test('cli schema manifest marks workflow and task authorization refs as required', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const workflowFields = output.schema.fields.workflows.items.fields;
+  const taskFields = workflowFields.tasks.items.fields;
+
+  assert.equal(output.ok, true);
+  assert.deepEqual(workflowFields.authorization_proof.required, ['ref']);
+  assert.deepEqual(workflowFields.authorization.required, ['ref']);
+  assert.deepEqual(taskFields.authorization_proof.required, ['ref']);
+  assert.deepEqual(taskFields.authorization.required, ['ref']);
+});
+
 test('cli -h prints usage', async () => {
   const output = await runCli(['-h']);
   assert.match(output, /^agentcli <command> \[args\]/);
