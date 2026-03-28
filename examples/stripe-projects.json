@@ -2,27 +2,13 @@
   "version": "0.2",
   "identity_profiles": [
     {
-      "id": "project-credentials",
-      "provider": "env-bearer",
+      "id": "project-agent",
+      "provider": "none",
       "subject": {
         "kind": "service",
         "principal": "agent://ops/stripe-project",
         "display_name": "Stripe Projects Agent",
         "delegation_mode": "none"
-      },
-      "auth": {
-        "mode": "service",
-        "required": true,
-        "provider_config": {
-          "token_env": "STRIPE_API_KEY"
-        },
-        "inputs": {
-          "credential_sync": {
-            "value_from": {
-              "command": "stripe projects env --pull --format env 2>/dev/null | grep STRIPE_API_KEY | cut -d= -f2"
-            }
-          }
-        }
       },
       "trust": {
         "level": "supervised",
@@ -30,24 +16,6 @@
           "max_autonomy": "supervised",
           "escalation": "fail"
         }
-      },
-      "presentation": {
-        "bindings": [
-          {
-            "source": "credentials.access_token.value",
-            "target": { "kind": "env", "name": "STRIPE_API_KEY" },
-            "required": true,
-            "redact": true
-          },
-          {
-            "source": "credentials.access_token.value",
-            "target": { "kind": "env", "name": "STRIPE_SECRET_KEY" },
-            "required": false,
-            "redact": true
-          }
-        ],
-        "handoff": "none",
-        "cleanup": "always"
       }
     },
     {
@@ -96,7 +64,7 @@
     {
       "id": "project-ops",
       "name": "Stripe Project Operations",
-      "identity": { "ref": "project-credentials" },
+      "identity": { "ref": "project-agent" },
       "contract": {
         "sandbox": "permissive",
         "network": "unrestricted",
