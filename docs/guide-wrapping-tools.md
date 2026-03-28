@@ -599,3 +599,99 @@ agentcli verify <execution-id>
 # Compile for durable scheduling
 agentcli compile examples/full-stack-deploy.json --target openclaw-scheduler --explain
 ```
+
+## From local exec to durable scheduling
+
+Every example in this guide works with `agentcli exec` for local, on-demand execution.
+When you want durable scheduling -- cron-based triggers, retries, approvals, and
+persistent state -- the same manifest compiles to `openclaw-scheduler` without
+rewriting.
+
+### The lifecycle
+
+```
+1. Author     agentcli init --tool kubectl
+2. Validate   agentcli validate manifest.json
+3. Exec       agentcli exec manifest.json <task> --signer none
+4. Compile    agentcli compile manifest.json --target openclaw-scheduler --explain
+5. Apply      agentcli apply manifest.json --scheduler-prefix ~/.openclaw/scheduler
+6. Inspect    agentcli inspect jobs --db ~/.openclaw/scheduler/scheduler.db
+```
+
+Steps 1-3 work without a scheduler. Steps 4-6 add durable operation.
+
+### What the scheduler preserves
+
+When you compile a v0.2 manifest to the scheduler target, the compiled jobs
+include all identity and contract metadata:
+
+```bash
+agentcli compile examples/trust-enforcement.json --target openclaw-scheduler
+```
+
+The output preserves:
+- `identity_ref` -- which identity profile each job uses
+- `identity_subject_principal` -- the stable principal URI
+- `identity_trust_level` -- the declared trust level
+- `contract_required_trust_level` and `contract_trust_enforcement` -- the trust contract
+- `authorization_proof_ref`, `authorization_ref`, `evidence_ref` -- all governance refs
+- Trigger chains -- `parent_id` and `trigger_on` for sequential pipelines
+
+This means the scheduler knows not just what to run, but who should run it and
+under what governance constraints.
+
+### Example: applying the npm pipeline
+
+```bash
+# Install the scheduler
+mkdir -p ~/.openclaw/scheduler
+npm install --prefix ~/.openclaw/scheduler openclaw-scheduler@latest
+npm exec --prefix ~/.openclaw/scheduler openclaw-scheduler -- setup
+
+# Preview what would be created
+agentcli apply examples/npm-ops.json \
+  --scheduler-prefix ~/.openclaw/scheduler \
+  --dry-run
+
+# Apply for real
+agentcli apply examples/npm-ops.json \
+  --scheduler-prefix ~/.openclaw/scheduler
+
+# Check the jobs
+npm exec --prefix ~/.openclaw/scheduler openclaw-scheduler -- jobs list --json
+```
+
+The npm-ops manifest creates 6 scheduler jobs: install (root cron), test (triggered
+on install success), build (triggered on test success), test-failure triage
+(triggered on test failure), audit (independent cron), and outdated (independent
+cron). The trigger chain means the scheduler handles sequencing -- install always
+runs first, test only fires if install succeeded, build only fires if tests passed.
+
+### Example: applying the trust-enforcement manifest
+
+```bash
+agentcli apply examples/trust-enforcement.json \
+  --scheduler-prefix ~/.openclaw/scheduler
+```
+
+This creates 3 scheduler jobs with different trust levels:
+- Collect Data: `restricted` trust, `strict` enforcement, every 15 minutes
+- Deploy to Staging: `autonomous` trust, `strict` enforcement, daily at 2am
+- Health Check: `supervised` trust, `advisory` enforcement, every 5 minutes
+
+The scheduler stores these trust constraints alongside the job definition.
+When a runtime adapter evaluates the job, it can enforce the trust contract
+just as `agentcli exec` does locally.
+
+### When to use exec vs apply
+
+| Scenario | Use |
+|----------|-----|
+| Testing a manifest locally | `agentcli exec` |
+| One-off ad hoc execution | `agentcli exec` |
+| Recurring scheduled jobs | `agentcli apply` to scheduler |
+| CI/CD pipeline steps | `agentcli exec` in CI, or `agentcli apply` for persistent jobs |
+| Production monitoring | `agentcli apply` to scheduler |
+| Development iteration | `agentcli exec --dry-run` for preview, `agentcli exec` for real |
+
+The manifest is the same in both paths. The difference is where it runs.
