@@ -124,50 +124,149 @@ Every execution writes a structured record:
 
 No raw credentials appear in the record. The identity is traced by principal URI and trust level. The command and result are hashed. The evidence is a signed attestation that can be independently verified with `agentcli verify`.
 
-## The Stripe Projects connection
+## agentcli + Stripe Projects
 
-[Stripe Projects](https://projects.dev) provisions infrastructure from multiple providers (Vercel, Neon, Clerk, PostHog, etc.) and centralizes credential management. `stripe projects env --pull` syncs all provider credentials to your local environment.
+[Stripe Projects](https://projects.dev) provisions infrastructure from multiple providers
+(Vercel, Neon, Clerk, PostHog, Railway, Supabase, and others) and centralizes credential
+management through a single CLI. `stripe projects add neon/postgres` provisions a database.
+`stripe projects env --pull` syncs all provider credentials to your local `.env`.
 
-agentcli complements this by adding the governance layer that Stripe Projects does not cover:
+agentcli sits on top of this. It does not provision infrastructure -- Stripe Projects
+handles that. What agentcli adds is the governance layer: who ran what, with what
+authority, within what boundaries, and how do you prove it.
 
-| Concern | Stripe Projects | agentcli |
-|---------|----------------|----------|
-| Infrastructure provisioning | Yes (multi-provider catalog) | No |
-| Credential acquisition | Yes (`stripe projects env --pull`) | Yes (identity providers, `command` value_from) |
-| Credential binding to tools | Manual (paste into .env) | Declarative (presentation bindings) |
-| Who ran what | Not tracked | Identity profiles with principal URIs |
-| Trust boundaries | Not modeled | Trust levels with strict enforcement |
-| Execution evidence | Not generated | SSH-signed attestation |
-| Audit trail | Not maintained | Append-only structured records |
-| Failure triage | Not handled | Agent-based read-only analysis |
+| Layer | Stripe Projects | agentcli |
+|-------|----------------|----------|
+| Provision infrastructure | `stripe projects add neon/postgres` | -- |
+| Acquire credentials | `stripe projects env --pull` | Identity providers, `command` value_from |
+| Bind credentials to tools | Manual (.env copy) | Declarative presentation bindings |
+| Track who ran what | -- | Identity profiles with principal URIs |
+| Enforce trust boundaries | -- | Trust levels with strict/advisory enforcement |
+| Prove execution happened | -- | SSH-signed evidence attestation |
+| Maintain audit trail | -- | Append-only structured records, secrets redacted |
+| Triage failures | -- | Agent-based read-only analysis |
 
-The two tools sit at different layers. Stripe Projects handles provisioning and credential sourcing. agentcli handles governance, execution, and accountability. Together they give you infrastructure that provisions itself and a deployment pipeline that audits itself.
+Together: Stripe Projects gives you the infrastructure, agentcli gives you the
+accountability.
+
+### How it works in practice
+
+**Step 1: Provision with Stripe Projects**
+
+```bash
+stripe projects init my-app
+stripe projects add neon/postgres
+stripe projects add clerk/auth
+stripe projects env --pull
+```
+
+After this, your `.env` has `NEON_CONNECTION_STRING`, `CLERK_SECRET_KEY`, and other
+credentials from all provisioned services.
+
+**Step 2: Wrap operations with agentcli**
+
+The [stripe-projects.json](../examples/stripe-projects.json) example shows three tasks
+that operate on a Stripe Projects-managed stack:
+
+- **sync-credentials** -- runs `stripe projects env --pull` to refresh credentials
+- **check-project-status** -- runs `stripe projects status` to verify all services are healthy
+- **run-migrations** -- runs `npx prisma migrate deploy` with the database URL bound through an identity profile
+
+The project management tasks (sync, status) use the `none` identity provider because
+Stripe Projects authenticates through its own browser-based session, not through an
+API key. The migration task uses `env-bearer` to bind `DATABASE_URL` from the
+environment into the spawned process.
+
+```bash
+# Validate the manifest
+agentcli validate examples/stripe-projects.json
+
+# Check project status through agentcli (audited, identity-tracked)
+agentcli exec examples/stripe-projects.json check-project-status --signer none
+
+# Sync credentials through agentcli
+agentcli exec examples/stripe-projects.json sync-credentials --signer none
+
+# Inspect the audit trail
+agentcli audit --limit 3
+```
+
+**Step 3: See the difference**
+
+Without agentcli, `stripe projects status` is a shell command with no record of who ran
+it or when. With agentcli, the same command produces an audit record:
+
+```json
+{
+  "execution_id": "a1b2c3...",
+  "source": { "workflow_id": "project-ops", "task_id": "check-project-status" },
+  "declared_identity": {
+    "provider": "none",
+    "subject": { "principal": "agent://ops/stripe-project", "kind": "service" }
+  },
+  "trust": { "declared_level": "supervised", "effective_level": "supervised" },
+  "result": { "exit_code": 0 }
+}
+```
+
+The principal URI is stable across executions. The trust level is enforced. The
+audit record is machine-readable and secrets-free. If the migration fails at 3am,
+you know exactly which identity ran it, what trust level it operated at, and
+whether the contract was satisfied.
+
+### Why two identity profiles
+
+The example uses two identity profiles at different trust levels:
+
+- **project-agent** (`none` provider, `supervised` trust) -- for Stripe Projects
+  CLI commands that use browser-session auth. These are read-only operations
+  (status checks, credential syncs) that don't need injected credentials.
+
+- **database-credentials** (`env-bearer` provider, `restricted` trust) -- for the
+  migration task that needs `DATABASE_URL` injected. This identity is `restricted`
+  because database writes are high-impact. The migration contract requires
+  `supervised` trust with `strict` enforcement, which means a `restricted` identity
+  is intentionally blocked from running it unless the operator upgrades the
+  profile's trust level. This is graduated autonomy in action.
 
 ### Dynamic credential acquisition
 
-agentcli can pull credentials directly from Stripe Projects at execution time using the `command` value_from source:
+For environments where credentials should be pulled fresh at execution time rather
+than read from a static `.env`, use the `command` value_from source:
 
 ```json
-"auth": {
-  "inputs": {
-    "credential_sync": {
-      "value_from": {
-        "command": "stripe projects env --pull --format env 2>/dev/null | grep STRIPE_API_KEY | cut -d= -f2"
-      }
+"provider_config": {
+  "token_env": "DATABASE_URL"
+},
+"inputs": {
+  "db_url": {
+    "value_from": {
+      "command": "grep NEON_CONNECTION_STRING .env | cut -d= -f2-"
     }
   }
 }
 ```
 
-This means the manifest does not contain secrets and does not depend on the local `.env` file being up to date. agentcli resolves the credential at execution time by running the Stripe Projects CLI.
+The `command` source runs any shell command and captures stdout. This works with
+Stripe Projects, HashiCorp Vault, 1Password CLI, AWS SSM, or any tool that prints
+a credential value:
 
-The same pattern works for any credential manager:
+| Tool | Command |
+|------|---------|
+| Stripe Projects | `stripe projects env --pull && grep NEON_CONNECTION_STRING .env \| cut -d= -f2-` |
+| HashiCorp Vault | `vault kv get -field=token secret/myapp` |
+| 1Password CLI | `op item get "API Key" --fields credential` |
+| AWS SSM | `aws ssm get-parameter --name /app/key --with-decryption --query Parameter.Value --output text` |
+| Doppler | `doppler secrets get DATABASE_URL --plain` |
+| macOS Keychain | `security find-generic-password -a account -s service -w` |
 
-```json
-"value_from": { "command": "vault kv get -field=token secret/myapp" }
-"value_from": { "command": "op item get 'API Key' --fields credential" }
-"value_from": { "command": "aws ssm get-parameter --name /app/key --with-decryption --query Parameter.Value --output text" }
-```
+### The full-stack picture
+
+[full-stack-deploy.json](../examples/full-stack-deploy.json) takes this further by
+chaining Stripe Projects, Prisma, Fly.io, and post-deploy verification into a single
+pipeline with three separate identities, trust enforcement, evidence, and failure
+triage at each stage. See [the full pipeline walkthrough](#full-stack-deployment-example)
+at the top of this guide.
 
 ## Wrapping other tools
 
