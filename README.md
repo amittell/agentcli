@@ -176,23 +176,13 @@ See the [manifest spec](docs/spec.md) for field-level detail.
 
 ## Execution Identity (v0.2)
 
-Execution identity is the headline feature of `agentcli` v0.2. It treats identity as a first-class control-plane concern rather than optional metadata.
+Every `agentcli` execution answers five questions:
 
-### Why execution identity matters
-
-Agent workflows increasingly operate as autonomous principals: they acquire credentials, call APIs, modify infrastructure, and produce artifacts. Without a structured identity model, there is no reliable answer to basic questions:
-
-- Who authorized this execution?
-- What credentials did the agent use, and how were they obtained?
-- What trust level was the agent operating at?
-- Can the execution be independently verified after the fact?
-- Are audit records complete, tamper-evident, and free of leaked secrets?
-
-Regulatory frameworks (EU AI Act, Colorado AI Act) add urgency: systems that cannot produce clear execution records, policy context, and attributable identity will be harder to justify in regulated environments.
-
-### Identity profiles
-
-Identity profiles are reusable, declarative descriptions of how a task should authenticate and present credentials. They are defined at the manifest top level and referenced by workflows and tasks.
+1. **Who** is running this? (identity profile with a stable principal URI)
+2. **How** did they authenticate? (pluggable provider: env var, file, OIDC, cloud workload, or CLI command)
+3. **What** are they allowed to do? (contract: trust level, sandbox, network, allowed paths)
+4. **Can we prove it happened?** (evidence: SSH-signed attestation of command + result)
+5. **Is there an audit trail?** (structured, append-only, secrets-redacted records)
 
 ```json
 {
@@ -200,41 +190,16 @@ Identity profiles are reusable, declarative descriptions of how a task should au
     {
       "id": "deploy-agent",
       "provider": "oidc-client-credentials",
-      "subject": {
-        "kind": "service",
-        "principal": "agent://acme.com/deploy-bot",
-        "display_name": "Deploy Bot",
-        "delegation_mode": "none"
-      },
+      "subject": { "kind": "service", "principal": "agent://acme.com/deploy-bot" },
       "auth": {
         "mode": "service",
         "scopes": ["deploy:staging"],
-        "provider_config": {
-          "token_endpoint": "https://auth.acme.com/oauth2/token",
-          "client_id": "deploy-bot"
-        },
-        "inputs": {
-          "client_secret": {
-            "value_from": { "env": "DEPLOY_CLIENT_SECRET" }
-          }
-        }
+        "provider_config": { "token_endpoint": "https://auth.acme.com/oauth2/token", "client_id": "deploy-bot" },
+        "inputs": { "client_secret": { "value_from": { "env": "DEPLOY_CLIENT_SECRET" } } }
       },
-      "trust": {
-        "level": "supervised",
-        "constraints": {
-          "max_autonomy": "supervised",
-          "escalation": "fail"
-        }
-      },
+      "trust": { "level": "supervised" },
       "presentation": {
-        "bindings": [
-          {
-            "source": "credentials.access_token.value",
-            "target": { "kind": "env", "name": "DEPLOY_TOKEN" },
-            "redact": true
-          }
-        ],
-        "handoff": "none",
+        "bindings": [{ "source": "credentials.access_token.value", "target": { "kind": "env", "name": "DEPLOY_TOKEN" }, "redact": true }],
         "cleanup": "always"
       }
     }
@@ -242,149 +207,9 @@ Identity profiles are reusable, declarative descriptions of how a task should au
 }
 ```
 
-Prefer indirect secret references via `value_from` environment or file sources. Some providers also accept inline secret strings for compatibility, but published manifests should avoid them.
+Trust levels (`untrusted`, `restricted`, `supervised`, `autonomous`) are enforced against the contract's `required_trust_level`. When a task's trust is below the floor and `trust_enforcement` is `strict`, execution is blocked.
 
-### Provider system
-
-Identity providers are pluggable modules that handle credential acquisition. Each provider implements a standard interface: validate the profile, resolve a credential session, materialize credentials for tool consumption, and clean up afterward.
-
-Built-in providers are listed in the [Identity Providers](#identity-providers) section. Custom providers can be registered without forking agentcli.
-
-### Trust levels
-
-Trust levels express graduated autonomy. They control what an agent is allowed to do and how much oversight is required.
-
-| Level | Meaning |
-|---|---|
-| `untrusted` | No autonomous capability. Every action requires external approval. |
-| `restricted` | Limited capability. Scoped credentials, narrow allowed paths. |
-| `supervised` | Broad capability with oversight. Actions are logged and may require approval for high-risk operations. |
-| `autonomous` | Full capability within contract bounds. Suitable for well-established, well-tested workflows. |
-
-Trust levels are declared in the identity profile and enforced against the contract's `required_trust_level`. When a task's effective trust level is below the contract requirement, execution fails or escalates depending on `trust_enforcement` policy.
-
-### Execution contract modes
-
-The `contract` block declares the execution boundary you intend the runtime to enforce.
-
-For local `agentcli exec`, some contract fields are enforced directly today and some are still advisory.
-
-#### Sandbox modes
-
-| Mode | Plain-English meaning | Current `agentcli exec` behavior |
-|---|---|---|
-| `none` | No sandboxing intent is declared. | No sandbox warning. |
-| `permissive` | Run with low-friction local access, but still record that the task is not meant to be tightly isolated. | Emits an advisory warning and proceeds. |
-| `strict` | The task is supposed to run in a stronger sandbox. | Enforced on macOS when `sandbox-exec` is available. Other OSes emit a warning and proceed without local OS-level sandbox enforcement. |
-
-#### Network modes
-
-| Mode | Plain-English meaning | Current `agentcli exec` behavior |
-|---|---|---|
-| `unrestricted` | The task may use the network normally. | No network warning. |
-| `restricted` | The task should run with a narrower network posture. | On macOS with `sandbox-exec`, local `exec` denies inbound network access. Other OSes emit a warning and proceed. |
-| `none` | The task should not reach the network. | On macOS with `sandbox-exec`, local `exec` blocks network access. Other OSes emit a warning and proceed. |
-
-#### Audit modes
-
-| Mode | Meaning |
-|---|---|
-| `none` | Do not write an audit record. |
-| `on-failure` | Write an audit record only when the task exits non-zero. |
-| `always` | Always write an audit record. |
-
-#### Trust enforcement modes
-
-| Mode | Meaning |
-|---|---|
-| `none` | Record the trust requirement but do not act on mismatches. |
-| `advisory` | Warn on trust mismatch and continue. |
-| `strict` | Fail execution when the resolved trust level is below `required_trust_level`. |
-
-#### What the sandbox warning means
-
-If you see a warning like:
-
-```text
-contract.sandbox is "permissive"; execution proceeds without additional OS-level isolation
-```
-
-or:
-
-```text
-contract.sandbox is "strict" but no supported local sandbox runner is available; execution proceeds without OS-level sandbox enforcement
-```
-
-it means:
-
-- your manifest is valid
-- `agentcli` recorded the contract intent correctly
-- the local machine does not currently have a supported sandbox backend for that contract
-
-What to do:
-
-- On macOS, install or keep access to `sandbox-exec` if you want local `strict` / `restricted` / `none` enforcement.
-- On other OSes, treat `contract` as the portable declaration and rely on a backend or environment that can enforce it until an OS-specific adapter is available.
-- If you are using `agentcli exec` for local development or operator-run checks, it is usually fine to proceed with the warning.
-- If you do not want the warning for a local workflow, declare `sandbox: "none"` and `network: "unrestricted"` instead of implying isolation your local executor cannot provide.
-- `allowed_paths` remains locally enforced across platforms and is the right way to express a portable filesystem boundary today.
-
-### Credential presentation
-
-Credentials are materialized into the task's execution environment through explicit bindings. Each binding maps a path in the credential session to an environment variable, file, or header that the wrapped tool consumes.
-
-```json
-"presentation": {
-  "bindings": [
-    {
-      "source": "credentials.access_token.value",
-      "target": { "kind": "env", "name": "API_TOKEN" },
-      "required": false,
-      "redact": true
-    }
-  ],
-  "cleanup": "always"
-}
-```
-
-Bindings support `raw`, `json`, and `base64` formats. The `redact` flag ensures the credential value is replaced with `[REDACTED]` in audit output. Cleanup runs unconditionally (`always`) or on failure only, depending on the policy.
-
-### Evidence and attestation
-
-After execution, evidence providers produce cryptographic proof binding the execution identity, command, and result into a verifiable record.
-
-```json
-"evidence_profiles": [
-  {
-    "id": "ssh-evidence",
-    "provider": "ssh",
-    "payload": {
-      "bind": ["execution_id", "declared_identity", "contract", "command", "result"],
-      "format": "canonical-json"
-    }
-  }
-]
-```
-
-Evidence payloads are signed using the configured provider (e.g., SSH keys) and can be independently verified with `agentcli verify`.
-
-### Authorization
-
-Optional external authorization providers evaluate policy before execution. Authorization requests include structured context (identity, contract, command, trust level) that policy engines can evaluate.
-
-Authorization decisions are normalized to three outcomes: `permit`, `deny`, or `require-escalation`. Unmapped provider responses default to `deny`.
-
-### Audit records
-
-Every execution produces a structured, append-only audit record. Records include the declared identity, resolved trust level, contract, command hash, execution result, and evidence reference. Raw secrets are never written to the audit log.
-
-```bash
-# View recent audit records
-agentcli audit --limit 5
-
-# Verify a specific execution
-agentcli verify <execution-id> --allowed-signers ~/.ssh/allowed_signers
-```
+For the full guide: [Identity Setup](docs/guide-identity.md) | [Wrapping CLI Tools](docs/guide-wrapping-tools.md) | [Spec Reference](docs/spec.md)
 
 ## Identity Providers
 
