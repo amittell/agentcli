@@ -102,6 +102,18 @@ agentcli exec examples/flyctl-ops.json check-app-status --dry-run --identity-deb
 agentcli compile examples/flyctl-ops.json --target openclaw-scheduler --explain
 ```
 
+[stripe-ops.json](examples/stripe-ops.json) wraps the Stripe CLI with three operations: list recent charges, check balance, and list failed payment intents. It binds `STRIPE_API_KEY` through an identity profile with strict trust enforcement, parses JSON output, generates SSH evidence, and escalates API failures into an agent-based triage step.
+
+```bash
+export STRIPE_API_KEY="sk_test_..."
+agentcli validate examples/stripe-ops.json
+agentcli exec examples/stripe-ops.json check-balance --signer none
+agentcli exec examples/stripe-ops.json list-recent-charges --signer none
+agentcli audit --limit 3
+```
+
+The same pattern works for any CLI tool that reads credentials from the environment: `kubectl` with `KUBECONFIG`, `gh` with `GH_TOKEN`, `terraform` with `TF_TOKEN_app_terraform_io`, `aws` with `AWS_ACCESS_KEY_ID`, and so on. Put the tool invocation in `shell`, bind the credential through an identity profile, and `agentcli` handles the rest.
+
 If the tool only needs a direct wrapper, you can also scaffold the starting point with:
 
 ```bash
