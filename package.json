@@ -1,5 +1,5 @@
 {
-  "name": "agentcli",
+  "name": "@amittell/agentcli",
   "version": "0.2.0",
   "description": "Agent-native workflow manifest CLI, schema, and protocol surface for standalone planning and backend compilation.",
   "type": "module",
