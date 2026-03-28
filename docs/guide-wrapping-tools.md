@@ -484,6 +484,78 @@ agentcli exec examples/psql-ops.json table-sizes --signer none
 agentcli whoami examples/psql-ops.json run-migration
 ```
 
+### npm ([npm-ops.json](../examples/npm-ops.json))
+
+**What it wraps**: A Node.js project lifecycle: dependency installation, test
+execution, production build, security audit, and dependency freshness checks.
+
+**What agentcli adds**: The install/test/build pipeline is a trigger chain --
+tests only run if install succeeds, build only runs if tests pass. This means a
+failed `npm install` never triggers a build, and the failure is recorded with
+identity provenance. Tests run under a `network: "restricted"` contract because
+unit tests should not make external HTTP calls. The build step generates SSH
+evidence, creating a verifiable record of what was built and when.
+
+**Key pattern**: Trigger chaining turns `npm install && npm test && npm run build`
+from a fragile shell pipeline into a declarative, auditable workflow. Each step
+has its own audit record, trust evaluation, and failure handling. The test failure
+triage handler diagnoses whether the failure is a dependency issue, a test
+regression, or an environment problem.
+
+```bash
+agentcli exec examples/npm-ops.json install --signer none
+agentcli exec examples/npm-ops.json audit --signer none
+agentcli exec examples/npm-ops.json outdated --signer none
+```
+
+### git ([git-ops.json](../examples/git-ops.json))
+
+**What it wraps**: Git operations: working tree status, commit history, diffs,
+automated commits, and pushing to remote.
+
+**What agentcli adds**: Read operations (status, log, diff) run under a
+`restricted` identity that cannot push. The commit and push operations require
+`supervised` trust. Push has `strict` enforcement -- a `restricted` agent
+literally cannot push code even if it has access to the repository. Push generates
+SSH evidence so there is a signed attestation of what was pushed and by which
+agent principal. Commit failure triage diagnoses merge conflicts, empty commits,
+and dirty index issues.
+
+**Key pattern**: Agents commit and push code constantly. Without agentcli, there
+is no record of which agent principal pushed, what trust level it operated at, or
+whether the push was authorized. With agentcli, every push has a verifiable
+identity, trust evaluation, and evidence record.
+
+```bash
+agentcli exec examples/git-ops.json status --signer none
+agentcli exec examples/git-ops.json diff --signer none
+agentcli whoami examples/git-ops.json push
+```
+
+### ssh ([ssh-remote.json](../examples/ssh-remote.json))
+
+**What it wraps**: Remote server operations via SSH: uptime checks, disk usage,
+memory monitoring, service restarts, and log tailing.
+
+**What agentcli adds**: Monitoring tasks (uptime, disk, memory) run under a
+`restricted` identity. The `deploy-update` task (`systemctl restart`) requires
+`supervised` trust with `strict` enforcement because restarting a service is
+disruptive. After a restart, `tail-logs` triggers automatically with a 10-second
+delay to verify the service came back up. All commands use `-o BatchMode=yes` to
+prevent interactive prompts that would hang an agent.
+
+**Key pattern**: SSH gives agents root-equivalent access to remote servers. agentcli
+adds the governance layer that SSH itself does not provide: who connected, what
+trust level they had, whether the contract allowed the operation, and a signed
+evidence record of what happened. The `restricted`/`supervised` split means a
+monitoring agent cannot accidentally restart services.
+
+```bash
+agentcli exec examples/ssh-remote.json check-uptime --signer none
+agentcli exec examples/ssh-remote.json check-disk --signer none
+agentcli whoami examples/ssh-remote.json deploy-update
+```
+
 ## Why the manifest matters
 
 Without a manifest, a deployment is a shell script. Shell scripts work, but they have no intrinsic concept of identity, trust, or evidence. When something goes wrong at 2am, you are left searching shell history and log files to reconstruct what happened.

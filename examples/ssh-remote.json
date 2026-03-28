@@ -1,0 +1,139 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "ssh-monitor",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/ssh-monitor",
+        "display_name": "SSH Monitor Agent"
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      }
+    },
+    {
+      "id": "ssh-deploy",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/ssh-deploy",
+        "display_name": "SSH Deploy Agent"
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "ssh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "ssh-remote",
+      "name": "SSH Remote Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "check-uptime",
+          "name": "Check Remote Uptime",
+          "shell": {
+            "program": "ssh",
+            "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "uptime"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "ssh-monitor" },
+          "output": { "format": "text", "preview_bytes": 1000 },
+          "schedule": { "cron": "*/5 * * * *" }
+        },
+        {
+          "id": "check-disk",
+          "name": "Check Remote Disk Usage",
+          "shell": {
+            "program": "ssh",
+            "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "df", "-h"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "ssh-monitor" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "check-memory",
+          "name": "Check Remote Memory Usage",
+          "shell": {
+            "program": "ssh",
+            "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "free", "-m"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "ssh-monitor" },
+          "output": { "format": "text", "preview_bytes": 2000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "deploy-update",
+          "name": "Restart Application Service",
+          "shell": {
+            "program": "ssh",
+            "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "sudo", "systemctl", "restart", "myapp"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "ssh-deploy" },
+          "evidence": { "ref": "ssh-evidence" },
+          "output": { "format": "text", "preview_bytes": 2000 },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "0 3 * * *" },
+          "on_failure": {
+            "id": "triage-deploy-failure",
+            "name": "Triage Deploy Failure",
+            "prompt": "The remote service restart failed. Determine whether this is an SSH connectivity issue, a systemd unit failure, a permissions problem, or a service dependency error, and recommend the safest recovery step.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "tail-logs",
+          "name": "Tail Application Logs",
+          "shell": {
+            "program": "ssh",
+            "args": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "user@host", "journalctl", "-u", "myapp", "-n", "50", "--no-pager"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "ssh-monitor" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "trigger": {
+            "parent": "deploy-update",
+            "on": "success",
+            "delay_s": 10
+          }
+        }
+      ]
+    }
+  ]
+}

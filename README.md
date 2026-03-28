@@ -440,6 +440,9 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [gcloud-ops.json](examples/gcloud-ops.json) | Google Cloud: identity check, compute instances, GKE clusters, and billing with evidence on all tasks. |
 | [curl-api.json](examples/curl-api.json) | Generic REST API operations: health checks, authenticated data fetch, and webhook posts with token binding. |
 | [psql-ops.json](examples/psql-ops.json) | PostgreSQL: connection check, table sizes, active queries, and migrations with strict trust and approval. |
+| [npm-ops.json](examples/npm-ops.json) | Node.js lifecycle: trigger-chained install/test/build pipeline, security audit, and outdated checks. |
+| [git-ops.json](examples/git-ops.json) | Git operations: status, log, diff, commit, and push with strict trust enforcement on push. |
+| [ssh-remote.json](examples/ssh-remote.json) | SSH remote ops: uptime, disk, memory monitoring, service restart with approval, and log tailing. |
 
 ### Putting it together: a v0.2 manifest
 

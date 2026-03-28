@@ -1,0 +1,168 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "project-agent",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/npm-project",
+        "display_name": "NPM Project Agent"
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      }
+    },
+    {
+      "id": "registry-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/npm-registry",
+        "display_name": "NPM Registry Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": false,
+        "provider_config": {
+          "token_env": "NPM_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "NPM_TOKEN" },
+            "required": false,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "npm-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "npm-ops",
+      "name": "NPM Project Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "install",
+          "name": "Install Dependencies",
+          "shell": {
+            "program": "npm",
+            "args": ["install", "--no-audit"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "project-agent" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 8 * * 1-5" }
+        },
+        {
+          "id": "test",
+          "name": "Run Test Suite",
+          "shell": {
+            "program": "npm",
+            "args": ["test"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "project-agent" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "contract": {
+            "network": "restricted"
+          },
+          "trigger": {
+            "parent": "install",
+            "on": "success"
+          },
+          "on_failure": {
+            "id": "triage-test-failure",
+            "name": "Triage Test Failure",
+            "prompt": "The npm test suite failed. Analyze the test output to determine whether this is a failing assertion, a missing dependency, an environment configuration issue, or a timeout, and recommend the safest next step.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "build",
+          "name": "Build Project",
+          "shell": {
+            "program": "npm",
+            "args": ["run", "build"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "project-agent" },
+          "evidence": { "ref": "npm-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "trigger": {
+            "parent": "test",
+            "on": "success"
+          }
+        },
+        {
+          "id": "audit",
+          "name": "Security Audit",
+          "shell": {
+            "program": "npm",
+            "args": ["audit", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "registry-credentials" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 6 * * *" }
+        },
+        {
+          "id": "outdated",
+          "name": "Check Outdated Dependencies",
+          "shell": {
+            "program": "npm",
+            "args": ["outdated", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "registry-credentials" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 7 * * 1" }
+        }
+      ]
+    }
+  ]
+}
