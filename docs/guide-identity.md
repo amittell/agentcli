@@ -414,9 +414,11 @@ embedding them in the manifest:
 | `literal` | Inline value (use sparingly) | `{ "literal": "static-value" }` |
 | `command` | Run a shell command and capture stdout | `{ "command": "vault kv get -field=token secret/app" }` |
 
-The `command` source runs the specified string through `sh -c` with a 30-second
-timeout. It captures stdout, trims whitespace, and returns the result. If the
-command fails (non-zero exit), the value resolves to null.
+The `command` source runs the specified string through the platform shell with a
+30-second timeout. On Unix-like hosts this uses `sh -c`; on Windows it uses
+`cmd.exe /d /s /c`. It captures stdout, trims whitespace, resolves relative
+paths from the current working directory, and returns the result. If the command
+fails (non-zero exit), the value resolves to null.
 
 ### When to use `command`
 

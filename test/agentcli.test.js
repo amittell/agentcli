@@ -1051,6 +1051,51 @@ test('applyManifestToScheduler adopt-by-name matches existing job by name and re
   assert.ok(createCall, 'addJob should have been called for the unmatched job');
 });
 
+test('applyManifestToScheduler adopt-by-name rolls back the created stable row when legacy delete fails', async () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const stableJob = compiled.jobs[0];
+  const legacyId = 'legacy-uuid-delete-fails';
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [{ ...stableJob, id: legacyId, origin: 'telegram:123' }];
+    },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update during adoption rollback test');
+    },
+    deleteJob(id) {
+      calls.push({ action: 'delete', id });
+      if (id === legacyId) {
+        throw Object.assign(new Error('delete failed'), { code: 'scheduler_error' });
+      }
+      return { ok: true };
+    }
+  };
+
+  await assert.rejects(
+    () => applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' }),
+    (err) => {
+      assert.equal(err.code, 'scheduler_error');
+      assert.match(err.message, /rolled back/);
+      return true;
+    }
+  );
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].action, 'create');
+  assert.equal(calls[0].spec.id, stableJob.id);
+  assert.equal(calls[0].spec.origin, 'telegram:123');
+  assert.equal(calls[1].action, 'delete');
+  assert.equal(calls[1].id, legacyId);
+  assert.equal(calls[2].action, 'delete');
+  assert.equal(calls[2].id, stableJob.id);
+});
+
 test('applyManifestToScheduler adopt-by-name creates when no name matches', async () => {
   const calls = [];
   const runner = {

@@ -400,7 +400,28 @@ export async function applyManifestToScheduler(
         schedulerRunner.addJob(
           schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system' })
         );
-        schedulerRunner.deleteJob(existingId);
+        try {
+          schedulerRunner.deleteJob(existingId);
+        } catch (err) {
+          try {
+            schedulerRunner.deleteJob(job.id);
+          } catch (rollbackErr) {
+            throw Object.assign(
+              new Error(
+                `Failed to adopt legacy row "${existingId}" to stable id "${job.id}": ` +
+                `legacy delete failed after create, and rollback delete also failed. Manual cleanup may be required.`
+              ),
+              { code: 'scheduler_error', cause: err, rollbackCause: rollbackErr }
+            );
+          }
+          throw Object.assign(
+            new Error(
+              `Failed to adopt legacy row "${existingId}" to stable id "${job.id}": ` +
+              'legacy delete failed after create, but the created stable row was rolled back.'
+            ),
+            { code: 'scheduler_error', cause: err }
+          );
+        }
       }
     }
 

@@ -63,7 +63,7 @@ Purpose:
 
 Result:
 
-- `{ "ok": true, "package_version": "0.1.0", "manifest_version": "0.1" }`
+- `{ "ok": true, "package_version": "0.2.0", "manifest_version": "0.2" }`
 
 ### `agentcli.schema`
 
@@ -124,7 +124,10 @@ Params:
 
 Result:
 
-- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "name": "...", "invocation_mode": "schedule|trigger" }], "explain": [...] }`
+- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
+- `adopted_from_job_id` is present only when `action` is `"adopted"`
+- `authorization_proof_verification` is present on an action when local proof verification was performed for that compiled execution unit
+- `authorization_proof_verifications` is present only when `apply` performed local proof verification because the target backend does not advertise `authorization_proof_verification`
 - `explain` is present only when the `explain` param is `true`
 - intended for the `openclaw-scheduler` backend
 

@@ -2,18 +2,24 @@
 
 ## Current Versions
 
-- package version: `0.1.0`
-- manifest spec version: `0.1`
-- protocol status: draft, aligned to manifest spec `0.1`
+- package version: `0.2.0`
+- manifest spec version: `0.2`
+- protocol status: draft, aligned to manifest spec `0.2`
 
 ## Compatibility Rules
 
-Within manifest spec `0.1`:
+Within manifest spec `0.2`:
 
 - existing required fields MUST keep their meaning
 - validation MAY become stricter only when rejecting clearly invalid or unsafe input
 - new optional fields MAY be added
 - existing optional fields MUST NOT change meaning incompatibly
+
+Backward compatibility for `0.1` remains part of the current release surface:
+
+- validators accept both `0.1` and `0.2`
+- `0.2` is the canonical discovery and schema version reported by `agentcli version`, `agentcli schema manifest`, and JSON-RPC `agentcli.version`
+- existing `0.1` manifests remain executable through the preserved legacy execution path
 
 ## Breaking Changes
 
