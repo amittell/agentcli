@@ -28,7 +28,10 @@
         "bindings": [
           {
             "source": "credentials.access_token.value",
-            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "target": {
+              "kind": "env",
+              "name": "DATABASE_URL"
+            },
             "required": true,
             "redact": true
           }
@@ -64,7 +67,10 @@
         "bindings": [
           {
             "source": "credentials.access_token.value",
-            "target": { "kind": "env", "name": "DATABASE_URL" },
+            "target": {
+              "kind": "env",
+              "name": "DATABASE_URL"
+            },
             "required": true,
             "redact": true
           }
@@ -79,10 +85,17 @@
       "id": "db-evidence",
       "provider": "ssh",
       "payload": {
-        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "command",
+          "result"
+        ],
         "format": "canonical-json"
       },
-      "verify": { "required": false }
+      "verify": {
+        "required": false
+      }
     }
   ],
   "workflows": [
@@ -99,63 +112,95 @@
           "id": "check-connection",
           "name": "Check Database Connection",
           "shell": {
-            "program": "psql",
-            "args": ["-c", "SELECT 1 AS connected", "-t"]
+            "program": "sh",
+            "args": [
+              "-c",
+              "psql \"$DATABASE_URL\" -t -c 'SELECT 1 AS connected'"
+            ]
           },
-          "target": { "session_target": "shell" },
-          "identity": { "ref": "db-readonly" },
-          "output": { "format": "text" },
-          "schedule": { "cron": "*/10 * * * *" }
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "db-readonly"
+          },
+          "output": {
+            "format": "text"
+          },
+          "schedule": {
+            "cron": "*/10 * * * *"
+          }
         },
         {
           "id": "table-sizes",
           "name": "Report Table Sizes",
           "shell": {
-            "program": "psql",
+            "program": "sh",
             "args": [
               "-c",
-              "SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC LIMIT 20",
-              "--csv"
+              "psql \"$DATABASE_URL\" --csv -c 'SELECT tablename, pg_size_pretty(pg_total_relation_size(tablename::regclass)) AS size FROM pg_tables WHERE schemaname = current_schema() ORDER BY pg_total_relation_size(tablename::regclass) DESC LIMIT 20'"
             ]
           },
-          "target": { "session_target": "shell" },
-          "identity": { "ref": "db-readonly" },
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "db-readonly"
+          },
           "output": {
             "format": "text",
             "preview_bytes": 4000
           },
-          "schedule": { "cron": "0 8 * * *" }
+          "schedule": {
+            "cron": "0 8 * * *"
+          }
         },
         {
           "id": "active-queries",
           "name": "List Active Queries",
           "shell": {
-            "program": "psql",
+            "program": "sh",
             "args": [
               "-c",
-              "SELECT pid, state, query_start, query FROM pg_stat_activity WHERE state != 'idle' ORDER BY query_start",
-              "--csv"
+              "psql \"$DATABASE_URL\" --csv -c 'SELECT pid, state, query_start, left(query, 80) AS query FROM pg_stat_activity WHERE state = ANY(ARRAY[$$active$$, $$idle in transaction$$]) ORDER BY query_start'"
             ]
           },
-          "target": { "session_target": "shell" },
-          "identity": { "ref": "db-readonly" },
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "db-readonly"
+          },
           "output": {
             "format": "text",
             "preview_bytes": 8000
           },
-          "schedule": { "cron": "*/5 * * * *" }
+          "schedule": {
+            "cron": "*/5 * * * *"
+          }
         },
         {
           "id": "run-migration",
           "name": "Run Database Migration",
           "shell": {
-            "program": "psql",
-            "args": ["-f", "migrations/latest.sql"]
+            "program": "sh",
+            "args": [
+              "-c",
+              "psql \"$DATABASE_URL\" -f migrations/latest.sql"
+            ]
           },
-          "target": { "session_target": "shell" },
-          "identity": { "ref": "db-migrate" },
-          "evidence": { "ref": "db-evidence" },
-          "output": { "format": "text" },
+          "target": {
+            "session_target": "shell"
+          },
+          "identity": {
+            "ref": "db-migrate"
+          },
+          "evidence": {
+            "ref": "db-evidence"
+          },
+          "output": {
+            "format": "text"
+          },
           "contract": {
             "required_trust_level": "supervised",
             "trust_enforcement": "strict"
@@ -165,7 +210,9 @@
             "policy": "manual",
             "risk_level": "high"
           },
-          "schedule": { "cron": "0 3 * * 0" }
+          "schedule": {
+            "cron": "0 3 * * 0"
+          }
         }
       ]
     }
