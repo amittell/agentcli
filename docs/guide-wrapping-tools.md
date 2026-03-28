@@ -268,6 +268,64 @@ pipeline with three separate identities, trust enforcement, evidence, and failur
 triage at each stage. See [the full pipeline walkthrough](#full-stack-deployment-example)
 at the top of this guide.
 
+## agentcli + AWS CLI
+
+[aws-ops.json](../examples/aws-ops.json) wraps the AWS CLI for infrastructure
+monitoring: caller identity checks, S3 bucket listing, EC2 instance inventory,
+CloudWatch alarm monitoring, and cost estimates.
+
+AWS credentials flow through the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+environment variables. The AWS CLI reads these automatically, so agentcli does not need
+to inject them via presentation bindings -- they are already in the environment. The
+example uses the `none` identity provider for read-only operations because the
+credentials are pre-configured in `~/.aws/credentials` or the environment.
+
+```bash
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="..."
+
+agentcli exec examples/aws-ops.json check-identity --signer none
+agentcli exec examples/aws-ops.json list-s3-buckets --signer none
+agentcli audit --limit 3
+```
+
+What agentcli adds on top of the AWS CLI:
+
+- **Audit trail for every AWS API call**: each `aws` invocation produces an audit record
+  with the identity principal, trust level, command hash, and result. When an IAM
+  permission denial happens (exit code 254), the failure is recorded with the same
+  provenance as a success.
+- **Trust enforcement**: the cost estimate task requires `restricted` trust with `strict`
+  enforcement, so only agents with at least `restricted` trust can check billing data.
+- **Failure triage**: the CloudWatch alarm check has an on-failure handler that delegates
+  to an agent for read-only diagnosis.
+- **Evidence**: SSH-signed attestation binds the AWS CLI command and its output to a
+  verifiable execution record.
+
+For environments where AWS credentials should be acquired dynamically (e.g., from
+a role or SSM), use `value_from: { command }`:
+
+```json
+"value_from": {
+  "command": "aws ssm get-parameter --name /app/secret --with-decryption --query Parameter.Value --output text"
+}
+```
+
+Or use the built-in `aws-sts-assume-role` identity provider for role-based access:
+
+```json
+{
+  "id": "aws-role",
+  "provider": "aws-sts-assume-role",
+  "auth": {
+    "provider_config": {
+      "role_arn": "arn:aws:iam::123456789012:role/deploy-role",
+      "region": "us-east-1"
+    }
+  }
+}
+```
+
 ## Wrapping other tools
 
 The pattern generalizes to any CLI tool that reads credentials from the environment.

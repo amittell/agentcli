@@ -432,6 +432,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [stripe-ops.json](examples/stripe-ops.json) | Wrapping the Stripe CLI with API key binding, JSON output parsing, evidence, and failure triage. |
 | [stripe-projects.json](examples/stripe-projects.json) | Wrapping [Stripe Projects](https://projects.dev): credential sync, status checks, and database migrations with two identity profiles at different trust levels. |
 | [full-stack-deploy.json](examples/full-stack-deploy.json) | Full deployment pipeline chaining Stripe, Prisma, and Fly.io with three identities, trust enforcement, evidence, and failure triage. |
+| [aws-ops.json](examples/aws-ops.json) | AWS infrastructure monitoring: caller identity, S3 buckets, EC2 instances, CloudWatch alarms, and cost estimates with trust enforcement. |
 
 ### Putting it together: a v0.2 manifest
 
