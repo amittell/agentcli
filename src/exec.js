@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import { validateManifest } from './validate.js';
+import { resolveCommandValue } from './command.js';
 import { expandManifestShorthands } from './shorthand.js';
 import { normalizeShellExecution } from './shell.js';
 import {
@@ -98,7 +99,7 @@ function resolvePrincipal(identity) {
  * @param {object} envObj    - Environment variable map.
  * @returns {string|null} The resolved value, or null if unresolvable.
  */
-function resolveValueFrom(valueFrom, envObj) {
+function resolveValueFrom(valueFrom, envObj, { cwd = process.cwd() } = {}) {
   if (!valueFrom) return null;
   if (valueFrom.env) return envObj[valueFrom.env] || null;
   if (valueFrom.file) {
@@ -107,20 +108,7 @@ function resolveValueFrom(valueFrom, envObj) {
   }
   if (valueFrom.literal) return valueFrom.literal;
   if (valueFrom.command) {
-    try {
-      const result = spawnSync('sh', ['-c', valueFrom.command], {
-        encoding: 'utf8',
-        timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: envObj,
-      });
-      if (result.status === 0 && result.stdout) {
-        return result.stdout.trim();
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return resolveCommandValue(valueFrom.command, { env: envObj, cwd });
   }
   return null;
 }
@@ -590,7 +578,7 @@ async function executeV2(common, {
 
       let proofValue = null;
       if (authorizationProofDeclaration.proof?.value_from) {
-        proofValue = resolveValueFrom(authorizationProofDeclaration.proof.value_from, env);
+        proofValue = resolveValueFrom(authorizationProofDeclaration.proof.value_from, env, { cwd });
       }
 
       if (proofValue) {
@@ -667,7 +655,7 @@ async function executeV2(common, {
       identityProviderInstance = idProvider;
 
       try {
-        identitySession = await idProvider.resolveSession({ profile: identityDeclaration, instanceId }, { env });
+        identitySession = await idProvider.resolveSession({ profile: identityDeclaration, instanceId }, { env, cwd });
         resolvedIdentity = idProvider.describeSession(identitySession, { env });
       } catch (resolveError) {
         // Write resolution failure audit record

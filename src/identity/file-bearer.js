@@ -11,7 +11,8 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import process from 'node:process';
+import { resolveCommandValue } from '../command.js';
 import { registerProvider } from './index.js';
 import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
 
@@ -36,7 +37,7 @@ function tempFilePath(prefix) {
  * @param {object} env       - Environment variables object.
  * @returns {string|undefined} The resolved value, or undefined.
  */
-function resolveValueFrom(valueFrom, env) {
+function resolveValueFrom(valueFrom, env, { cwd = process.cwd() } = {}) {
   if (!valueFrom || typeof valueFrom !== 'object') return undefined;
   if (valueFrom.env) {
     const val = env[valueFrom.env];
@@ -50,20 +51,7 @@ function resolveValueFrom(valueFrom, env) {
     }
   }
   if (valueFrom.command) {
-    try {
-      const result = spawnSync('sh', ['-c', valueFrom.command], {
-        encoding: 'utf8',
-        timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env,
-      });
-      if (result.status === 0 && result.stdout) {
-        return result.stdout.trim();
-      }
-      return undefined;
-    } catch {
-      return undefined;
-    }
+    return resolveCommandValue(valueFrom.command, { env, cwd }) ?? undefined;
   }
   return undefined;
 }
@@ -160,6 +148,7 @@ const fileBearerProvider = {
    */
   resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
+    const cwd = (ctx && ctx.cwd) || process.cwd();
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const inputs = (profile.auth && profile.auth.inputs) || {};
@@ -169,7 +158,7 @@ const fileBearerProvider = {
     let tokenFilePath = providerConfig.token_file || undefined;
 
     if (!tokenFilePath && inputs.token_file && inputs.token_file.value_from) {
-      tokenFilePath = resolveValueFrom(inputs.token_file.value_from, env);
+      tokenFilePath = resolveValueFrom(inputs.token_file.value_from, env, { cwd });
     }
 
     if (!tokenFilePath || typeof tokenFilePath !== 'string' || tokenFilePath.length === 0) {

@@ -10,7 +10,8 @@ import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import process from 'node:process';
+import { resolveCommandValue } from '../command.js';
 import { registerProvider } from './index.js';
 import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
 
@@ -23,7 +24,7 @@ import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary }
  * @param {object} [env]     - Environment variable map, defaults to process.env.
  * @returns {string|null} The resolved value, or null if unresolvable.
  */
-function resolveValueFrom(valueFrom, env = process.env) {
+function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd() } = {}) {
   if (!valueFrom) return null;
   if (valueFrom.env) {
     return env[valueFrom.env] || null;
@@ -36,20 +37,7 @@ function resolveValueFrom(valueFrom, env = process.env) {
     }
   }
   if (valueFrom.command) {
-    try {
-      const result = spawnSync('sh', ['-c', valueFrom.command], {
-        encoding: 'utf8',
-        timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env,
-      });
-      if (result.status === 0 && result.stdout) {
-        return result.stdout.trim();
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return resolveCommandValue(valueFrom.command, { env, cwd });
   }
   return null;
 }
@@ -64,7 +52,7 @@ function resolveValueFrom(valueFrom, env = process.env) {
  * @param {object} env     - Environment variable map.
  * @returns {string|null} The resolved client secret, or null if unresolvable.
  */
-function resolveClientSecret(profile, env) {
+function resolveClientSecret(profile, env, cwd) {
   const providerConfig = (profile.auth && profile.auth.provider_config) || {};
   const inputs = (profile.auth && profile.auth.inputs) || {};
 
@@ -75,13 +63,13 @@ function resolveClientSecret(profile, env) {
 
   // provider_config.client_secret: value_from object
   if (providerConfig.client_secret && typeof providerConfig.client_secret === 'object' && providerConfig.client_secret.value_from) {
-    const resolved = resolveValueFrom(providerConfig.client_secret.value_from, env);
+    const resolved = resolveValueFrom(providerConfig.client_secret.value_from, env, { cwd });
     if (resolved) return resolved;
   }
 
   // inputs.client_secret.value_from
   if (inputs.client_secret && inputs.client_secret.value_from) {
-    const resolved = resolveValueFrom(inputs.client_secret.value_from, env);
+    const resolved = resolveValueFrom(inputs.client_secret.value_from, env, { cwd });
     if (resolved) return resolved;
   }
 
@@ -179,6 +167,7 @@ const oidcClientCredentialsProvider = {
    */
   async resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
+    const cwd = (ctx && ctx.cwd) || process.cwd();
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const auth = profile.auth || {};
@@ -186,7 +175,7 @@ const oidcClientCredentialsProvider = {
 
     const tokenEndpoint = providerConfig.token_endpoint;
     const clientId = providerConfig.client_id;
-    const clientSecret = resolveClientSecret(profile, env);
+    const clientSecret = resolveClientSecret(profile, env, cwd);
 
     const trustLevel = (profile.trust && profile.trust.level) || 'supervised';
     const subject = profile.subject || {};

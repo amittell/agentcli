@@ -16,7 +16,8 @@ import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import process from 'node:process';
+import { resolveCommandValue } from '../command.js';
 import { registerProvider } from './index.js';
 import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
 
@@ -50,7 +51,7 @@ function isValidGuidIfApplicable(value) {
  * @param {object} [env]     - Environment variable map, defaults to process.env.
  * @returns {string|null} The resolved value, or null if unresolvable.
  */
-function resolveValueFrom(valueFrom, env = process.env) {
+function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd() } = {}) {
   if (!valueFrom) return null;
   if (valueFrom.env) {
     return env[valueFrom.env] || null;
@@ -63,20 +64,7 @@ function resolveValueFrom(valueFrom, env = process.env) {
     }
   }
   if (valueFrom.command) {
-    try {
-      const result = spawnSync('sh', ['-c', valueFrom.command], {
-        encoding: 'utf8',
-        timeout: 30000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env,
-      });
-      if (result.status === 0 && result.stdout) {
-        return result.stdout.trim();
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return resolveCommandValue(valueFrom.command, { env, cwd });
   }
   return null;
 }
@@ -96,7 +84,7 @@ function resolveValueFrom(valueFrom, env = process.env) {
  * @param {string} blueprintAppId - The blueprint application ID (used for IMDS resource).
  * @returns {Promise<string|null>} The resolved client assertion, or null.
  */
-async function resolveClientAssertion(profile, env, blueprintAppId) {
+async function resolveClientAssertion(profile, env, blueprintAppId, cwd) {
   // 1. Environment variable
   const envAssertion = env.AGENTCLI_ENTRA_CLIENT_ASSERTION;
   if (typeof envAssertion === 'string' && envAssertion.length > 0) {
@@ -108,7 +96,7 @@ async function resolveClientAssertion(profile, env, blueprintAppId) {
 
   // 2. inputs.client_assertion.value_from
   if (inputs.client_assertion && inputs.client_assertion.value_from) {
-    const resolved = resolveValueFrom(inputs.client_assertion.value_from, env);
+    const resolved = resolveValueFrom(inputs.client_assertion.value_from, env, { cwd });
     if (resolved) return resolved;
   }
 
@@ -117,7 +105,7 @@ async function resolveClientAssertion(profile, env, blueprintAppId) {
     return providerConfig.client_assertion;
   }
   if (providerConfig.client_assertion && typeof providerConfig.client_assertion === 'object' && providerConfig.client_assertion.value_from) {
-    const resolved = resolveValueFrom(providerConfig.client_assertion.value_from, env);
+    const resolved = resolveValueFrom(providerConfig.client_assertion.value_from, env, { cwd });
     if (resolved) return resolved;
   }
 
@@ -288,6 +276,7 @@ const entraAgentIdProvider = {
    */
   async resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
+    const cwd = (ctx && ctx.cwd) || process.cwd();
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const auth = profile.auth || {};
@@ -304,7 +293,7 @@ const entraAgentIdProvider = {
     const subject = profile.subject || {};
 
     // 1. Resolve client assertion
-    const clientAssertion = await resolveClientAssertion(profile, env, blueprintAppId);
+    const clientAssertion = await resolveClientAssertion(profile, env, blueprintAppId, cwd);
 
     if (!clientAssertion) {
       const err = new Error(

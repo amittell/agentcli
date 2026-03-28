@@ -20,6 +20,7 @@ import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
 import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation } from '../src/apply.js';
+import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
@@ -6394,6 +6395,20 @@ test('shellCommandInvocation uses cmd.exe on Windows and sh elsewhere', () => {
   );
 });
 
+test('resolveCommandValue runs relative commands from the provided cwd', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-command-cwd-'));
+  const scriptPath = join(workdir, 'emit.js');
+  writeFileSync(scriptPath, 'process.stdout.write("resolved-from-cwd")\n');
+
+  try {
+    const command = `"${process.execPath}" emit.js`;
+    const resolved = resolveCommandValue(command, { cwd: workdir, env: process.env });
+    assert.strictEqual(resolved, 'resolved-from-cwd');
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test('applyManifestToScheduler returns authorization proof verification summaries', async () => {
   const calls = [];
   const runner = {
@@ -6470,6 +6485,64 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs', a
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
   assert.strictEqual('authorization_proof' in calls[0], false);
+});
+
+test('applyManifestToScheduler resolves command-sourced authorization proofs relative to cwd', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-apply-proof-cwd-'));
+  const scriptPath = join(workdir, 'emit.js');
+  const token = unsignedJwt({ sub: 'agentcli-proof' });
+  writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
+
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() {
+      throw new Error('should not update jobs');
+    }
+  };
+
+  try {
+    const result = await applyManifestToScheduler({
+      version: '0.2',
+      authorization_proof_profiles: [{
+        id: 'jwt-proof',
+        method: 'jwt',
+        proof: { value_from: { command: `"${process.execPath}" emit.js` } },
+        claims: { subject: 'agentcli-proof' },
+        verify: { required: true }
+      }],
+      workflows: [{
+        id: 'apply-proof-command-cwd',
+        name: 'Apply Proof Command CWD',
+        authorization_proof: { ref: 'jwt-proof' },
+        tasks: [{
+          id: 'verify-me',
+          name: 'Verify Me',
+          target: { session_target: 'shell' },
+          shell: { program: 'echo', args: ['apply-proof'] },
+          schedule: { cron: '0 * * * *' }
+        }]
+      }]
+    }, {
+      runner,
+      cwd: workdir,
+      env: process.env
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.authorization_proof_verifications.length, 1);
+    assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
+    assert.strictEqual('authorization_proof' in calls[0], false);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test('applyManifestToScheduler verifies literal authorization proofs without persisting them', async () => {
@@ -7211,5 +7284,86 @@ test('v0.2 exec with file-bearer reads token from file', async () => {
     assert.strictEqual(result.result.stdout, 'file-bearer-secret-42');
   } finally {
     try { rmSync(tokenDir, { recursive: true }); } catch {}
+  }
+});
+
+test('file-bearer resolves command-sourced token file paths relative to ctx.cwd', async () => {
+  const { getProvider: getIdentityProvider } = await import('../src/identity/index.js');
+  await import('../src/identity/file-bearer.js');
+  const provider = getIdentityProvider('file-bearer');
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-file-bearer-cwd-'));
+  const tokenPath = join(workdir, 'token.txt');
+  const scriptPath = join(workdir, 'emit.js');
+  writeFileSync(tokenPath, 'command-file-bearer-secret', { mode: 0o600 });
+  writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(tokenPath)})\n`);
+
+  try {
+    const session = provider.resolveSession({
+      profile: {
+        subject: { kind: 'service', principal: 'agent://svc' },
+        auth: {
+          required: true,
+          inputs: {
+            token_file: {
+              value_from: {
+                command: `"${process.execPath}" emit.js`
+              }
+            }
+          }
+        },
+        trust: { level: 'restricted' }
+      }
+    }, { env: process.env, cwd: workdir });
+
+    assert.strictEqual(session.provider, 'file-bearer');
+    assert.strictEqual(session.credentials.access_token.value, 'command-file-bearer-secret');
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', async () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-proof-cwd-'));
+  const scriptPath = join(workdir, 'emit.js');
+  const token = unsignedJwt({ sub: 'agentcli-proof' });
+  writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
+
+  try {
+    const manifest = {
+      version: '0.2',
+      authorization_proof_profiles: [{
+        id: 'jwt-proof',
+        method: 'jwt',
+        proof: { value_from: { command: `"${process.execPath}" emit.js` } },
+        claims: { subject: 'agentcli-proof' },
+        verify: { required: true }
+      }],
+      workflows: [{
+        id: 'exec-proof-cwd',
+        name: 'Exec Proof CWD',
+        tasks: [{
+          id: 'verify-me',
+          name: 'Verify Me',
+          shell: { program: 'echo', args: ['apply-proof'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          authorization_proof: { ref: 'jwt-proof', verify: { required: true } }
+        }]
+      }]
+    };
+
+    const result = await executeTask(manifest, {
+      workflowId: 'exec-proof-cwd',
+      taskId: 'verify-me',
+      dryRun: true,
+      cwd: workdir,
+      signer: 'none'
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.authorization_proof.verified, true);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
   }
 });

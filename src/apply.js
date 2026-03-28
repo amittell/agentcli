@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
+import { resolveCommandValue } from './command.js';
 import {
   mergeAuthorizationProofProfile,
   normalizedTaskPlan,
@@ -8,22 +9,10 @@ import {
 } from './compiler/shared.js';
 import { expandManifestShorthands } from './shorthand.js';
 import { TARGETS } from './targets.js';
+export { shellCommandInvocation } from './command.js';
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
-export function shellCommandInvocation(command, platform = process.platform) {
-  if (platform === 'win32') {
-    return {
-      program: 'cmd.exe',
-      args: ['/d', '/s', '/c', command],
-    };
-  }
-  return {
-    program: 'sh',
-    args: ['-c', command],
-  };
 }
 
 function formatCommand(invocation, extraArgs = []) {
@@ -278,20 +267,7 @@ export async function applyManifestToScheduler(
       } else if (proof.proof?.value_from?.literal) {
         proofValue = proof.proof.value_from.literal;
       } else if (proof.proof?.value_from?.command) {
-        try {
-          const invocation = shellCommandInvocation(proof.proof.value_from.command);
-          const cmdResult = spawnSync(invocation.program, invocation.args, {
-            encoding: 'utf8',
-            timeout: 30000,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env,
-          });
-          if (cmdResult.status === 0 && cmdResult.stdout) {
-            proofValue = cmdResult.stdout.trim();
-          }
-        } catch {
-          proofValue = null;
-        }
+        proofValue = resolveCommandValue(proof.proof.value_from.command, { env, cwd });
       }
 
       if (!proofValue) {
