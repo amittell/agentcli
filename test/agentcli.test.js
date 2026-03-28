@@ -1157,7 +1157,7 @@ test('applyManifestToScheduler adopt-by-name rejects ambiguous existing schedule
   );
 });
 
-test('applyManifestToScheduler adopt-by-name updates stable rows and removes duplicate legacy name matches', async () => {
+test('applyManifestToScheduler adopt-by-name leaves same-name rows untouched once the stable id exists', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const stableJob = compiled.jobs[0];
   const legacyId = 'legacy-duplicate-0000';
@@ -1188,12 +1188,41 @@ test('applyManifestToScheduler adopt-by-name updates stable rows and removes dup
 
   assert.equal(result.ok, true);
   assert.equal(result.actions[0].action, 'updated');
-  assert.deepEqual(result.actions[0].removed_duplicate_job_ids, [legacyId]);
   assert.equal(calls[0].action, 'update');
   assert.equal(calls[0].id, stableJob.id);
-  assert.equal(calls[1].action, 'delete');
-  assert.equal(calls[1].id, legacyId);
+  assert.equal(calls.some(call => call.action === 'delete'), false);
   assert.ok(calls.some(call => call.action === 'create' && call.spec.id !== stableJob.id));
+});
+
+test('applyManifestToScheduler adopt-by-name does not require delete support when the stable id already exists', async () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  const stableJob = compiled.jobs[0];
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [
+        { ...stableJob, origin: 'system' },
+        { ...stableJob, id: 'same-name-manual', origin: 'telegram:123', payload_message: 'manual' },
+      ];
+    },
+    addJob(spec) {
+      calls.push({ action: 'create', spec });
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      calls.push({ action: 'update', id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner, adoptBy: 'name' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.actions[0].action, 'updated');
+  assert.equal(calls[0].action, 'update');
+  assert.equal(calls[0].id, stableJob.id);
+  assert.equal(calls.some(call => call.action === 'delete'), false);
 });
 
 test('applyManifestToScheduler adopt-by-name rejects duplicate compiled job names', async () => {

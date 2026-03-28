@@ -348,7 +348,12 @@ export async function applyManifestToScheduler(
     if (adoptBy === 'name') {
       const sameNameJobs = existingByName.get(job.name) || [];
       const exactMatch = existingById.get(job.id) || null;
-      duplicateLegacyJobs = sameNameJobs.filter(candidate => candidate.id !== job.id);
+
+      if (exactMatch) {
+        action = 'updated';
+      } else {
+        duplicateLegacyJobs = sameNameJobs;
+      }
 
       if (!exactMatch && duplicateLegacyJobs.length > 1) {
         throw Object.assign(
@@ -359,9 +364,7 @@ export async function applyManifestToScheduler(
         );
       }
 
-      if (exactMatch) {
-        action = 'updated';
-      } else {
+      if (!exactMatch) {
         existingJob = duplicateLegacyJobs[0];
         if (existingJob) {
           action = 'adopted';
@@ -383,19 +386,6 @@ export async function applyManifestToScheduler(
         schedulerRunner.addJob(schedulerCreateSpec(job));
       } else if (action === 'updated') {
         schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
-        if (duplicateLegacyJobs.length > 0) {
-          if (typeof schedulerRunner.deleteJob !== 'function') {
-            throw Object.assign(
-              new Error(
-                `Scheduler runner does not support deleteJob(); cannot reconcile duplicate legacy rows for "${job.name}"`
-              ),
-              { code: 'scheduler_error' }
-            );
-          }
-          for (const duplicateJob of duplicateLegacyJobs) {
-            schedulerRunner.deleteJob(duplicateJob.id);
-          }
-        }
       } else if (action === 'adopted') {
         if (typeof schedulerRunner.deleteJob !== 'function') {
           throw Object.assign(
@@ -414,9 +404,6 @@ export async function applyManifestToScheduler(
       action,
       job_id: job.id,
       ...(existingId ? { adopted_from_job_id: existingId } : {}),
-      ...(action === 'updated' && duplicateLegacyJobs.length > 0
-        ? { removed_duplicate_job_ids: duplicateLegacyJobs.map(candidate => candidate.id) }
-        : {}),
       name: job.name,
       invocation_mode: job.parent_id ? 'trigger' : 'schedule',
       ...(verificationEntry ? { authorization_proof_verification: verificationEntry.verification } : {})
