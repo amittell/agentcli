@@ -25,6 +25,7 @@
 | [Capabilities](capabilities.md) | Machine-readable feature matrix by target |
 | [Conformance](conformance.md) | Conformance profiles for implementers (A-D) |
 | [Adoption](adoption.md) | Integration paths, risks, and value proposition |
+| [Runtime Integration Backlog](runtime-integration-backlog.md) | Cross-repo implementation plan for agentcli, openclaw-scheduler, and OpenClaw |
 | [Roadmap](roadmap.md) | What shipped, what's next |
 | [Versioning](versioning.md) | Package version vs spec version rules |
 
