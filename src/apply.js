@@ -8,7 +8,11 @@ import {
   stableId
 } from './compiler/shared.js';
 import { expandManifestShorthands } from './shorthand.js';
-import { querySchedulerCapabilities, resolveEffectiveFeatures } from './capabilities.js';
+import {
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from './capabilities.js';
 import {
   SCHEDULER_FIELDS_V1,
   SCHEDULER_FIELDS_V02,
@@ -229,6 +233,13 @@ export async function applyManifestToScheduler(
   const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
   const effectiveFeatures = effectiveResult.features;
   const handoffVersion = effectiveResult.handoff_version || '1';
+  const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+  if (capabilityErrors.length > 0) {
+    throw Object.assign(
+      new Error(capabilityErrors.map(error => error.message).join('; ')),
+      { code: 'unsupported_capability', capability_errors: capabilityErrors }
+    );
+  }
 
   // v0.2: Authorization proof verification for backends lacking the capability
   if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {

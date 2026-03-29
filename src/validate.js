@@ -3,6 +3,7 @@ import { onFailureTaskId } from './shorthand.js';
 
 const SUPPORTED_VERSIONS = ['0.1', MANIFEST_VERSION];
 const TRUST_LEVELS = ['untrusted', 'restricted', 'supervised', 'autonomous'];
+const CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'];
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
@@ -15,7 +16,7 @@ const KNOWN_MANIFEST_KEYS = new Set([
 
 const KNOWN_WORKFLOW_KEYS = new Set([
   'id', 'name', 'model_policy', 'identity', 'contract', 'tasks',
-  'authorization_proof', 'authorization', 'evidence'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
 ]);
 
 const KNOWN_TASK_KEYS = new Set([
@@ -23,7 +24,7 @@ const KNOWN_TASK_KEYS = new Set([
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
   'identity', 'contract', 'on_failure', 'delete_after_run',
-  'authorization_proof', 'authorization', 'evidence'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
 ]);
 
 const KNOWN_ON_FAILURE_KEYS = new Set([
@@ -469,6 +470,10 @@ function validateContract(errors, path, value) {
   checkEnum(errors, `${path}.trust_enforcement`, value.trust_enforcement, ['none', 'advisory', 'strict']);
 }
 
+function validateChildCredentialPolicy(errors, path, value) {
+  checkEnum(errors, path, value, CHILD_CREDENTIAL_POLICIES);
+}
+
 function checkOptionalObject(errors, path, value) {
   if (value == null) return false;
   if (!isObject(value)) {
@@ -831,6 +836,7 @@ export function validateManifest(manifest) {
       if (checkOptionalObject(errors, `${workflowPath}.evidence`, workflow.evidence)) {
         validateEvidenceRef(errors, `${workflowPath}.evidence`, workflow.evidence);
       }
+      validateChildCredentialPolicy(errors, `${workflowPath}.child_credential_policy`, workflow.child_credential_policy);
       if (workflow.id) {
         if (workflowIds.has(workflow.id)) addError(errors, `${workflowPath}.id`, 'must be unique');
         workflowIds.add(workflow.id);
@@ -896,6 +902,7 @@ export function validateManifest(manifest) {
         }
 
         validateOptionalBlocks(errors, warnings, taskPath, task);
+        validateChildCredentialPolicy(errors, `${taskPath}.child_credential_policy`, task.child_credential_policy);
         if (task.target?.session_target === 'shell' && (task.intent?.mode === 'plan' || task.intent?.read_only)) {
           warnings.push({
             path: `${taskPath}.intent`,

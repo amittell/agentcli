@@ -8,7 +8,11 @@ import { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 import { parseFieldMask } from './fields.js';
 import { serveJsonRpc } from './jsonrpc.js';
 import { applyManifestToScheduler, createSchedulerCliRunner } from './apply.js';
-import { querySchedulerCapabilities, resolveEffectiveFeatures } from './capabilities.js';
+import {
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from './capabilities.js';
 import { executeTask } from './exec.js';
 import { readAuditLog } from './audit.js';
 import { resolveProviderForMethod } from './signing/index.js';
@@ -276,10 +280,16 @@ export async function runCli(
         });
         const caps = querySchedulerCapabilities(runner);
         const effective = resolveEffectiveFeatures('openclaw-scheduler', caps);
+        const compiled = getTarget('openclaw-scheduler').compile(manifest);
+        const compatibilityErrors = validateManifestCapabilities(compiled, effective);
         return formatOutput({
           ok: true,
           capabilities: caps,
           effective: effective,
+          compatibility: {
+            ok: compatibilityErrors.length === 0,
+            errors: compatibilityErrors,
+          },
         }, { mode: outputMode, pretty });
       }
 

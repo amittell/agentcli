@@ -114,6 +114,12 @@ const sessionField = {
   }
 };
 
+const childCredentialPolicyField = {
+  type: 'string',
+  enum: ['none', 'inherit', 'downscope', 'independent'],
+  nullable: true,
+};
+
 const identityField = {
   type: 'object',
   nullable: true,
@@ -706,6 +712,7 @@ MANIFEST_SCHEMA.workflow = {
     authorization_proof: authorizationProofRefField,
     authorization: authorizationRefField,
     evidence: evidenceRefField,
+    child_credential_policy: childCredentialPolicyField,
     tasks: { type: 'array', minItems: 1, items: { type: 'object' } }
   }
 };
@@ -759,6 +766,7 @@ MANIFEST_SCHEMA.task = {
     authorization_proof: authorizationProofRefField,
     authorization: authorizationRefField,
     evidence: evidenceRefField,
+    child_credential_policy: childCredentialPolicyField,
     on_failure: onFailureField,
     delete_after_run: nullableBoolean
   }
@@ -790,5 +798,6 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   evidence: { type: 'object', nullable: true },
   contract_required_trust_level: nullableString,
   contract_trust_enforcement: nullableString,
+  child_credential_policy: childCredentialPolicyField,
   authorization_proof_verification: { type: 'object', nullable: true }
 });

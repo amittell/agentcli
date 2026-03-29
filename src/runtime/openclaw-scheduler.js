@@ -7,8 +7,19 @@
 
 import { compileManifestToScheduler } from '../compiler/openclaw-scheduler.js';
 import { createSchedulerCliRunner } from '../apply.js';
-import { querySchedulerCapabilities, resolveEffectiveFeatures } from '../capabilities.js';
+import {
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from '../capabilities.js';
 import { SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1 } from '../scheduler-fields.js';
+
+const JSON_BLOB_FIELDS = new Set([
+  'identity',
+  'authorization_proof',
+  'authorization',
+  'evidence',
+]);
 
 /**
  * Project a compiled job object down to the fields accepted by a given
@@ -21,9 +32,12 @@ function projectJobToSpec(job, { fieldVersion = '1' } = {}) {
   const spec = {};
   for (const field of fields) {
     if (!(field in specBody)) continue;
-    const value = field === 'enabled' ? Boolean(specBody[field]) : specBody[field];
+    let value = field === 'enabled' ? Boolean(specBody[field]) : specBody[field];
     if (value === undefined) continue;
     if (value === null) continue;
+    if (typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
+      value = JSON.stringify(value);
+    }
     spec[field] = value;
   }
   return spec;
@@ -70,15 +84,16 @@ export const schedulerAdapter = {
     // Compile the full manifest to get job specs for every task
     const compiled = compileManifestToScheduler(manifest);
     const taskId = task.id || task.name;
+    const workflowId = workflow.id;
 
-    // Match the compiled job to the requested task
+    // Match the compiled job to the requested workflow/task pair.
     const job = compiled.jobs.find(
-      j => j.source?.task_id === taskId || j.name === (task.name || taskId)
+      j => j.source?.workflow_id === workflowId && j.source?.task_id === taskId
     );
 
     if (!job) {
       throw Object.assign(
-        new Error(`Could not find compiled job for task "${taskId}"`),
+        new Error(`Could not find compiled job for task "${taskId}" in workflow "${workflowId}"`),
         { code: 'delegation_error' }
       );
     }
@@ -111,6 +126,13 @@ export const schedulerAdapter = {
     const runtimeCaps = querySchedulerCapabilities(runner);
     const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     const handoffVersion = effectiveResult.handoff_version || '1';
+    const capabilityErrors = validateManifestCapabilities({ jobs: [job] }, effectiveResult);
+    if (capabilityErrors.length > 0) {
+      throw Object.assign(
+        new Error(capabilityErrors.map(error => error.message).join('; ')),
+        { code: 'unsupported_capability', capability_errors: capabilityErrors }
+      );
+    }
 
     const spec = projectJobToSpec(job, { fieldVersion: handoffVersion });
     runner.addJob(spec);

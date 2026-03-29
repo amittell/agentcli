@@ -716,6 +716,22 @@ test('cli schema manifest marks workflow and task authorization refs as required
   assert.deepEqual(taskFields.authorization.required, ['ref']);
 });
 
+test('cli schema exposes child_credential_policy on workflow and task surfaces', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const workflowFields = output.schema.fields.workflows.items.fields;
+  const taskFields = workflowFields.tasks.items.fields;
+
+  assert.equal(output.ok, true);
+  assert.deepEqual(
+    workflowFields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
+  assert.deepEqual(
+    taskFields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
+});
+
 test('cli -h prints usage', async () => {
   const output = await runCli(['-h']);
   assert.match(output, /^agentcli <command> \[args\]/);
@@ -883,6 +899,15 @@ test('applyManifestToScheduler strips non-runtime scheduler metadata from backen
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        handoff_version: '1',
+        features: {
+          trust_evaluation: true,
+        }
+      };
+    },
     listJobs() { return []; },
     addJob(spec) {
       calls.push(spec);
@@ -1902,6 +1927,14 @@ test('schema task has required fields on schedule and trigger', async () => {
 test('schema task has mutual exclusion note', async () => {
   const output = JSON.parse(await runCli(['schema', 'task']));
   assert.match(output.schema.note, /Exactly one of schedule or trigger/);
+});
+
+test('schema task includes child_credential_policy', async () => {
+  const output = JSON.parse(await runCli(['schema', 'task']));
+  assert.deepEqual(
+    output.schema.fields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
 });
 
 test('barrel export includes resolveManifestCandidate', () => {
@@ -6996,6 +7029,64 @@ test('validateManifestCapabilities handles null/empty compiled output', () => {
   assert.strictEqual(validateManifestCapabilities({ jobs: [] }, { features }).length, 0);
 });
 
+test('applyManifestToScheduler rejects unsupported trust and evidence capabilities before writing', async () => {
+  let addCalls = 0;
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        handoff_version: '1',
+        features: {},
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob() {
+      addCalls += 1;
+      return { ok: true };
+    },
+    updateJob() {
+      addCalls += 1;
+      return { ok: true };
+    }
+  };
+
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [
+      { id: 'evidence', provider: 'none' }
+    ],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        prompt: 'Summarize logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        contract: { required_trust_level: 'supervised' },
+        evidence: { ref: 'evidence' },
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner }),
+    err => {
+      assert.strictEqual(err.code, 'unsupported_capability');
+      assert.ok(Array.isArray(err.capability_errors));
+      assert.strictEqual(err.capability_errors.length, 2);
+      assert.ok(err.capability_errors.some(error => error.feature === 'trust_evaluation'));
+      assert.ok(err.capability_errors.some(error => error.feature === 'evidence_generation'));
+      return true;
+    }
+  );
+  assert.strictEqual(addCalls, 0);
+});
+
 test('applyManifestToScheduler includes capabilities metadata in result', async () => {
   const runner = {
     invocation: { label: 'fake-scheduler' },
@@ -8170,9 +8261,160 @@ test('exec delegates prompt task to mock scheduler runner', () => {
   }
 });
 
+test('exec delegated task uses the selected workflow when task ids collide', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'alpha',
+        name: 'Alpha',
+        tasks: [{
+          id: 'shared-task',
+          name: 'Shared Task',
+          prompt: 'Run alpha',
+          target: { session_target: 'main', agent_id: 'main' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      },
+      {
+        id: 'beta',
+        name: 'Beta',
+        tasks: [{
+          id: 'shared-task',
+          name: 'Shared Task',
+          prompt: 'Run beta',
+          target: { session_target: 'main', agent_id: 'main' },
+          schedule: { cron: '15 * * * *' }
+        }]
+      }
+    ]
+  };
+
+  const result = executeTask(manifest, {
+    workflowId: 'beta',
+    taskId: 'shared-task',
+    dryRun: true,
+    schedulerPrefix: '/fake/prefix',
+    signer: 'none',
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.job_id, stableId('beta', 'shared-task'));
+  assert.strictEqual(result.job_spec.source.workflow_id, 'beta');
+  assert.strictEqual(result.job_spec.source.task_id, 'shared-task');
+});
+
+test('exec delegated task respects env scheduler config and stringifies v0.2 blob fields', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'prompt-task',
+        name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: {
+          subject: {
+            kind: 'service',
+            principal: 'agent://example.com/reviewer',
+          }
+        }
+      }]
+    }]
+  };
+
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-delegation-capture-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  const captureFile = join(tmpDir, 'job-spec.json');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'if [ "$2" = "capabilities" ]; then',
+    '  echo \'{"features":{"authorization_hook":true,"evidence_generation":true,"trust_evaluation":true},"handoff_version":"2","scheduler_version":"0.0.0-test"}\'',
+    'elif [ "$2" = "jobs" ] && [ "$3" = "add" ]; then',
+    `  printf '%s' "$4" > '${captureFile}'`,
+    '  echo \'{"ok":true}\'',
+    'else',
+    '  echo \'{}\'',
+    'fi',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      signer: 'none',
+      env: {
+        ...process.env,
+        AGENTCLI_SCHEDULER_BIN: fakeBin,
+      },
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.delegated, true);
+
+    const captured = JSON.parse(readFileSync(captureFile, 'utf8'));
+    assert.strictEqual(typeof captured.identity, 'string');
+    assert.strictEqual(
+      JSON.parse(captured.identity).subject.principal,
+      'agent://example.com/reviewer'
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // child_credential_policy compilation
 // ---------------------------------------------------------------------------
+
+test('child_credential_policy validates cleanly on workflow and task surfaces', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'inherit',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        shell: { program: 'echo', args: ['ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'independent',
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(
+    result.warnings.some(warning => warning.path.includes('child_credential_policy')),
+    false
+  );
+});
+
+test('validation rejects invalid child_credential_policy values', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'bogus',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        shell: { program: 'echo', args: ['ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(error => error.path.endsWith('.child_credential_policy')));
+});
 
 test('child_credential_policy: workflow-level policy flows to compiled job', () => {
   const manifest = {
@@ -8256,8 +8498,14 @@ test('child_credential_policy: invalid policy value throws', () => {
   assert.throws(
     () => compileManifestToScheduler(manifest),
     (err) => {
-      assert.ok(/invalid_value/.test(err.message), 'error should mention the invalid value');
-      assert.ok(/none, inherit, downscope, independent/.test(err.message), 'error should list valid values');
+      assert.ok(err.validation, 'compile error should include validation details');
+      assert.ok(
+        err.validation.errors.some(error =>
+          error.path.endsWith('.child_credential_policy') &&
+          /none, inherit, downscope, independent/.test(error.message)
+        ),
+        'validation should include the child_credential_policy enum error'
+      );
       return true;
     },
   );

@@ -298,15 +298,15 @@ function executeDelegated(common, options) {
     schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env,
   } = options;
 
-  const effectivePrefix = schedulerPrefix || process.env.AGENTCLI_SCHEDULER_PREFIX || '';
-  const effectiveBin = schedulerBin || process.env.AGENTCLI_SCHEDULER_BIN || '';
+  const effectivePrefix = schedulerPrefix || env.AGENTCLI_SCHEDULER_PREFIX || '';
+  const effectiveBin = schedulerBin || env.AGENTCLI_SCHEDULER_BIN || '';
 
   if (!effectivePrefix && !effectiveBin) {
     throw Object.assign(
       new Error(
         `Task "${task.id || task.name}" requires runtime delegation ` +
         `(session_target: "${task.target?.session_target}") ` +
-        'but no scheduler is configured. Set --scheduler-prefix or AGENTCLI_SCHEDULER_BIN.'
+        'but no scheduler is configured. Set --scheduler-prefix, --scheduler-bin, AGENTCLI_SCHEDULER_PREFIX, or AGENTCLI_SCHEDULER_BIN.'
       ),
       { code: 'no_runtime' }
     );
