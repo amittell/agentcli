@@ -1045,6 +1045,62 @@ test('cli apply supports dry-run without invoking scheduler writes', async () =>
   assert.deepEqual(result.actions.map(action => action.action), ['created', 'created']);
 });
 
+test('cli apply --check-capabilities returns negotiated compatibility data', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/check-capabilities' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'cap-check',
+      name: 'Capability Check',
+      tasks: [{
+        id: 'review',
+        name: 'Review',
+        prompt: 'Review this change',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'svc' },
+        contract: { required_trust_level: 'supervised', trust_enforcement: 'advisory' },
+      }],
+    }],
+  };
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-check-capabilities-'));
+  const fakeBin = join(workdir, 'fake-scheduler.sh');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'if [ "$2" = "capabilities" ]; then',
+    '  echo \'{"features":{"authorization_hook":true,"evidence_generation":true,"trust_evaluation":true},"handoff_version":"2","scheduler_version":"0.0.0-test"}\'',
+    'else',
+    '  echo "unexpected scheduler command: $*" >&2',
+    '  exit 99',
+    'fi',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const output = JSON.parse(await runCli([
+      'apply',
+      JSON.stringify(manifest),
+      '--check-capabilities',
+      '--scheduler-bin',
+      fakeBin,
+    ]));
+
+    assert.equal(output.ok, true);
+    assert.equal(output.capabilities.source, 'runtime');
+    assert.equal(output.effective.negotiated, true);
+    assert.equal(output.effective.handoff_version, '2');
+    assert.equal(output.compatibility.ok, true);
+    assert.deepEqual(output.compatibility.errors, []);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test('applyManifestToScheduler adopt-by-name matches existing job by name and re-keys to stable id', async () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   const stableJob = compiled.jobs[0];

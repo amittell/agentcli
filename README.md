@@ -66,6 +66,12 @@ agentcli apply examples/hello-world.json \
   --scheduler-prefix ~/.openclaw/scheduler \
   --dry-run
 
+# Ask the runtime which capability surface and handoff version it supports
+agentcli apply examples/hello-world.json \
+  --db ~/.openclaw/scheduler/scheduler.db \
+  --scheduler-prefix ~/.openclaw/scheduler \
+  --check-capabilities
+
 # Inspect the runtime state through agentcli
 AGENTCLI_SCHEDULER_DB=~/.openclaw/scheduler/scheduler.db \
   agentcli inspect jobs --fields id,name,last_status
@@ -287,8 +293,8 @@ Use `agentcli evidence providers` to list registered providers and `agentcli evi
 
 | Command | Description |
 |---|---|
-| `exec <path> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path]` | Execute a task locally with identity resolution, contract enforcement, and attestation. |
-| `apply <path> [--db path] [--scheduler-prefix path\|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id\|name]` | Apply a manifest to the scheduler runtime. Creates or updates jobs. |
+| `exec <path> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path] [--db path] [--scheduler-prefix path\|--scheduler-bin path]` | Execute shell tasks locally with identity resolution, contract enforcement, and attestation, or delegate non-shell tasks to the scheduler when configured. |
+| `apply <path> [--db path] [--scheduler-prefix path\|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id\|name] [--check-capabilities]` | Apply a manifest to the scheduler runtime, or inspect runtime capability negotiation without writing jobs. |
 
 ### Identity and Authorization
 

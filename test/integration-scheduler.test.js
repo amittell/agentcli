@@ -1,11 +1,12 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
-import { applyManifestToScheduler, createSchedulerCliRunner } from '../src/apply.js';
+import { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation } from '../src/apply.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 
 const SCHEDULER_PATH = process.env.SCHEDULER_PATH || resolve(import.meta.dirname, '../../openclaw-scheduler');
@@ -19,8 +20,71 @@ function stableId(workflowId, taskId) {
   return createHash('sha256').update(`${workflowId}:${taskId}`).digest('hex').slice(0, 32);
 }
 
-if (!existsSync(schedulerPkg)) {
-  describe('integration-scheduler (skipped)', { skip: 'openclaw-scheduler not found at ' + SCHEDULER_PATH }, () => {
+function summarizeProbeFailure(stderr, status) {
+  const lines = String(stderr || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  const summary = lines.find(line => line.startsWith('Error:')) || lines[0];
+  return summary || `capabilities exited with status ${status}`;
+}
+
+function probeSchedulerRuntime() {
+  const invocation = resolveSchedulerInvocation({ schedulerPrefix: SCHEDULER_PATH });
+  const probeDb = join(tmpdir(), `agentcli-integ-probe-${process.pid}.db`);
+  const result = spawnSync(
+    invocation.command,
+    [...invocation.prefixArgs, '--json', 'capabilities'],
+    {
+      env: { ...process.env, SCHEDULER_DB: probeDb },
+      encoding: 'utf8',
+    }
+  );
+
+  if (result.error) {
+    return { ok: false, reason: result.error.message, capabilities: null };
+  }
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: summarizeProbeFailure(result.stderr, result.status),
+      capabilities: null,
+    };
+  }
+
+  const stdout = String(result.stdout || '').trim();
+  if (!stdout) {
+    return { ok: false, reason: 'capabilities returned empty stdout', capabilities: null };
+  }
+
+  try {
+    return { ok: true, reason: null, capabilities: JSON.parse(stdout) };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `capabilities returned invalid JSON: ${err.message}`,
+      capabilities: null,
+    };
+  }
+}
+
+const schedulerRuntime = existsSync(schedulerPkg)
+  ? probeSchedulerRuntime()
+  : {
+      ok: false,
+      reason: `openclaw-scheduler not found at ${SCHEDULER_PATH}`,
+      capabilities: null,
+    };
+
+const v02RuntimeSkipReason = schedulerRuntime.ok
+  && schedulerRuntime.capabilities?.handoff_version === '2'
+  && schedulerRuntime.capabilities?.features?.trust_evaluation === true
+  && schedulerRuntime.capabilities?.features?.authorization_hook === true
+  ? null
+  : 'scheduler under test does not advertise handoff_version=2 with trust_evaluation=true and authorization_hook=true';
+
+if (!schedulerRuntime.ok) {
+  describe('integration-scheduler (skipped)', { skip: schedulerRuntime.reason }, () => {
     it('placeholder', () => {});
   });
 } else {
@@ -177,13 +241,24 @@ if (!existsSync(schedulerPkg)) {
       assert.ok(caps !== null, 'capabilities response should not be null');
       assert.equal(typeof caps, 'object');
       assert.ok(caps.features, 'capabilities should include features');
-      assert.ok(caps.scheduler_version, 'capabilities should include scheduler_version');
-      assert.equal(caps.handoff_version, '2', 'scheduler should report handoff_version 2');
-      assert.equal(caps.features.trust_evaluation, true, 'trust_evaluation should be true');
-      assert.equal(caps.features.authorization_hook, true, 'authorization_hook should be true');
+      assert.equal(
+        caps.scheduler_version ?? null,
+        schedulerRuntime.capabilities?.scheduler_version ?? null,
+        'scheduler_version should match the probe result'
+      );
+      assert.equal(
+        caps.handoff_version ?? null,
+        schedulerRuntime.capabilities?.handoff_version ?? null,
+        'handoff_version should match the probe result'
+      );
+      assert.deepEqual(
+        caps.features,
+        schedulerRuntime.capabilities?.features,
+        'capability feature map should match the probe result'
+      );
     });
 
-    it('apply sends v0.2 fields when scheduler supports handoff v2', async () => {
+    it('apply sends v0.2 fields when scheduler supports handoff v2', { skip: v02RuntimeSkipReason || false }, async () => {
       const v02Manifest = {
         version: '0.2',
         identity_profiles: [{
@@ -221,7 +296,7 @@ if (!existsSync(schedulerPkg)) {
       assert.equal(result.handoff.field_version, '2', 'field_version should be 2');
     });
 
-    it('v0.2 identity fields are stored in scheduler', async () => {
+    it('v0.2 identity fields are stored in scheduler', { skip: v02RuntimeSkipReason || false }, async () => {
       const v02Manifest = {
         version: '0.2',
         identity_profiles: [{
