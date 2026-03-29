@@ -233,7 +233,15 @@ export async function applyManifestToScheduler(
   const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
   const effectiveFeatures = effectiveResult.features;
   const handoffVersion = effectiveResult.handoff_version || '1';
-  const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+
+  // Only run the full capability validation for manifests with v0.2 features;
+  // pure v0.1 manifests have no provider/policy requirements to check.
+  const hasV02Features = compiled.jobs.some(j =>
+    j.identity || j.identity_ref || j.authorization || j.authorization_ref
+    || j.evidence || j.evidence_ref || j.child_credential_policy
+    || j.contract_required_trust_level || j.authorization_proof || j.authorization_proof_ref
+  );
+  const capabilityErrors = hasV02Features ? validateManifestCapabilities(compiled, effectiveResult) : [];
   if (capabilityErrors.length > 0) {
     throw Object.assign(
       new Error(capabilityErrors.map(error => error.message).join('; ')),
