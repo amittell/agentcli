@@ -14,6 +14,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,41 @@ function purgeExpiredCache() {
 }
 
 /**
+ * Stable fingerprint of an explicit env object for cache keys (order-independent).
+ * @param {object} env
+ * @returns {string}
+ */
+function envFingerprint(env) {
+  const keys = Object.keys(env).sort();
+  const h = createHash('sha256');
+  for (const k of keys) {
+    const v = env[k];
+    h.update(k);
+    h.update('\0');
+    h.update(v == null ? '' : String(v));
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
+/**
+ * Build a cache key for command-based key resolution.
+ * Includes cwd and (when env is not process.env) a fingerprint of env entries so the
+ * same shell snippet cannot return a stale key across different contexts.
+ * @param {string} command
+ * @param {object} [opts]
+ * @returns {string}
+ */
+function commandSourceCacheKey(command, opts) {
+  const cwdPart = opts && opts.cwd != null ? String(opts.cwd) : '';
+  let envPart = '@inherit';
+  if (opts && opts.env != null && typeof opts.env === 'object' && opts.env !== process.env) {
+    envPart = envFingerprint(opts.env);
+  }
+  return `${command}\0${cwdPart}\0${envPart}`;
+}
+
+/**
  * Resolve a key value from a command source, with TTL-based caching.
  *
  * The command string comes from the operator's manifest provider_config
@@ -44,13 +80,14 @@ function purgeExpiredCache() {
  *
  * @param {string} command  - Shell command to execute.
  * @param {number} ttlMs    - Cache TTL in milliseconds.
- * @param {object} [opts]   - Options: { cwd, env }.
+ * @param {object} [opts]   - Options: { cwd, env }. Cached per command+cwd; if env is not
+ *                            `process.env`, entries are fingerprinted so values cannot bleed across contexts.
  * @returns {{ ok: boolean, value?: string, error?: string, transient?: boolean }}
  */
 function resolveCommandSource(command, ttlMs, opts) {
   purgeExpiredCache();
 
-  const cacheKey = command;
+  const cacheKey = commandSourceCacheKey(command, opts);
   const cached = commandCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return { ok: true, value: cached.value };

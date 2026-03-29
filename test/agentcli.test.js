@@ -8650,7 +8650,70 @@ test('stripe-api-key resolveSession: dynamic strategy returns not-implemented er
   assert.ok(/not yet implemented/.test(result.error));
 });
 
+test('stripe-api-key resolveSession: key_command cache distinguishes cwd (same snippet)', () => {
+  const d1 = mkdtempSync(join(tmpdir(), 'stripe-cmd-'));
+  const d2 = mkdtempSync(join(tmpdir(), 'stripe-cmd-'));
+  const key1 = 'sk_test_abcdefghijklmnopqrstuvwxyz';
+  const key2 = 'sk_test_XYZabcdefghijklmnopqrstuvw';
+  writeFileSync(join(d1, 'stripe_key.txt'), key1, 'utf8');
+  writeFileSync(join(d2, 'stripe_key.txt'), key2, 'utf8');
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        cache_ttl_s: 60,
+        permission_sets: {
+          full: {
+            key_command:
+              'node -e "const fs=require(\'fs\');const p=require(\'path\');console.log(fs.readFileSync(p.join(process.cwd(),\'stripe_key.txt\'),\'utf8\').trim())"',
+          },
+        },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile, instanceId: 'kc1', scope: 'full' };
+  const r1 = stripeApiKeyProvider.resolveSession(request, { cwd: d1, env: process.env });
+  const r2 = stripeApiKeyProvider.resolveSession(request, { cwd: d2, env: process.env });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(r1.session.credentials.api_key.value, key1);
+  assert.strictEqual(r2.session.credentials.api_key.value, key2);
+  rmSync(d1, { recursive: true, force: true });
+  rmSync(d2, { recursive: true, force: true });
+});
+
+test('stripe-api-key resolveSession: key_command cache distinguishes explicit env payloads', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        cache_ttl_s: 60,
+        permission_sets: {
+          full: {
+            key_command: 'node -p "process.env.STRIPE_CMD_SECRET"',
+          },
+        },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile, instanceId: 'kc2', scope: 'full' };
+  const keyA = 'sk_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const keyB = 'sk_test_bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const base = { PATH: process.env.PATH || '', ...process.env };
+  const r1 = stripeApiKeyProvider.resolveSession(request, { cwd: tmpdir(), env: { ...base, STRIPE_CMD_SECRET: keyA } });
+  const r2 = stripeApiKeyProvider.resolveSession(request, { cwd: tmpdir(), env: { ...base, STRIPE_CMD_SECRET: keyB } });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(r1.session.credentials.api_key.value, keyA);
+  assert.strictEqual(r2.session.credentials.api_key.value, keyB);
+});
+
 // -- materialize tests --
+
 
 test('stripe-api-key materialize: produces correct env_vars with STRIPE_API_KEY default binding', () => {
   const session = {
