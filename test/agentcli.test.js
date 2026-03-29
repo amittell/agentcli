@@ -20,6 +20,7 @@ import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
 import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation } from '../src/apply.js';
+import { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from '../src/capabilities.js';
 import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
@@ -6751,6 +6752,301 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.ok(failureSpec);
   assert.strictEqual('authorization_proof' in failureSpec, false);
   assert.strictEqual('authorization_proof_verification' in failureSpec, false);
+});
+
+// ---------------------------------------------------------------------------
+// Runtime Capability Negotiation (Track 7)
+// ---------------------------------------------------------------------------
+
+test('querySchedulerCapabilities returns ok with features from a valid runner', () => {
+  const runner = {
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.source, 'runtime');
+  assert.strictEqual(result.version, '0.2.0');
+  assert.strictEqual(result.handoff_version, '2');
+  assert.strictEqual(result.schema_version, 22);
+  assert.strictEqual(result.features.authorization_hook, true);
+  assert.strictEqual(result.features.runtime_identity_resolution, true);
+});
+
+test('querySchedulerCapabilities returns ok:false when runner throws', () => {
+  const runner = {
+    queryCapabilities() {
+      throw new Error('connection refused');
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+  assert.strictEqual(result.error, 'connection refused');
+});
+
+test('querySchedulerCapabilities returns ok:false with null runner', () => {
+  const result = querySchedulerCapabilities(null);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('querySchedulerCapabilities returns ok:false when runner lacks queryCapabilities', () => {
+  const result = querySchedulerCapabilities({ listJobs() { return []; } });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('querySchedulerCapabilities returns ok:false when response has no features', () => {
+  const runner = {
+    queryCapabilities() {
+      return { scheduler_version: '0.2.0' };
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('resolveEffectiveFeatures upgrades static false to runtime true', () => {
+  const caps = {
+    ok: true,
+    features: {
+      authorization_hook: true,
+      trust_evaluation: true,
+      evidence_generation: true,
+      runtime_identity_resolution: true,
+      authorization_proof_verification: true,
+      credential_handoff: true,
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.negotiated, true);
+  assert.strictEqual(result.source, 'runtime');
+  assert.strictEqual(result.features.authorization_hook, true);
+  assert.strictEqual(result.features.trust_evaluation, true);
+  assert.strictEqual(result.features.evidence_generation, true);
+  assert.strictEqual(result.features.runtime_identity_resolution, true);
+  assert.strictEqual(result.features.authorization_proof_verification, true);
+  assert.strictEqual(result.features.credential_handoff, true);
+});
+
+test('resolveEffectiveFeatures cannot downgrade static true to runtime false', () => {
+  const caps = {
+    ok: true,
+    features: {
+      runtime_execution: false,
+      identity_declaration: false,
+      audit_export: false,
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.features.runtime_execution, true);
+  assert.strictEqual(result.features.identity_declaration, true);
+  assert.strictEqual(result.features.audit_export, true);
+});
+
+test('resolveEffectiveFeatures replaces string values from runtime', () => {
+  const caps = {
+    ok: true,
+    features: {
+      approvals: 'full',
+      model_policy: 'enforced',
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.features.approvals, 'full');
+  assert.strictEqual(result.features.model_policy, 'enforced');
+});
+
+test('resolveEffectiveFeatures ignores unknown runtime keys', () => {
+  const caps = {
+    ok: true,
+    features: {
+      completely_new_feature: true,
+      another_unknown: 'value',
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual('completely_new_feature' in result.features, false);
+  assert.strictEqual('another_unknown' in result.features, false);
+});
+
+test('resolveEffectiveFeatures returns static features when no runtime capabilities', () => {
+  const result = resolveEffectiveFeatures('openclaw-scheduler', null);
+  assert.strictEqual(result.negotiated, false);
+  assert.strictEqual(result.source, 'static');
+  assert.strictEqual(result.features.authorization_hook, false);
+  assert.strictEqual(result.features.runtime_execution, true);
+});
+
+test('resolveEffectiveFeatures returns static features when runtime ok is false', () => {
+  const caps = { ok: false, error: 'connection refused', source: 'static' };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.negotiated, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('resolveEffectiveFeatures throws for unknown target', () => {
+  assert.throws(
+    () => resolveEffectiveFeatures('nonexistent-target', null),
+    /Unknown target: nonexistent-target/
+  );
+});
+
+test('validateManifestCapabilities detects authorization_hook mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Job One', authorization_ref: 'authz-profile' },
+    ]
+  };
+  const features = { authorization_hook: false, trust_evaluation: true, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'authorization_hook');
+  assert.ok(errors[0].message.includes('Job One'));
+});
+
+test('validateManifestCapabilities detects trust_evaluation mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Trust Job', contract_required_trust_level: 'supervised' },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: false, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'trust_evaluation');
+  assert.ok(errors[0].message.includes('Trust Job'));
+});
+
+test('validateManifestCapabilities detects evidence_generation mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Evidence Job', evidence_ref: 'ev-profile' },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: false };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'evidence_generation');
+  assert.ok(errors[0].message.includes('Evidence Job'));
+});
+
+test('validateManifestCapabilities returns no errors when all features satisfied', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Full Job',
+        authorization_ref: 'authz',
+        contract_required_trust_level: 'supervised',
+        evidence_ref: 'ev',
+      },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+});
+
+test('validateManifestCapabilities returns no errors for jobs without v0.2 features', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Simple Job', schedule_cron: '0 * * * *' },
+    ]
+  };
+  const features = { authorization_hook: false, trust_evaluation: false, evidence_generation: false };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+});
+
+test('validateManifestCapabilities handles null/empty compiled output', () => {
+  const features = { authorization_hook: false };
+  assert.strictEqual(validateManifestCapabilities(null, { features }).length, 0);
+  assert.strictEqual(validateManifestCapabilities({}, { features }).length, 0);
+  assert.strictEqual(validateManifestCapabilities({ jobs: [] }, { features }).length, 0);
+});
+
+test('applyManifestToScheduler includes capabilities metadata in result', async () => {
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'runtime');
+  assert.strictEqual(result.capabilities.negotiated, true);
+  assert.strictEqual(result.capabilities.handoff_version, '2');
+});
+
+test('applyManifestToScheduler falls back to static when runner lacks queryCapabilities', async () => {
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'static');
+  assert.strictEqual(result.capabilities.negotiated, false);
 });
 
 // ---------------------------------------------------------------------------

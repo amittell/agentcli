@@ -9,6 +9,7 @@ import {
 } from './compiler/shared.js';
 import { expandManifestShorthands } from './shorthand.js';
 import { TARGETS } from './targets.js';
+import { querySchedulerCapabilities, resolveEffectiveFeatures } from './capabilities.js';
 export { shellCommandInvocation } from './command.js';
 
 function npmCommandForPlatform(platform = process.platform) {
@@ -178,6 +179,10 @@ export function createSchedulerCliRunner(options = {}) {
 
   return {
     invocation,
+    queryCapabilities() {
+      try { return invoke(['capabilities']); }
+      catch { return null; }
+    },
     listJobs() {
       const payload = invoke(['jobs', 'list']);
       return Array.isArray(payload) ? payload : [];
@@ -238,9 +243,22 @@ export async function applyManifestToScheduler(
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
 
+  // Construct the scheduler runner early so we can query its capabilities
+  const schedulerRunner = runner || createSchedulerCliRunner({
+    schedulerPrefix,
+    schedulerBin,
+    dbPath,
+    cwd,
+    env
+  });
+
+  // Runtime capability negotiation
+  const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
+  const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+  const effectiveFeatures = effectiveResult.features;
+
   // v0.2: Authorization proof verification for backends lacking the capability
-  const targetFeatures = TARGETS['openclaw-scheduler']?.features || {};
-  if (!targetFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
+  if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
     // Target cannot verify proofs at runtime; verify locally during apply
     const { readFileSync } = await import('node:fs');
     const { resolveVerifier } = await import('./authorization-proof/index.js');
@@ -296,7 +314,7 @@ export async function applyManifestToScheduler(
   }
 
   // v0.2: Reject manifests with authorization blocks when target lacks authorization_hook
-  if (!targetFeatures.authorization_hook) {
+  if (!effectiveFeatures.authorization_hook) {
     for (const job of compiled.jobs) {
       if (job.authorization_ref || job.authorization?.ref) {
         throw Object.assign(
@@ -309,14 +327,6 @@ export async function applyManifestToScheduler(
       }
     }
   }
-
-  const schedulerRunner = runner || createSchedulerCliRunner({
-    schedulerPrefix,
-    schedulerBin,
-    dbPath,
-    cwd,
-    env
-  });
 
   const existingJobs = schedulerRunner.listJobs();
   const existingById = new Map(existingJobs.map(job => [job.id, job]));
@@ -442,6 +452,11 @@ export async function applyManifestToScheduler(
     scheduler: {
       command: schedulerRunner.invocation?.label || 'custom-runner',
       db_path: dbPath || null
+    },
+    capabilities: {
+      source: effectiveResult.source,
+      negotiated: effectiveResult.negotiated,
+      handoff_version: effectiveResult.handoff_version || null,
     },
     job_count: compiled.jobs.length,
     actions,

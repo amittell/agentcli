@@ -4,6 +4,7 @@ export { validateManifest } from './validate.js';
 export { compileManifestToStandalone } from './compiler/standalone.js';
 export { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
 export { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation } from './apply.js';
+export { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from './capabilities.js';
 export { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 export { TARGETS, getTarget, listTargets, registerTarget } from './targets.js';
 export { ensureAgentcliHome, getAgentcliPaths, resolveAgentcliHome, resolveManifestCandidate } from './home.js';

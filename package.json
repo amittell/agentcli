@@ -15,6 +15,7 @@
     "./compile/standalone": "./src/compiler/standalone.js",
     "./compile/openclaw-scheduler": "./src/compiler/openclaw-scheduler.js",
     "./apply": "./src/apply.js",
+    "./capabilities": "./src/capabilities.js",
     "./shorthand": "./src/shorthand.js",
     "./inspect": "./src/inspect.js",
     "./home": "./src/home.js",
