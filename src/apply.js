@@ -8,7 +8,6 @@ import {
   stableId
 } from './compiler/shared.js';
 import { expandManifestShorthands } from './shorthand.js';
-import { TARGETS } from './targets.js';
 import { querySchedulerCapabilities, resolveEffectiveFeatures } from './capabilities.js';
 import {
   SCHEDULER_FIELDS_V1,
@@ -89,10 +88,6 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
     );
   }
 }
-
-// Backward compat alias -- used when no version is negotiated
-const SCHEDULER_CREATE_FIELDS = SCHEDULER_FIELDS_V1;
-const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id' && field !== 'origin');
 
 // Fields that the scheduler stores as JSON text blobs rather than scalar columns.
 const JSON_BLOB_FIELDS = new Set([
