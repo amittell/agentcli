@@ -19,6 +19,10 @@ import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // Command-source cache: Map<cacheKey, { value, expiresAt }>
+// Expected cardinality: low (one entry per distinct command+cwd+env tuple;
+// typically 1-5 entries for a Stripe profile's permission_sets). No LRU
+// eviction -- purgeExpiredCache removes entries after TTL. If command-source
+// usage grows beyond a handful of scopes, add a max-entries cap.
 // ---------------------------------------------------------------------------
 const commandCache = new Map();
 

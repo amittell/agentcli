@@ -98,8 +98,9 @@ export const schedulerAdapter = {
       );
     }
 
-    // Mark as one-off so the scheduler deletes the job after a single run
-    job.delete_after_run = 1;
+    // Mark as one-off so the scheduler deletes the job after a single run.
+    // Spread to avoid mutating the compiler output in case it is cached/reused.
+    const jobSpec = { ...job, delete_after_run: 1 };
 
     if (dryRun) {
       return {
@@ -107,8 +108,8 @@ export const schedulerAdapter = {
         dry_run: true,
         delegated: true,
         runtime: 'openclaw-scheduler',
-        job_id: job.id,
-        job_spec: job,
+        job_id: jobSpec.id,
+        job_spec: jobSpec,
         session_target: task.target?.session_target,
         note: 'Dry run: task would be delegated to openclaw-scheduler.',
       };
@@ -126,7 +127,7 @@ export const schedulerAdapter = {
     const runtimeCaps = querySchedulerCapabilities(runner);
     const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     const handoffVersion = effectiveResult.handoff_version || '1';
-    const capabilityErrors = validateManifestCapabilities({ jobs: [job] }, effectiveResult);
+    const capabilityErrors = validateManifestCapabilities({ jobs: [jobSpec] }, effectiveResult);
     if (capabilityErrors.length > 0) {
       throw Object.assign(
         new Error(capabilityErrors.map(error => error.message).join('; ')),
@@ -134,7 +135,7 @@ export const schedulerAdapter = {
       );
     }
 
-    const spec = projectJobToSpec(job, { fieldVersion: handoffVersion });
+    const spec = projectJobToSpec(jobSpec, { fieldVersion: handoffVersion });
     runner.addJob(spec);
 
     return {
@@ -142,9 +143,9 @@ export const schedulerAdapter = {
       delegated: true,
       execution_mode: 'scheduler-dispatch',
       runtime: 'openclaw-scheduler',
-      job_id: job.id,
+      job_id: jobSpec.id,
       session_target: task.target?.session_target,
-      payload_kind: job.payload_kind,
+      payload_kind: jobSpec.payload_kind,
       status: 'dispatched',
       handoff_version: handoffVersion,
       note: 'Task delegated to openclaw-scheduler. The scheduler will execute it on its next tick.',

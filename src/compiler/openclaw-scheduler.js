@@ -332,6 +332,11 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       validateSchedulerReservedValues(targetErrors, taskPath, job);
 
       if (isTriggered && task.trigger?.parent) {
+        // The effective policy here uses a 3-level fallback (child -> parent task
+        // -> workflow) to match the scheduler's runtime resolution. The STORED
+        // value on the job (plan.child_credential_policy) only captures the
+        // 2-level task/workflow resolution -- the parent-task fallback happens at
+        // dispatch time when the scheduler reads the parent job's column.
         const parentTask = workflow.tasks.find(t => t.id === task.trigger.parent);
         const effectivePolicy =
           plan.child_credential_policy
