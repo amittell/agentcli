@@ -21,6 +21,7 @@ import { generateExecutionId, writeAuditRecord } from './audit.js';
 import { getAgentcliPaths } from './home.js';
 import { buildAttestationPayload, commandHash } from './attestation.js';
 import { resolveProvider } from './signing/index.js';
+import { resolveRuntimeAdapter } from './runtime/index.js';
 
 // Ensure the ssh signing provider is registered on import
 import './signing/ssh.js';
@@ -194,13 +195,7 @@ function resolveCommonState(manifest, {
   }
 
   if (task.target?.session_target !== 'shell') {
-    throw Object.assign(
-      new Error(
-        `exec only supports shell-target tasks. Task "${taskId}" has session_target "${task.target?.session_target}". ` +
-        'Prompt-based tasks require an agent runtime.'
-      ),
-      { code: 'invalid_argument' }
-    );
+    return { requiresDelegation: true, manifest: expanded, workflow, task };
   }
 
   if (!task.shell) {
@@ -260,6 +255,9 @@ export function executeTask(manifest, {
   requireAuthorization = false,
   identityDebug = false,
   presentationDebug = false,
+  schedulerPrefix = '',
+  schedulerBin = '',
+  dbPath = '',
   cwd = process.cwd(),
   env = process.env,
 } = {}) {
@@ -269,6 +267,13 @@ export function executeTask(manifest, {
     workflowId, taskId, signer, signingKey: explicitSigningKey,
     cwd, env, timeoutMs,
   });
+
+  // Non-shell tasks are delegated to a runtime adapter (e.g. the scheduler)
+  if (common.requiresDelegation) {
+    return executeDelegated(common, {
+      schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env,
+    });
+  }
 
   // v0.1 path: fully synchronous, preserves exact existing behavior
   if (!common.isV2) {
@@ -280,6 +285,50 @@ export function executeTask(manifest, {
     dryRun, evidenceProviderOverride, instanceId,
     requireEvidence, requireAuthorization,
     identityDebug, presentationDebug, env,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Delegation path -- non-shell tasks forwarded to a runtime adapter
+// ---------------------------------------------------------------------------
+
+function executeDelegated(common, options) {
+  const { manifest, task, workflow } = common;
+  const {
+    schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env,
+  } = options;
+
+  const effectivePrefix = schedulerPrefix || process.env.AGENTCLI_SCHEDULER_PREFIX || '';
+  const effectiveBin = schedulerBin || process.env.AGENTCLI_SCHEDULER_BIN || '';
+
+  if (!effectivePrefix && !effectiveBin) {
+    throw Object.assign(
+      new Error(
+        `Task "${task.id || task.name}" requires runtime delegation ` +
+        `(session_target: "${task.target?.session_target}") ` +
+        'but no scheduler is configured. Set --scheduler-prefix or AGENTCLI_SCHEDULER_BIN.'
+      ),
+      { code: 'no_runtime' }
+    );
+  }
+
+  const adapter = resolveRuntimeAdapter(task.target?.session_target);
+  if (!adapter) {
+    throw Object.assign(
+      new Error(
+        `No runtime adapter registered for session_target "${task.target?.session_target}"`
+      ),
+      { code: 'no_runtime' }
+    );
+  }
+
+  return adapter.dispatch(manifest, task, workflow, {
+    schedulerPrefix: effectivePrefix,
+    schedulerBin: effectiveBin,
+    dbPath,
+    dryRun,
+    cwd,
+    env,
   });
 }
 

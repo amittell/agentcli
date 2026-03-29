@@ -51,6 +51,12 @@ import {
   verifySignature,
   generateAllowedSigners,
 } from '../src/signing/ssh.js';
+import {
+  registerRuntimeAdapter,
+  getRuntimeAdapter,
+  resolveRuntimeAdapter,
+  listRuntimeAdapters,
+} from '../src/runtime/index.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -3602,10 +3608,14 @@ test('exec runs a shell task and returns structured result', () => {
   assert.equal(result.result.timed_out, false);
 });
 
-test('exec rejects non-shell tasks', () => {
+test('exec delegates non-shell tasks and throws no_runtime when scheduler is not configured', () => {
   assert.throws(
     () => executeTask(exampleManifest, { taskId: 'collect' }),
-    /exec only supports shell-target tasks/
+    (err) => {
+      assert.match(err.message, /requires runtime delegation/);
+      assert.equal(err.code, 'no_runtime');
+      return true;
+    }
   );
 });
 
@@ -7962,5 +7972,200 @@ test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', 
     assert.strictEqual(result.authorization_proof.verified, true);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Runtime adapter registry
+// ---------------------------------------------------------------------------
+
+test('runtime adapter registry has built-in shell and scheduler adapters', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.ok(shell, 'shell adapter should be registered');
+  assert.deepStrictEqual(shell.capabilities.session_targets, ['shell']);
+
+  const scheduler = getRuntimeAdapter('openclaw-scheduler');
+  assert.ok(scheduler, 'openclaw-scheduler adapter should be registered');
+  assert.deepStrictEqual(scheduler.capabilities.session_targets, ['main', 'isolated']);
+});
+
+test('resolveRuntimeAdapter finds adapter by session_target', () => {
+  assert.strictEqual(resolveRuntimeAdapter('shell')?.name, 'shell');
+  assert.strictEqual(resolveRuntimeAdapter('main')?.name, 'openclaw-scheduler');
+  assert.strictEqual(resolveRuntimeAdapter('isolated')?.name, 'openclaw-scheduler');
+  assert.strictEqual(resolveRuntimeAdapter('nonexistent'), null);
+});
+
+test('listRuntimeAdapters returns all registered adapters', () => {
+  const list = listRuntimeAdapters();
+  assert.ok(list.length >= 2, 'should have at least shell and scheduler adapters');
+  const names = list.map(a => a.name);
+  assert.ok(names.includes('shell'));
+  assert.ok(names.includes('openclaw-scheduler'));
+  for (const entry of list) {
+    assert.ok(typeof entry.name === 'string');
+    assert.ok(typeof entry.capabilities === 'object');
+  }
+});
+
+test('registerRuntimeAdapter rejects adapter without name', () => {
+  assert.throws(
+    () => registerRuntimeAdapter({ dispatch() {} }),
+    /Adapter must have a string name/
+  );
+});
+
+test('registerRuntimeAdapter rejects adapter without dispatch', () => {
+  assert.throws(
+    () => registerRuntimeAdapter({ name: 'test-no-dispatch' }),
+    /must implement dispatch/
+  );
+});
+
+test('shell adapter canExecute returns true for shell targets', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.deepStrictEqual(
+    shell.canExecute({ target: { session_target: 'shell' } }),
+    { supported: true }
+  );
+  assert.deepStrictEqual(
+    shell.canExecute({ target: { session_target: 'isolated' } }),
+    { supported: false }
+  );
+});
+
+test('shell adapter dispatch throws (shell tasks bypass adapter dispatch)', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.throws(
+    () => shell.dispatch(),
+    /Shell tasks are executed directly/
+  );
+});
+
+test('scheduler adapter canExecute checks context and session_target', () => {
+  const adapter = getRuntimeAdapter('openclaw-scheduler');
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'main' } }, {}),
+    { supported: false, reason: 'No scheduler configured' }
+  );
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'main' } }, { schedulerPrefix: '/some/path' }),
+    { supported: true }
+  );
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'isolated' } }, { schedulerBin: '/bin/sched' }),
+    { supported: true }
+  );
+  const shellResult = adapter.canExecute({ target: { session_target: 'shell' } }, { schedulerPrefix: '/x' });
+  assert.strictEqual(shellResult.supported, false);
+  assert.match(shellResult.reason, /Unsupported session target/);
+});
+
+// ---------------------------------------------------------------------------
+// Runtime delegation via executeTask
+// ---------------------------------------------------------------------------
+
+test('exec delegates non-shell task with dry-run and returns delegation receipt', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Run a prompt',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  // Dry-run delegation: no scheduler binary needed because the adapter
+  // short-circuits before calling the CLI.
+  const result = executeTask(manifest, {
+    taskId: 'prompt-task',
+    dryRun: true,
+    schedulerPrefix: '/fake/prefix',
+    signer: 'none',
+  });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.dry_run, true);
+  assert.strictEqual(result.delegated, true);
+  assert.strictEqual(result.runtime, 'openclaw-scheduler');
+  assert.strictEqual(result.session_target, 'isolated');
+  assert.ok(result.job_spec, 'dry-run receipt should include the job spec');
+  assert.ok(result.job_id, 'dry-run receipt should include a job_id');
+});
+
+test('exec shell task still works unchanged after delegation plumbing', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'echo-test', name: 'Echo Test',
+        shell: { program: 'echo', args: ['delegation-ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 'echo-test' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.result.exit_code, 0);
+  assert.ok(result.result.stdout.includes('delegation-ok'));
+});
+
+test('exec delegates prompt task to mock scheduler runner', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  // We need a fake scheduler binary that responds to --json capabilities
+  // and --json jobs add.  The simplest approach: point schedulerBin at a
+  // script that returns valid JSON for the commands the adapter calls.
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-delegation-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'case "$*" in',
+    '  *capabilities*)',
+    '    echo \'{"features":{},"scheduler_version":"0.0.0-test"}\'',
+    '    ;;',
+    '  *"jobs add"*|*jobs\\ add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *jobs*add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *)',
+    '    echo \'{}\'',
+    '    ;;',
+    'esac',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      schedulerBin: fakeBin,
+      signer: 'none',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.delegated, true);
+    assert.strictEqual(result.runtime, 'openclaw-scheduler');
+    assert.strictEqual(result.session_target, 'main');
+    assert.strictEqual(result.status, 'dispatched');
+    assert.ok(result.job_id);
+    assert.ok(result.handoff_version);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
   }
 });

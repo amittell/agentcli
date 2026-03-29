@@ -94,13 +94,22 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
 const SCHEDULER_CREATE_FIELDS = SCHEDULER_FIELDS_V1;
 const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id' && field !== 'origin');
 
+// Fields that the scheduler stores as JSON text blobs rather than scalar columns.
+const JSON_BLOB_FIELDS = new Set([
+  'identity', 'authorization_proof', 'authorization', 'evidence',
+]);
+
 function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   const spec = {};
   for (const field of fields) {
     if (!(field in job)) continue;
-    const value = field === 'enabled' ? Boolean(job[field]) : job[field];
+    let value = field === 'enabled' ? Boolean(job[field]) : job[field];
     if (value === undefined) continue;
     if (value === null && !includeNulls) continue;
+    // Scheduler expects JSON blob fields as stringified JSON, not raw objects
+    if (value !== null && typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
+      value = JSON.stringify(value);
+    }
     spec[field] = value;
   }
   return spec;

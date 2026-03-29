@@ -22,6 +22,12 @@ export { expandManifestShorthands } from './shorthand.js';
 export { applyFieldMask, parseFieldMask } from './fields.js';
 export { loadJsonInput, writeJsonOutput, resolveSafeOutputPath } from './io.js';
 export { executeTask } from './exec.js';
+export {
+  registerRuntimeAdapter,
+  getRuntimeAdapter,
+  resolveRuntimeAdapter,
+  listRuntimeAdapters,
+} from './runtime/index.js';
 export { generateExecutionId, writeAuditRecord, readAuditLog } from './audit.js';
 export { resolveIdentity, resolveIdentityV2, resolveContract, resolveAuthorizationProof, resolveAuthorization, resolveEvidence } from './compiler/shared.js';
 export { buildAttestationPayload, commandHash } from './attestation.js';
