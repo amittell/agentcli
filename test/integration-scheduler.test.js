@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
 import { applyManifestToScheduler, createSchedulerCliRunner } from '../src/apply.js';
+import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 
 const SCHEDULER_PATH = process.env.SCHEDULER_PATH || resolve(import.meta.dirname, '../../openclaw-scheduler');
 const schedulerPkg = join(SCHEDULER_PATH, 'package.json');
@@ -301,6 +302,81 @@ if (!existsSync(schedulerPkg)) {
       );
       assert.equal(typeof result.handoff.projected_fields, 'number', 'projected_fields should be a number');
       assert.ok(result.handoff.projected_fields > 0, 'projected_fields should be positive');
+    });
+
+    it('adopts existing job by name', async () => {
+      const db = dbPath('adopt');
+      const runner = createSchedulerCliRunner({
+        schedulerPrefix: SCHEDULER_PATH,
+        dbPath: db,
+      });
+
+      // Compile the hello-world manifest to get a valid job spec, then
+      // pre-seed it under a legacy id that differs from the stable id.
+      const manifest = readExample('hello-world.json');
+      const compiled = compileManifestToScheduler(manifest);
+      const collectJob = compiled.jobs.find(j => j.source.task_id === 'collect');
+      const legacyId = 'legacy-collect-' + Date.now();
+
+      // Build a valid scheduler spec from the compiled job but with the legacy id.
+      // Strip the internal 'source' field (not a scheduler column).
+      const { source: _source, id: _stableId, ...legacySpec } = collectJob;
+      runner.addJob({ id: legacyId, ...legacySpec });
+
+      // Verify the legacy job exists
+      const beforeJobs = runner.listJobs();
+      const legacyJob = beforeJobs.find(j => j.id === legacyId);
+      assert.ok(legacyJob, 'legacy job should exist before adoption');
+
+      // Apply hello-world manifest with adoptBy: 'name'.
+      // The manifest produces a job with the same name but a different stable id,
+      // so the apply should adopt (re-key) the existing job.
+      const result = await applyManifestToScheduler(manifest, {
+        schedulerPrefix: SCHEDULER_PATH,
+        dbPath: db,
+        adoptBy: 'name',
+      });
+
+      assert.equal(result.ok, true);
+
+      const adoptedAction = result.actions.find(a => a.action === 'adopted');
+      assert.ok(adoptedAction, 'expected at least one adopted action');
+      assert.equal(adoptedAction.name, collectJob.name, 'adopted job should match by name');
+      assert.equal(adoptedAction.adopted_from_job_id, legacyId, 'adopted_from_job_id should reference the legacy id');
+
+      // The stable id should now exist and the legacy id should be gone
+      const afterJobs = runner.listJobs();
+      const expectedStableId = stableId('daily-report', 'collect');
+      assert.ok(afterJobs.find(j => j.id === expectedStableId), 'stable id job should exist after adoption');
+      assert.ok(!afterJobs.find(j => j.id === legacyId), 'legacy id job should be removed after adoption');
+    });
+
+    it('v0.1 manifest backward compatibility with v22 scheduler', async () => {
+      // hello-world.json is a v0.1 manifest. This test explicitly verifies
+      // that v0.1 manifests still produce successful results against the
+      // current scheduler after all v0.2 capability negotiation changes.
+      const manifest = readExample('hello-world.json');
+      assert.equal(manifest.version, '0.1', 'hello-world.json should be a v0.1 manifest');
+
+      const db = dbPath('backcompat');
+      const result = await applyManifestToScheduler(manifest, {
+        schedulerPrefix: SCHEDULER_PATH,
+        dbPath: db,
+      });
+
+      assert.equal(result.ok, true, 'v0.1 manifest should apply successfully');
+      assert.ok(result.job_count >= 1, `expected at least 1 job, got ${result.job_count}`);
+      assert.equal(result.target, 'openclaw-scheduler');
+      assert.equal(result.dry_run, false);
+
+      // Capability negotiation should still succeed even for v0.1 manifests
+      assert.ok(result.capabilities, 'v0.1 apply should include capability metadata');
+      assert.equal(result.capabilities.negotiated, true, 'capabilities should be negotiated');
+
+      // All jobs should be created successfully
+      for (const action of result.actions) {
+        assert.equal(action.action, 'created', `expected 'created' for v0.1 job ${action.job_id}, got '${action.action}'`);
+      }
     });
   });
 }
