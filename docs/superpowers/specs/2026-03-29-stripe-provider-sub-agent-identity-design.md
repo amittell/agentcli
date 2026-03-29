@@ -20,6 +20,10 @@ Three connected gaps prevent the scheduler from executing tasks that require rea
 - Provider calls classify errors as transient (retry-eligible) or permanent (no retry).
 - Agent task credentials use auth-profile forwarding only. No credential injection via prompt. Full agent credential injection deferred until OpenClaw supports an env-inject header.
 - Providers are loaded via a plugin directory, not imported from agentcli.
+- Provider exports include a `type` field (`identity`, `authorization`, or `proof-verifier`) so the same file satisfies both agentcli's registry and the scheduler's plugin loader. agentcli's registry ignores the field; the scheduler uses it for categorization.
+- Provider files are self-contained (no imports from agentcli internals). Deployment to the scheduler's plugin directory is an operational concern (copy, symlink, or shared package).
+- The `prepareHandoff` method receives the parent's full profile (including `provider_config`) via `handoff.parent_profile`, so it can look up permission sets for the target scope without requiring provider statefulness.
+- Compile-time validation: if a child task's effective `child_credential_policy` is `downscope` (declared or inherited) and the child declares no identity scope, compilation fails with an actionable error.
 - Vault access uses the `command` value source (shells out to `vault kv get`) or pre-loaded env vars. No Vault SDK dependency.
 
 ## Architecture
@@ -95,7 +99,7 @@ Provider returns: { ok: false, transient: false, error: "Invalid key format" }
 
 New file: `agentcli/src/identity/stripe-api-key.js`
 
-Implements the standard identity provider interface with two key resolution strategies.
+Implements the standard identity provider interface with two key resolution strategies. Exports include `type: "identity"` for compatibility with the scheduler's plugin registry.
 
 **Provider config schema:**
 
@@ -174,9 +178,10 @@ Session structure:
 `prepareHandoff(session, handoff, ctx)`:
 - Called for `downscope` child credential policy
 - `handoff.target_scope` identifies the child's scope
-- Validates target_scope is reachable from parent scope via scope_hierarchy
-- For precreated: resolves the narrower key from the corresponding permission set
-- For dynamic: mints a new restricted key with narrower permissions
+- `handoff.parent_profile` carries the parent's full identity profile (including `provider_config` with `permission_sets` and `scope_hierarchy`). The scheduler populates this from the parent job's `identity` column.
+- Validates target_scope is reachable from parent scope via `handoff.parent_profile.provider_config.scope_hierarchy`
+- For precreated: reads the target scope's key source from `handoff.parent_profile.provider_config.permission_sets[target_scope]` and resolves the narrower key
+- For dynamic: mints a new restricted key with narrower permissions using the master key from parent profile
 - Returns `{ prepared: true, session: <narrower session> }` or `{ prepared: false, error }`
 
 `validateDelegation(chain, policy, ctx)`:
@@ -224,7 +229,7 @@ export function listProviders()
 { name: "jwt", type: "proof-verifier", validateProfile, verifyProof, describeVerification? }
 ```
 
-**Trust boundary:** The scheduler trusts all code in the provider directory. This is equivalent to trusting npm dependencies -- the operator controls what goes in the directory.
+**Trust boundary:** The scheduler trusts all code in the provider directory. This is equivalent to trusting npm dependencies -- the operator controls what goes in the directory. Provider files are self-contained with no imports from agentcli internals, so they can be copied or symlinked from agentcli's `src/identity/` directory or installed as a separate package.
 
 ### 3. Async v02-runtime.js
 
@@ -377,10 +382,10 @@ Valid values: `none`, `inherit`, `downscope`, `independent`.
    - "none": no credentials, skip identity resolution for parent context
    - "inherit": set child's auth_profile to parent job's auth_profile value
    - "downscope":
-     a. Read parent's identity profile and scope
+     a. Read parent's identity profile (from parent job's `identity` column) and scope
      b. Read child's declared scope
      c. Validate child scope is reachable from parent scope via scope_hierarchy
-     d. Call provider.prepareHandoff(parentSession, { target_scope: childScope })
+     d. Call provider.prepareHandoff(parentSession, { target_scope: childScope, parent_profile: parentIdentityProfile })
      e. Materialize the narrower session
    - "independent": resolve child's own identity profile (no parent involvement, existing behavior)
 ```
@@ -430,7 +435,7 @@ The provider shells out, caches the result for `cache_ttl_s` (default 300s) to a
 
 ### Modified files -- agentcli (4):
 - `src/identity/index.js` -- Register stripe-api-key provider
-- `src/compiler/openclaw-scheduler.js` -- Compile child_credential_policy field
+- `src/compiler/openclaw-scheduler.js` -- Compile child_credential_policy field, validate downscope+scope consistency
 - `src/compiler/shared.js` -- Resolve child_credential_policy from workflow/task declarations
 - `src/scheduler-fields.js` -- Add child_credential_policy to SCHEDULER_FIELDS_V02
 
@@ -449,6 +454,7 @@ The provider shells out, caches the result for `cache_ttl_s` (default 300s) to a
 - Async v02-runtime with mock providers in ctx
 - Shell env var injection (verify env dict merges correctly)
 - Child credential policy validation and compilation
+- Compile-time error when child inherits downscope but declares no identity scope
 
 **Integration tests (scheduler + agentcli, no network):**
 - Compile manifest with child_credential_policy, apply to scheduler, verify field stored

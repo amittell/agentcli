@@ -8169,3 +8169,754 @@ test('exec delegates prompt task to mock scheduler runner', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// child_credential_policy compilation
+// ---------------------------------------------------------------------------
+
+test('child_credential_policy: workflow-level policy flows to compiled job', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'downscope',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, 'downscope');
+});
+
+test('child_credential_policy: task-level policy overrides workflow-level', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'inherit',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'independent',
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, 'independent');
+});
+
+test('child_credential_policy: no policy results in null', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, null);
+});
+
+test('child_credential_policy: invalid policy value throws', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'invalid_value',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(/invalid_value/.test(err.message), 'error should mention the invalid value');
+      assert.ok(/none, inherit, downscope, independent/.test(err.message), 'error should list valid values');
+      return true;
+    },
+  );
+});
+
+test('child_credential_policy: downscope child with scope compiles OK', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live', scope: 'full' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+        identity: { ref: 'stripe-live', scope: 'readonly' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.strictEqual(compiled.jobs.length, 2);
+  const childJob = compiled.jobs.find(j => j.source.task_id === 'child');
+  assert.ok(childJob);
+});
+
+test('child_credential_policy: downscope child without scope produces error', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+      }],
+    }],
+  };
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(err.validation);
+      assert.ok(err.validation.errors.some(
+        e => /declares no identity scope/.test(e.message),
+      ), 'should contain error about missing identity scope');
+      return true;
+    },
+  );
+});
+
+test('child_credential_policy: child with own policy independent overrides inherited downscope', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live', scope: 'full' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+        child_credential_policy: 'independent',
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.strictEqual(compiled.jobs.length, 2);
+  const childJob = compiled.jobs.find(j => j.source.task_id === 'child');
+  assert.ok(childJob);
+  assert.strictEqual(childJob.child_credential_policy, 'independent');
+});
+
+test('child_credential_policy: field is in SCHEDULER_FIELDS_V02', () => {
+  assert.ok(
+    SCHEDULER_FIELDS_V02.includes('child_credential_policy'),
+    'SCHEDULER_FIELDS_V02 should include child_credential_policy',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// stripe-api-key identity provider
+// ---------------------------------------------------------------------------
+
+import stripeApiKeyProvider from '../src/identity/stripe-api-key.js';
+
+const validPrecreatedProfile = {
+  auth: {
+    provider_config: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      permission_sets: {
+        full: { key_env: 'STRIPE_KEY_FULL' },
+        readonly: { key_env: 'STRIPE_KEY_READONLY' },
+      },
+      scope_hierarchy: {
+        full: ['readonly'],
+        readonly: [],
+      },
+    },
+  },
+  trust: { level: 'supervised' },
+};
+
+// -- validateProfile tests --
+
+test('stripe-api-key validateProfile: valid precreated config passes', () => {
+  const result = stripeApiKeyProvider.validateProfile(validPrecreatedProfile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: missing key_strategy fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        account_mode: 'test',
+        permission_sets: { full: { key_env: 'X' } },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key_strategy/.test(e)));
+});
+
+test('stripe-api-key validateProfile: invalid key_strategy value fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'magic',
+        account_mode: 'test',
+        permission_sets: { full: { key_env: 'X' } },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key_strategy/.test(e)));
+});
+
+test('stripe-api-key validateProfile: missing permission_sets (precreated) fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /permission_sets/.test(e)));
+});
+
+test('stripe-api-key validateProfile: empty permission_sets fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {},
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /at least one scope entry/.test(e)));
+});
+
+test('stripe-api-key validateProfile: permission set without any key source fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: {},
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key source/.test(e)));
+});
+
+test('stripe-api-key validateProfile: cyclic scope_hierarchy fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          a: { key_env: 'K_A' },
+          b: { key_env: 'K_B' },
+        },
+        scope_hierarchy: {
+          a: ['b'],
+          b: ['a'],
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /cycle/.test(e)));
+});
+
+test('stripe-api-key validateProfile: valid scope_hierarchy passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'K_FULL' },
+          payments: { key_env: 'K_PAY' },
+          readonly: { key_env: 'K_RO' },
+        },
+        scope_hierarchy: {
+          full: ['payments', 'readonly'],
+          payments: [],
+          readonly: [],
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: valid dynamic config with master_key_source passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: dynamic config without master_key_source fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /master_key_source/.test(e)));
+});
+
+// -- resolveSession tests --
+
+test('stripe-api-key resolveSession: precreated with env source resolves key', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-1',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_test_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.session.provider, 'stripe-api-key');
+  assert.strictEqual(result.session.subject.kind, 'service');
+  assert.strictEqual(result.session.subject.principal, 'stripe:test');
+  assert.strictEqual(result.session.credentials.api_key.value, 'sk_test_abc123def456');
+  assert.strictEqual(result.session.credentials.api_key.scope, 'full');
+  assert.strictEqual(result.session.credentials.api_key.kind, 'bearer');
+  assert.strictEqual(result.session.instance.id, 'test-1');
+  assert.strictEqual(result.session.trust.declared_level, 'supervised');
+  assert.strictEqual(result.session.provider_assertions.key_strategy, 'precreated');
+  assert.strictEqual(result.session.provider_assertions.account_mode, 'test');
+  assert.strictEqual(result.session.provider_assertions.scope, 'full');
+  assert.strictEqual(result.session.delegation_validation.valid, true);
+});
+
+test('stripe-api-key resolveSession: returns error when env var is not set', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-2',
+    scope: 'full',
+  };
+  const ctx = { env: {}, cwd: '/tmp' };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/STRIPE_KEY_FULL/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: rejects invalid key format', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-3',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'not_a_stripe_key' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/does not match expected Stripe format/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: rejects key mode mismatch (live key with test profile)', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-4',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_live_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/mode mismatch/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: dynamic strategy returns not-implemented error', () => {
+  const dynamicProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile: dynamicProfile, instanceId: 'test-5' };
+  const result = stripeApiKeyProvider.resolveSession(request, {});
+  assert.strictEqual(result.ok, false);
+  assert.ok(/not yet implemented/.test(result.error));
+});
+
+// -- materialize tests --
+
+test('stripe-api-key materialize: produces correct env_vars with STRIPE_API_KEY default binding', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'sk_test_abc123def456',
+        scope: 'full',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+  };
+  const result = stripeApiKeyProvider.materialize(session, {}, {});
+  assert.strictEqual(result.materialized, true);
+  assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.cleanup_required, false);
+});
+
+test('stripe-api-key materialize: additional presentation bindings are included', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'sk_test_abc123def456',
+        scope: 'full',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+  };
+  const presentation = {
+    bindings: [
+      {
+        source: 'credentials.api_key.value',
+        target: { kind: 'env', name: 'MY_STRIPE_KEY' },
+      },
+      {
+        source: 'provider_assertions.scope',
+        target: { kind: 'env', name: 'STRIPE_SCOPE' },
+      },
+    ],
+  };
+  const result = stripeApiKeyProvider.materialize(session, presentation, {});
+  assert.strictEqual(result.materialized, true);
+  assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.env_vars['MY_STRIPE_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.env_vars['STRIPE_SCOPE'], 'full');
+});
+
+// -- prepareHandoff tests --
+
+test('stripe-api-key prepareHandoff: downscope to reachable scope succeeds', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    instance: { id: 'test-1', source: 'operator' },
+    trust: { declared_level: 'supervised', effective_level: 'supervised' },
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    ],
+  };
+  const handoff = {
+    target_scope: 'readonly',
+    parent_profile: validPrecreatedProfile,
+  };
+  const ctx = {
+    env: { STRIPE_KEY_READONLY: 'rk_test_readonly1234' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly1234');
+  assert.strictEqual(result.session.provider_assertions.parent_scope, 'full');
+  assert.strictEqual(result.session.handoff.mode, 'downscope');
+  assert.strictEqual(result.session.handoff.prepared, true);
+  assert.strictEqual(result.session.delegation_chain.length, 2);
+  assert.ok(/downscope:full->readonly/.test(result.session.delegation_chain[1].grant));
+});
+
+test('stripe-api-key prepareHandoff: downscope to unreachable scope fails', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: { kind: 'bearer', value: 'rk_test_readonly1234', scope: 'readonly' },
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:readonly', validated: true },
+    ],
+  };
+  const handoff = {
+    target_scope: 'full',
+    parent_profile: validPrecreatedProfile,
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_test_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, false);
+  assert.ok(/not reachable/.test(result.error));
+});
+
+test('stripe-api-key prepareHandoff: missing parent_profile returns error', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+  };
+  const handoff = { target_scope: 'readonly' };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, {});
+  assert.strictEqual(result.prepared, false);
+  assert.ok(/parent_profile/.test(result.error));
+});
+
+test('stripe-api-key prepareHandoff: reads permission_sets from parent_profile.provider_config', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    instance: { id: 'test-1', source: 'operator' },
+    trust: { declared_level: 'supervised', effective_level: 'supervised' },
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    ],
+  };
+  const customProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'CUSTOM_FULL' },
+          limited: { key_env: 'CUSTOM_LIMITED' },
+        },
+        scope_hierarchy: {
+          full: ['limited'],
+          limited: [],
+        },
+      },
+    },
+  };
+  const handoff = {
+    target_scope: 'limited',
+    parent_profile: customProfile,
+  };
+  const ctx = {
+    env: { CUSTOM_LIMITED: 'rk_test_limited12345' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'limited');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_limited12345');
+});
+
+// -- validateDelegation tests --
+
+test('stripe-api-key validateDelegation: chain within max_depth passes', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:full->readonly', validated: true },
+  ];
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, true);
+  assert.strictEqual(result.depth, 2);
+  assert.strictEqual(result.acyclic, true);
+  assert.strictEqual(result.escalation_detected, false);
+});
+
+test('stripe-api-key validateDelegation: chain exceeding max_depth fails', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:full->payments', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:payments->readonly', validated: true },
+  ];
+  const policy = {
+    max_depth: 2,
+    scope_hierarchy: {
+      full: ['payments'],
+      payments: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, false);
+  assert.strictEqual(result.depth, 3);
+});
+
+test('stripe-api-key validateDelegation: detects scope escalation in chain', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:readonly', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:readonly->full', validated: true },
+  ];
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, false);
+  assert.strictEqual(result.escalation_detected, true);
+});
+
+test('stripe-api-key validateDelegation: empty chain passes', () => {
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation([], policy, {});
+  assert.strictEqual(result.valid, true);
+  assert.strictEqual(result.depth, 0);
+  assert.strictEqual(result.acyclic, true);
+  assert.strictEqual(result.escalation_detected, false);
+});
+
+// -- describeSession tests --
+
+test('stripe-api-key describeSession: masks key values (shows prefix + last 4 chars)', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'rk_live_abcdefghijklmnop',
+        scope: 'payments',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'live',
+      scope: 'payments',
+    },
+  };
+  const described = stripeApiKeyProvider.describeSession(session, {});
+  assert.strictEqual(described.credentials.api_key.value, 'rk_live_...mnop');
+  assert.strictEqual(described.credentials.api_key.scope, 'payments');
+  assert.strictEqual(described.provider_assertions.account_mode, 'live');
+});

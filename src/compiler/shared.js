@@ -451,6 +451,19 @@ export function mergeEvidenceProfile(profile, declaration) {
   };
 }
 
+const VALID_CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'];
+
+export function resolveChildCredentialPolicy(workflow, task) {
+  const value = task.child_credential_policy ?? workflow.child_credential_policy ?? null;
+  if (value === null) return null;
+  if (!VALID_CHILD_CREDENTIAL_POLICIES.includes(value)) {
+    throw new Error(
+      `Invalid child_credential_policy "${value}"; must be one of: ${VALID_CHILD_CREDENTIAL_POLICIES.join(', ')}`,
+    );
+  }
+  return value;
+}
+
 function resolveIntent(task) {
   if (!task.intent) {
     return { mode: 'execute', read_only: null };
@@ -483,6 +496,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
   const modelPolicy = resolveModelPolicy(workflow, task);
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
+  const childCredentialPolicy = resolveChildCredentialPolicy(workflow, task);
   const intent = resolveIntent(task);
   const output = resolveOutput(task);
   const budgets = resolveBudgets(task);
@@ -532,6 +546,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     authorization_proof: resolveAuthorizationProof(workflow, task),
     authorization: resolveAuthorization(workflow, task),
     evidence: resolveEvidence(workflow, task),
+    child_credential_policy: childCredentialPolicy,
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

@@ -324,10 +324,32 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         contract_required_trust_level: plan.contract?.required_trust_level ?? null,
         contract_trust_enforcement: plan.contract?.trust_enforcement ?? null,
 
+        child_credential_policy: plan.child_credential_policy ?? null,
+
         delete_after_run: plan.delete_after_run ? 1 : 0
       };
       validateSchedulerStringLimits(targetErrors, taskPath, job);
       validateSchedulerReservedValues(targetErrors, taskPath, job);
+
+      if (isTriggered && task.trigger?.parent) {
+        const parentTask = workflow.tasks.find(t => t.id === task.trigger.parent);
+        const effectivePolicy =
+          plan.child_credential_policy
+          ?? (parentTask?.child_credential_policy ?? null)
+          ?? (workflow.child_credential_policy ?? null);
+        if (effectivePolicy === 'downscope') {
+          const childIdentityScope = task.identity?.scope ?? workflow.identity?.scope ?? null;
+          if (!childIdentityScope) {
+            const parentLabel = task.trigger.parent;
+            addTargetValidationError(
+              targetErrors,
+              `${taskPath}.identity.scope`,
+              `Task '${task.id}' inherits downscope policy from parent '${parentLabel}' but declares no identity scope. Add identity: { ref: ..., scope: ... } or set child_credential_policy: none.`
+            );
+          }
+        }
+      }
+
       jobs.push(job);
 
       explain.push({

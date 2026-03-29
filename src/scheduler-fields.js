@@ -33,6 +33,7 @@ export const SCHEDULER_FIELDS_V02 = [
   'contract_required_trust_level', 'contract_trust_enforcement',
   'contract_sandbox', 'contract_allowed_paths', 'contract_network',
   'contract_max_cost_usd', 'contract_audit',
+  'child_credential_policy',
 ];
 
 export const SCHEDULER_FIELD_VERSIONS = {
