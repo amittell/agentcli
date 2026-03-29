@@ -19,7 +19,7 @@ import {
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
-import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation } from '../src/apply.js';
+import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation, SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../src/apply.js';
 import { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from '../src/capabilities.js';
 import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
@@ -7047,6 +7047,250 @@ test('applyManifestToScheduler falls back to static when runner lacks queryCapab
   assert.ok(result.capabilities);
   assert.strictEqual(result.capabilities.source, 'static');
   assert.strictEqual(result.capabilities.negotiated, false);
+});
+
+// ---------------------------------------------------------------------------
+// Versioned Scheduler Field Projection (Track 8)
+// ---------------------------------------------------------------------------
+
+test('SCHEDULER_FIELD_VERSIONS v1 matches original 40-field list', () => {
+  const v1 = SCHEDULER_FIELD_VERSIONS['1'];
+  assert.ok(Array.isArray(v1));
+  assert.strictEqual(v1.length, 40);
+  assert.ok(v1.includes('id'));
+  assert.ok(v1.includes('name'));
+  assert.ok(v1.includes('delete_after_run'));
+  assert.ok(!v1.includes('identity_ref'));
+  assert.ok(!v1.includes('authorization_proof'));
+  assert.ok(!v1.includes('evidence'));
+});
+
+test('SCHEDULER_FIELD_VERSIONS v2 includes v1 plus 22 v0.2 fields', () => {
+  const v2 = SCHEDULER_FIELD_VERSIONS['2'];
+  assert.ok(Array.isArray(v2));
+  assert.strictEqual(v2.length, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
+  // all v1 fields present
+  for (const f of SCHEDULER_FIELDS_V1) {
+    assert.ok(v2.includes(f), `v2 should include v1 field "${f}"`);
+  }
+  // all v0.2 fields present
+  for (const f of SCHEDULER_FIELDS_V02) {
+    assert.ok(v2.includes(f), `v2 should include v0.2 field "${f}"`);
+  }
+});
+
+test('v1 and v0.2 field lists are disjoint', () => {
+  const overlap = SCHEDULER_FIELDS_V1.filter(f => SCHEDULER_FIELDS_V02.includes(f));
+  assert.strictEqual(overlap.length, 0, `Fields overlap between v1 and v0.2: ${overlap.join(', ')}`);
+});
+
+test('applyManifestToScheduler with handoff_version 2 sends v0.2 fields to addJob', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/handoff-v2' }
+    }],
+    workflows: [{
+      id: 'handoff-wf',
+      name: 'Handoff Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+        required_trust_level: 'restricted',
+        trust_enforcement: 'advisory'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Handoff Task',
+        prompt: 'test handoff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() { return []; },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(calls.length, 1);
+  // v0.2 fields should be present
+  assert.ok('identity_ref' in calls[0], 'identity_ref should be in spec');
+  assert.ok('identity' in calls[0], 'identity should be in spec');
+  assert.ok('contract_sandbox' in calls[0], 'contract_sandbox should be in spec');
+  assert.ok('contract_required_trust_level' in calls[0], 'contract_required_trust_level should be in spec');
+  assert.ok('contract_trust_enforcement' in calls[0], 'contract_trust_enforcement should be in spec');
+  // handoff metadata
+  assert.ok(result.handoff);
+  assert.strictEqual(result.handoff.field_version, '2');
+  assert.strictEqual(result.handoff.v02_fields_included, true);
+  assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELD_VERSIONS['2'].length);
+});
+
+test('applyManifestToScheduler without capabilities (old scheduler) strips v0.2 fields', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/handoff-v1' }
+    }],
+    workflows: [{
+      id: 'handoff-old-wf',
+      name: 'Old Scheduler Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Old Scheduler Task',
+        prompt: 'test old scheduler',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    // No queryCapabilities -- old scheduler
+    listJobs() { return []; },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(calls.length, 1);
+  // v0.2 fields should NOT be present
+  assert.strictEqual('identity_ref' in calls[0], false);
+  assert.strictEqual('identity' in calls[0], false);
+  assert.strictEqual('contract_sandbox' in calls[0], false);
+  assert.strictEqual('authorization_proof' in calls[0], false);
+  assert.strictEqual('evidence' in calls[0], false);
+  // handoff metadata
+  assert.ok(result.handoff);
+  assert.strictEqual(result.handoff.field_version, '1');
+  assert.strictEqual(result.handoff.v02_fields_included, false);
+  assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELDS_V1.length);
+});
+
+test('applyManifestToScheduler with handoff_version 2 passes v0.2 fields to updateJob', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/update-v2' }
+    }],
+    workflows: [{
+      id: 'update-wf',
+      name: 'Update v2 Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+        required_trust_level: 'restricted'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Update Task',
+        prompt: 'test update',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const updateCalls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() { return compiled.jobs.map(j => ({ id: j.id, name: j.name })); },
+    addJob() { throw new Error('should not add'); },
+    updateJob(id, spec) {
+      updateCalls.push({ id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(updateCalls.length, 1);
+  // v0.2 fields in update spec
+  assert.ok('identity_ref' in updateCalls[0].spec, 'identity_ref should be in update spec');
+  assert.ok('contract_sandbox' in updateCalls[0].spec, 'contract_sandbox should be in update spec');
+  assert.ok('contract_required_trust_level' in updateCalls[0].spec, 'contract_required_trust_level should be in update spec');
+  // id and origin should NOT be in update spec
+  assert.strictEqual('id' in updateCalls[0].spec, false);
+  assert.strictEqual('origin' in updateCalls[0].spec, false);
+});
+
+test('compiler output includes handoff metadata', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  assert.ok(compiled.handoff);
+  assert.strictEqual(compiled.handoff.field_version, '2');
+  assert.strictEqual(compiled.handoff.v1_field_count, SCHEDULER_FIELDS_V1.length);
+  assert.strictEqual(compiled.handoff.v2_field_count, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
 });
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,13 @@ import {
 import { expandManifestShorthands } from './shorthand.js';
 import { TARGETS } from './targets.js';
 import { querySchedulerCapabilities, resolveEffectiveFeatures } from './capabilities.js';
+import {
+  SCHEDULER_FIELDS_V1,
+  SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELD_VERSIONS,
+} from './scheduler-fields.js';
 export { shellCommandInvocation } from './command.js';
+export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELD_VERSIONS };
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -84,49 +90,8 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
   }
 }
 
-const SCHEDULER_CREATE_FIELDS = [
-  'id',
-  'name',
-  'enabled',
-  'schedule_cron',
-  'schedule_tz',
-  'session_target',
-  'agent_id',
-  'payload_kind',
-  'payload_message',
-  'payload_model',
-  'payload_thinking',
-  'execution_intent',
-  'execution_read_only',
-  'run_timeout_ms',
-  'overlap_policy',
-  'max_retries',
-  'max_queued_dispatches',
-  'max_pending_approvals',
-  'max_trigger_fanout',
-  'delivery_mode',
-  'delivery_channel',
-  'delivery_to',
-  'delivery_opt_out_reason',
-  'delivery_guarantee',
-  'origin',
-  'parent_id',
-  'trigger_on',
-  'trigger_delay_s',
-  'trigger_condition',
-  'approval_required',
-  'approval_timeout_s',
-  'approval_auto',
-  'context_retrieval',
-  'context_retrieval_limit',
-  'output_store_limit_bytes',
-  'output_excerpt_limit_bytes',
-  'output_summary_limit_bytes',
-  'output_offload_threshold_bytes',
-  'preferred_session_key',
-  'delete_after_run'
-];
-
+// Backward compat alias -- used when no version is negotiated
+const SCHEDULER_CREATE_FIELDS = SCHEDULER_FIELDS_V1;
 const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id' && field !== 'origin');
 
 function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
@@ -141,18 +106,21 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   return spec;
 }
 
-function schedulerCreateSpec(job, { originOverride } = {}) {
+function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
+  const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
   const { source, ...spec } = job;
-  const projected = projectSchedulerSpec(spec, SCHEDULER_CREATE_FIELDS, { includeNulls: false });
+  const projected = projectSchedulerSpec(spec, fields, { includeNulls: false });
   if (originOverride != null) {
     projected.origin = originOverride;
   }
   return projected;
 }
 
-function schedulerUpdateSpec(job) {
+function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
+  const fields = (SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1)
+    .filter(f => f !== 'id' && f !== 'origin');
   const { source, ...spec } = job;
-  return projectSchedulerSpec(spec, SCHEDULER_UPDATE_FIELDS, { includeNulls: true });
+  return projectSchedulerSpec(spec, fields, { includeNulls: true });
 }
 
 function duplicateNames(items) {
@@ -256,6 +224,7 @@ export async function applyManifestToScheduler(
   const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
   const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
   const effectiveFeatures = effectiveResult.features;
+  const handoffVersion = effectiveResult.handoff_version || '1';
 
   // v0.2: Authorization proof verification for backends lacking the capability
   if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
@@ -397,9 +366,9 @@ export async function applyManifestToScheduler(
 
     if (!dryRun) {
       if (action === 'created') {
-        schedulerRunner.addJob(schedulerCreateSpec(job));
+        schedulerRunner.addJob(schedulerCreateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'updated') {
-        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
+        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
         if (typeof schedulerRunner.deleteJob !== 'function') {
           throw Object.assign(
@@ -408,7 +377,7 @@ export async function applyManifestToScheduler(
           );
         }
         schedulerRunner.addJob(
-          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system' })
+          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system', fieldVersion: handoffVersion })
         );
         try {
           schedulerRunner.deleteJob(existingId);
@@ -457,6 +426,11 @@ export async function applyManifestToScheduler(
       source: effectiveResult.source,
       negotiated: effectiveResult.negotiated,
       handoff_version: effectiveResult.handoff_version || null,
+    },
+    handoff: {
+      field_version: handoffVersion,
+      projected_fields: (SCHEDULER_FIELD_VERSIONS[handoffVersion] || SCHEDULER_FIELDS_V1).length,
+      v02_fields_included: handoffVersion !== '1',
     },
     job_count: compiled.jobs.length,
     actions,

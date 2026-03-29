@@ -9,6 +9,7 @@ import {
   stableId
 } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
+import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../scheduler-fields.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
 const TRIGGERED_SENTINEL_TZ = 'UTC';
@@ -376,6 +377,11 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
   return {
     target: 'openclaw-scheduler',
     version: '0.2',
+    handoff: {
+      field_version: '2',
+      v1_field_count: SCHEDULER_FIELDS_V1.length,
+      v2_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length,
+    },
     jobs,
     ...profiles,
     ...(includeExplain ? { explain } : {})
