@@ -350,8 +350,16 @@ function validateIdentity(errors, path, value) {
   }
 
   // v0.2 identity (has ref or subject)
-  if (value.ref != null || value.subject != null || value.auth != null || value.trust != null || value.presentation != null) {
+  if (
+    value.ref != null ||
+    value.scope != null ||
+    value.subject != null ||
+    value.auth != null ||
+    value.trust != null ||
+    value.presentation != null
+  ) {
     checkString(errors, `${path}.ref`, value.ref, { required: false });
+    checkString(errors, `${path}.scope`, value.scope, { required: false });
     if (checkOptionalObject(errors, `${path}.subject`, value.subject)) {
       validateSubject(errors, `${path}.subject`, value.subject);
     }
@@ -638,6 +646,7 @@ function compareTrustLevels(a, b) {
 function hasV2IdentityShape(identity) {
   return isObject(identity) && (
     identity.ref != null ||
+    identity.scope != null ||
     identity.subject != null ||
     identity.auth != null ||
     identity.trust != null ||

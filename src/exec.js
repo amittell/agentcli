@@ -124,13 +124,54 @@ function summarizeMaterialization(materialization) {
   };
 }
 
+function normalizeIdentitySessionResult(result, providerName) {
+  if (
+    result &&
+    typeof result === 'object' &&
+    Object.prototype.hasOwnProperty.call(result, 'ok')
+  ) {
+    if (!result.ok) {
+      throw Object.assign(
+        new Error(
+          result.error || `Identity provider "${providerName}" failed to resolve credentials`
+        ),
+        {
+          code: result.code || 'resolution_failed',
+          retryable: Boolean(result.transient),
+        }
+      );
+    }
+
+    if (!result.session || typeof result.session !== 'object') {
+      throw Object.assign(
+        new Error(
+          `Identity provider "${providerName}" returned ok=true without a session payload`
+        ),
+        {
+          code: 'resolution_failed',
+          retryable: false,
+        }
+      );
+    }
+
+    return result.session;
+  }
+
+  return result;
+}
+
+function handoffPrepared(handoffResult) {
+  return Boolean(handoffResult?.prepared ?? handoffResult?.session?.handoff?.prepared);
+}
+
 function summarizeHandoff(handoffResult, mode) {
   if (!handoffResult && !mode) return null;
+  const credentialSet = handoffResult?.credentials ?? handoffResult?.session?.credentials ?? {};
   return {
-    mode: mode ?? handoffResult?.mode ?? null,
-    prepared: Boolean(handoffResult?.prepared),
-    credential_types: handoffResult?.credentials ? Object.keys(handoffResult.credentials) : [],
-    reason: handoffResult?.reason ?? null,
+    mode: mode ?? handoffResult?.mode ?? handoffResult?.session?.handoff?.mode ?? null,
+    prepared: handoffPrepared(handoffResult),
+    credential_types: Object.keys(credentialSet),
+    reason: handoffResult?.reason ?? handoffResult?.error ?? null,
   };
 }
 
@@ -704,7 +745,17 @@ async function executeV2(common, {
       identityProviderInstance = idProvider;
 
       try {
-        identitySession = await idProvider.resolveSession({ profile: identityDeclaration, instanceId }, { env, cwd });
+        identitySession = normalizeIdentitySessionResult(
+          await idProvider.resolveSession(
+            {
+              profile: identityDeclaration,
+              instanceId,
+              scope: identityDeclaration.scope ?? null,
+            },
+            { env, cwd }
+          ),
+          providerName
+        );
         resolvedIdentity = idProvider.describeSession(identitySession, { env });
       } catch (resolveError) {
         // Write resolution failure audit record
@@ -953,7 +1004,11 @@ async function executeV2(common, {
   if (declaredHandoff !== 'none' && identitySession && identityProviderInstance) {
     if (identityProviderInstance.prepareHandoff && identityProviderInstance.capabilities?.handoff_modes?.includes(declaredHandoff)) {
       try {
-        handoffResult = identityProviderInstance.prepareHandoff(identitySession, { mode: declaredHandoff }, { env });
+        handoffResult = await identityProviderInstance.prepareHandoff(
+          identitySession,
+          { mode: declaredHandoff },
+          { env, cwd }
+        );
       } catch (err) {
         warnings.push(`Credential handoff (${declaredHandoff}) failed: ${err.message}`);
       }
@@ -991,7 +1046,7 @@ async function executeV2(common, {
       command_hash: cmdHash,
       trust: trustInfo,
       hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       signer: provider.name,
       attestation,
       attestation_note,
@@ -1030,7 +1085,7 @@ async function executeV2(common, {
       authorization: authorizationDecision,
       trust: trustInfo,
       hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       signer: provider.name,
       attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
       attestation_note,
@@ -1208,7 +1263,7 @@ async function executeV2(common, {
       contract,
       command: commandMeta,
       hashes: { command: cmdHash, result: `sha256:${outputHash}` },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       evidence: evidenceMetadata,
       identity: identityDeclaration,
       command_hash: cmdHash,
@@ -1254,7 +1309,7 @@ async function executeV2(common, {
     trust: trustInfo,
     evidence: evidenceMetadata,
     hashes: { command: cmdHash, result: `sha256:${outputHash}` },
-    handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+    handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
     signer: provider.name,
     attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
     attestation_note,

@@ -64,6 +64,7 @@ function isV2IdentityDeclaration(identity) {
   if (!identity || typeof identity !== 'object') return false;
   return (
     identity.ref != null ||
+    identity.scope != null ||
     identity.subject != null ||
     identity.auth != null ||
     identity.trust != null ||
@@ -343,7 +344,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
           ?? (parentTask?.child_credential_policy ?? null)
           ?? (workflow.child_credential_policy ?? null);
         if (effectivePolicy === 'downscope') {
-          const childIdentityScope = task.identity?.scope ?? workflow.identity?.scope ?? null;
+          const childIdentityScope = resolvedIdentity?.scope ?? null;
           if (!childIdentityScope) {
             const parentLabel = task.trigger.parent;
             addTargetValidationError(

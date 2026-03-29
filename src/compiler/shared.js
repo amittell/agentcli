@@ -99,7 +99,20 @@ export function resolveIdentity(workflow, task) {
   const taskIdentity = task.identity || {};
 
   // v0.2 path: identity has ref or subject
-  if (taskIdentity.ref || taskIdentity.subject || workflowIdentity.ref || workflowIdentity.subject) {
+  if (
+    taskIdentity.ref ||
+    taskIdentity.scope ||
+    taskIdentity.subject ||
+    taskIdentity.auth ||
+    taskIdentity.trust ||
+    taskIdentity.presentation ||
+    workflowIdentity.ref ||
+    workflowIdentity.scope ||
+    workflowIdentity.subject ||
+    workflowIdentity.auth ||
+    workflowIdentity.trust ||
+    workflowIdentity.presentation
+  ) {
     return resolveIdentityV2(workflowIdentity, taskIdentity);
   }
 
@@ -114,6 +127,7 @@ export function resolveIdentity(workflow, task) {
 export function resolveIdentityV2(workflowIdentity, taskIdentity) {
   // ref: task replaces workflow
   const ref = taskIdentity.ref ?? workflowIdentity.ref ?? null;
+  const scope = taskIdentity.scope ?? workflowIdentity.scope ?? null;
 
   // subject: merge key by key
   const workflowSubject = workflowIdentity.subject || {};
@@ -183,7 +197,7 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
     default_redaction: taskPres.default_redaction ?? workflowPres.default_redaction ?? null,
   };
 
-  return { ref, subject, auth, trust, presentation };
+  return { ref, scope, subject, auth, trust, presentation };
 }
 
 export function resolveContract(workflow, task) {
@@ -332,6 +346,7 @@ export function mergeIdentityProfile(profile, identity) {
 
   return {
     ref: declaration.ref ?? base.id ?? null,
+    scope: declaration.scope ?? base.scope ?? null,
     provider: base.provider ?? null,
     subject: {
       kind: declarationSubject.kind ?? baseSubject.kind ?? null,

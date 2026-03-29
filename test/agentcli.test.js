@@ -57,6 +57,10 @@ import {
   resolveRuntimeAdapter,
   listRuntimeAdapters,
 } from '../src/runtime/index.js';
+import {
+  registerProvider as registerIdentityProvider,
+  getProvider as getIdentityProvider,
+} from '../src/identity/index.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -75,6 +79,71 @@ const shellManifest = readExample('shell-workflow.json');
 const publicBotHealthManifest = readExample('public-bot-health.json');
 const publicFailureTriageManifest = readExample('public-shell-failure-triage.json');
 const publicReportPublishManifest = readExample('public-report-publish.json');
+const TEST_ASYNC_HANDOFF_PROVIDER = 'test-async-handoff';
+
+if (!getIdentityProvider(TEST_ASYNC_HANDOFF_PROVIDER)) {
+  registerIdentityProvider({
+    name: TEST_ASYNC_HANDOFF_PROVIDER,
+    type: 'identity',
+    capabilities: {
+      auth_modes: ['service'],
+      credential_types: ['access_token'],
+      presentation_kinds: ['env'],
+      handoff_modes: ['none', 'downscope'],
+      refreshable: false,
+      delegation: false,
+      trust_levels: ['supervised'],
+      approval_mechanisms: [],
+    },
+    validateProfile() {
+      return { valid: true };
+    },
+    resolveSession(request) {
+      return {
+        ok: true,
+        session: {
+          provider: TEST_ASYNC_HANDOFF_PROVIDER,
+          subject: request.profile?.subject || { kind: 'service', principal: 'agent://mock/test' },
+          trust: {
+            declared_level: 'supervised',
+            effective_level: 'supervised',
+          },
+          credentials: {},
+          provider_assertions: {},
+          refresh: { supported: false, expires_at: null },
+          handoff: { mode: 'downscope', prepared: false },
+        },
+      };
+    },
+    describeSession(session) {
+      return structuredClone(session);
+    },
+    materialize() {
+      return {
+        materialized: true,
+        cleanup_required: false,
+        env_vars: {},
+        temp_files: [],
+        stdin: null,
+      };
+    },
+    cleanup() {
+      return { cleaned: true, warnings: [] };
+    },
+    async prepareHandoff() {
+      return {
+        prepared: true,
+        mode: 'downscope',
+        credentials: {
+          access_token: {
+            kind: 'bearer',
+            value: 'mock-downscoped-token',
+          },
+        },
+      };
+    },
+  });
+}
 
 test('all example manifests validate and compile', () => {
   for (const name of readdirSync(join(process.cwd(), 'examples')).filter(file => file.endsWith('.json')).sort()) {
@@ -1991,6 +2060,15 @@ test('schema task includes child_credential_policy', async () => {
     output.schema.fields.child_credential_policy.enum,
     ['none', 'inherit', 'downscope', 'independent']
   );
+});
+
+test('schema workflow and task identity surfaces include scope', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const workflowFields = output.schema.fields.workflows.items.fields;
+  const taskFields = workflowFields.tasks.items.fields;
+  assert.strictEqual(workflowFields.identity.fields.scope.type, 'string');
+  assert.strictEqual(taskFields.identity.fields.scope.type, 'string');
+  assert.strictEqual(taskFields.on_failure.fields.identity.fields.scope.type, 'string');
 });
 
 test('barrel export includes resolveManifestCandidate', () => {
@@ -6060,15 +6138,18 @@ test('normalizeAuthorizationRequest includes only listed fields', async () => {
 test('resolveIdentityV2 merges workflow and task identity', () => {
   const workflowIdentity = {
     ref: 'profile-a',
+    scope: 'full',
     subject: { kind: 'agent', principal: 'agent://a' },
     trust: { level: 'supervised' }
   };
   const taskIdentity = {
+    scope: 'readonly',
     subject: { principal: 'agent://b' },
     trust: { level: 'restricted' }
   };
   const result = resolveIdentityV2(workflowIdentity, taskIdentity);
   assert.strictEqual(result.ref, 'profile-a');
+  assert.strictEqual(result.scope, 'readonly');
   assert.strictEqual(result.subject.principal, 'agent://b');
   assert.strictEqual(result.subject.kind, 'agent');
   assert.strictEqual(result.trust.level, 'restricted');
@@ -6152,6 +6233,7 @@ test('resolveIdentityV2 merges trust constraints', () => {
 test('resolveIdentityV2 returns nulls for empty inputs', () => {
   const result = resolveIdentityV2({}, {});
   assert.strictEqual(result.ref, null);
+  assert.strictEqual(result.scope, null);
   assert.strictEqual(result.subject.kind, null);
   assert.strictEqual(result.subject.principal, null);
   assert.strictEqual(result.trust.level, null);
@@ -6198,6 +6280,105 @@ test('v0.2 exec with env-bearer identity and missing optional token succeeds', a
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.declared_identity.provider, 'env-bearer');
   assert.strictEqual(result.declared_identity.subject.kind, 'service');
+});
+
+test('v0.2 exec passes identity scope through to scoped providers', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-test',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:test' },
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_KEY_FULL' },
+            readonly: { key_env: 'STRIPE_KEY_READONLY' },
+          },
+          scope_hierarchy: {
+            full: ['readonly'],
+            readonly: [],
+          },
+        },
+      },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'stripe-w',
+      name: 'Stripe Workflow',
+      tasks: [{
+        id: 'echo-stripe-scope',
+        name: 'Echo Stripe Scope',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write(process.env.STRIPE_API_KEY || "MISSING")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'stripe-test', scope: 'readonly' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'echo-stripe-scope',
+    env: {
+      ...process.env,
+      STRIPE_KEY_FULL: 'sk_test_full_scope_value_123456',
+      STRIPE_KEY_READONLY: 'rk_test_readonly_scope_value_654321',
+    },
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.result.stdout, 'rk_test_readonly_scope_value_654321');
+});
+
+test('v0.2 exec awaits async handoff preparation and summarizes credentials', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'async-handoff-profile',
+      provider: TEST_ASYNC_HANDOFF_PROVIDER,
+      subject: { kind: 'service', principal: 'agent://mock/handoff' },
+      presentation: { handoff: 'downscope' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'handoff-workflow',
+      name: 'Handoff Workflow',
+      tasks: [{
+        id: 'handoff-task',
+        name: 'Handoff Task',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write("ok")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'async-handoff-profile' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'handoff-task',
+    dryRun: true,
+    presentationDebug: true,
+    signer: 'none',
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.deepStrictEqual(result.handoff, { mode: 'downscope', prepared: true });
+  assert.deepStrictEqual(result.presentation_debug.handoff, {
+    mode: 'downscope',
+    prepared: true,
+    credential_types: ['access_token'],
+    reason: null,
+  });
 });
 
 test('v0.2 exec runs command and returns output', async () => {
@@ -7048,6 +7229,32 @@ test('validateManifestCapabilities detects evidence_generation mismatch', () => 
   assert.strictEqual(errors.length, 1);
   assert.strictEqual(errors[0].feature, 'evidence_generation');
   assert.ok(errors[0].message.includes('Evidence Job'));
+});
+
+test('validateManifestCapabilities detects credential_handoff mismatch', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Handoff Job',
+        identity: {
+          presentation: {
+            handoff: 'downscope',
+          },
+        },
+      },
+    ]
+  };
+  const features = {
+    authorization_hook: true,
+    trust_evaluation: true,
+    evidence_generation: true,
+    credential_handoff: false,
+  };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'credential_handoff');
+  assert.ok(errors[0].message.includes('Handoff Job'));
 });
 
 test('validateManifestCapabilities returns no errors when all features satisfied', () => {
@@ -8599,8 +8806,11 @@ test('child_credential_policy: downscope child with scope compiles OK', () => {
   };
   const compiled = compileManifestToScheduler(manifest);
   assert.strictEqual(compiled.jobs.length, 2);
+  const parentJob = compiled.jobs.find(j => j.source.task_id === 'parent');
   const childJob = compiled.jobs.find(j => j.source.task_id === 'child');
+  assert.strictEqual(parentJob.identity.scope, 'full');
   assert.ok(childJob);
+  assert.strictEqual(childJob.identity.scope, 'readonly');
 });
 
 test('child_credential_policy: downscope child without scope produces error', () => {

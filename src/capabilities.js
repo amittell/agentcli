@@ -111,6 +111,18 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
         });
       }
     }
+
+    const handoffMode = job.identity?.presentation?.handoff ?? null;
+    if (handoffMode && handoffMode !== 'none') {
+      if (!features.credential_handoff) {
+        errors.push({
+          code: 'capability_mismatch',
+          feature: 'credential_handoff',
+          required_by: `job "${job.name || job.id}"`,
+          message: `Job "${job.name || job.id}" declares identity.presentation.handoff="${handoffMode}" but the runtime does not support credential_handoff`,
+        });
+      }
+    }
   }
 
   return errors;

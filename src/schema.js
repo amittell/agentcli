@@ -496,6 +496,7 @@ export const identityFieldV2 = {
   nullable: true,
   fields: {
     ref: nullableString,
+    scope: nullableString,
     subject: subjectField,
     auth: authField,
     trust: trustField,
