@@ -15,7 +15,8 @@ import {
   resolveAuthorizationProof,
   resolveContract,
   resolveEvidence,
-  resolveIdentity
+  resolveIdentity,
+  resolveVerify
 } from './compiler/shared.js';
 import { generateExecutionId, writeAuditRecord } from './audit.js';
 import { getAgentcliPaths } from './home.js';
@@ -82,6 +83,39 @@ function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) 
   }
 
   return { violations, warnings };
+}
+
+/**
+ * Run the verify command after a task completes successfully.
+ *
+ * @param {object} verify  - Resolved verify block (shell, timeout_seconds, on_failure).
+ * @param {object} options - { cwd, env } for spawn context.
+ * @returns {object} { passed, exit_code, stdout, stderr, timed_out, duration_ms }
+ */
+function runVerify(verify, { cwd = process.cwd(), env = process.env } = {}) {
+  const timeoutMs = (verify.timeout_seconds ?? 30) * 1000;
+  const startMs = Date.now();
+  const proc = spawnSync('sh', ['-c', verify.shell], {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 1 * 1024 * 1024,
+  });
+  const durationMs = Date.now() - startMs;
+  const stdout = proc.stdout || '';
+  const stderr = proc.stderr || '';
+  const exitCode = proc.status;
+  const timedOut = Boolean(proc.error && proc.error.code === 'ETIMEDOUT') || proc.signal === 'SIGTERM';
+
+  return {
+    passed: exitCode === 0 && !timedOut,
+    exit_code: exitCode,
+    stdout,
+    stderr,
+    timed_out: timedOut,
+    duration_ms: durationMs,
+  };
 }
 
 function resolvePrincipal(identity) {
@@ -250,6 +284,7 @@ function resolveCommonState(manifest, {
 
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
+  const verify = resolveVerify(workflow, task);
   const auditPolicy = contract.audit ?? 'always';
   const shell = normalizeShellExecution(task.shell);
   const effectiveTimeout = timeoutMs ?? task.runtime?.timeout_ms ?? null;
@@ -268,7 +303,7 @@ function resolveCommonState(manifest, {
   const providerConfig = provider.resolve({ env, signingKey: explicitSigningKey });
 
   return {
-    expanded, workflow, task, isV2, identity, contract,
+    expanded, workflow, task, isV2, identity, contract, verify,
     auditPolicy, shell, sandboxCommand, effectiveTimeout, violations, warnings,
     provider, providerConfig, cwd, env,
   };
@@ -379,7 +414,7 @@ function executeDelegated(common, options) {
 
 function executeV1(common, { dryRun }) {
   const {
-    workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
+    workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd, env,
   } = common;
 
@@ -563,9 +598,28 @@ function executeV1(common, { dryRun }) {
     structured_present: structured != null,
   };
 
+  // ------------------------------------------------------------------
+  // Post-execution verify phase
+  // ------------------------------------------------------------------
+
+  let verifyResult = null;
+  let verifyFailed = false;
+  if (verify && exitCode === 0 && !dryRun) {
+    verifyResult = runVerify(verify, { cwd, env });
+    if (!verifyResult.passed) {
+      if (verify.on_failure === 'warn') {
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+      } else {
+        verifyFailed = true;
+      }
+    }
+  }
+
+  const effectiveOk = exitCode === 0 && !verifyFailed;
+
   const shouldAudit =
     auditPolicy === 'always' ||
-    (auditPolicy === 'on-failure' && exitCode !== 0);
+    (auditPolicy === 'on-failure' && !effectiveOk);
 
   if (shouldAudit) {
     const record = {
@@ -587,6 +641,7 @@ function executeV1(common, { dryRun }) {
       signer: provider.name,
       attestation,
       attestation_note,
+      verify: verifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -595,8 +650,18 @@ function executeV1(common, { dryRun }) {
     writeAuditRecord(record, { auditPath: paths.audit });
   }
 
+  if (verifyFailed) {
+    const verifyStdout = verifyResult.stdout || '';
+    const verifyStderr = verifyResult.stderr || '';
+    const detail = verifyStderr || verifyStdout || '(no output)';
+    throw Object.assign(
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      { code: 'verify_failed', verify: verifyResult }
+    );
+  }
+
   return {
-    ok: exitCode === 0,
+    ok: effectiveOk,
     execution_id: executionId,
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
@@ -605,6 +670,7 @@ function executeV1(common, { dryRun }) {
     principal_used: principal,
     contract,
     result,
+    verify: verifyResult,
     trust: trustInfo,
     signer: provider.name,
     attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
@@ -629,7 +695,7 @@ async function executeV2(common, {
   env,
 }) {
   const {
-    expanded, workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
+    expanded, workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd,
   } = common;
 
@@ -1235,6 +1301,25 @@ async function executeV2(common, {
   }
 
   // ------------------------------------------------------------------
+  // Post-execution verify phase
+  // ------------------------------------------------------------------
+
+  let verifyResult = null;
+  let verifyFailed = false;
+  if (verify && exitCode === 0) {
+    verifyResult = runVerify(verify, { cwd, env });
+    if (!verifyResult.passed) {
+      if (verify.on_failure === 'warn') {
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+      } else {
+        verifyFailed = true;
+      }
+    }
+  }
+
+  const effectiveOk = exitCode === 0 && !verifyFailed;
+
+  // ------------------------------------------------------------------
   // Phase 7: Enhanced Audit Record
   // ------------------------------------------------------------------
 
@@ -1251,7 +1336,7 @@ async function executeV2(common, {
 
   const shouldAudit =
     auditPolicy === 'always' ||
-    (auditPolicy === 'on-failure' && exitCode !== 0);
+    (auditPolicy === 'on-failure' && !effectiveOk);
 
   if (shouldAudit) {
     const record = {
@@ -1274,6 +1359,7 @@ async function executeV2(common, {
       signer: provider.name,
       attestation,
       attestation_note,
+      verify: verifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -1294,12 +1380,22 @@ async function executeV2(common, {
     }
   }
 
+  if (verifyFailed) {
+    const verifyStdout = verifyResult.stdout || '';
+    const verifyStderr = verifyResult.stderr || '';
+    const detail = verifyStderr || verifyStdout || '(no output)';
+    throw Object.assign(
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      { code: 'verify_failed', verify: verifyResult }
+    );
+  }
+
   // ------------------------------------------------------------------
   // Return result
   // ------------------------------------------------------------------
 
   return {
-    ok: exitCode === 0,
+    ok: effectiveOk,
     execution_id: executionId,
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
@@ -1308,6 +1404,7 @@ async function executeV2(common, {
     principal_used: principal,
     contract,
     result,
+    verify: verifyResult,
     authorization_proof: authorizationProofSummary,
     authorization: authorizationDecision,
     trust: trustInfo,

@@ -5,7 +5,7 @@
  * commands (e.g. Vault) based on a scope-aware permission set model.
  * Supports two key strategies:
  *   - precreated: Resolve existing keys (restricted or secret) by scope name.
- *   - dynamic: Mint restricted keys via Stripe API (not yet implemented).
+ *   - dynamic: Mint restricted keys via the Stripe API at runtime.
  *
  * This file is self-contained with no imports from agentcli internals.
  * It can be copied to the scheduler's plugin directory and loaded as-is.
@@ -16,6 +16,9 @@
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import https from 'node:https';
+import http from 'node:http';
+import { URL } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Command-source cache: Map<cacheKey, { value, expiresAt }>
@@ -345,6 +348,272 @@ function resolveSessionPath(session, path) {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic key minting: Stripe restricted-key API helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Default Stripe API base URL.
+ */
+const DEFAULT_API_BASE = 'https://api.stripe.com';
+
+/**
+ * Default buffer (in seconds) added to task timeout when computing key expiry.
+ */
+const DEFAULT_EXPIRY_BUFFER_S = 300;
+
+/**
+ * Default scope-to-permission mapping for Stripe restricted keys.
+ *
+ * Each scope name maps to an object of Stripe resource permissions.
+ * The keys follow the Stripe restricted key permission format:
+ *   permissions[<resource>][<action>] = "read" | "write" | "none"
+ *
+ * These mappings produce the least-privilege set for common scope names.
+ * Operators can override this via config.scope_permissions.
+ */
+const DEFAULT_SCOPE_PERMISSIONS = {
+  full: {
+    'charges': 'write',
+    'customers': 'write',
+    'payment_intents': 'write',
+    'subscriptions': 'write',
+    'invoices': 'write',
+    'refunds': 'write',
+    'balance': 'read',
+    'events': 'read',
+  },
+  payments: {
+    'charges': 'write',
+    'payment_intents': 'write',
+    'refunds': 'write',
+    'customers': 'read',
+  },
+  readonly: {
+    'charges': 'read',
+    'customers': 'read',
+    'payment_intents': 'read',
+    'subscriptions': 'read',
+    'invoices': 'read',
+    'balance': 'read',
+    'events': 'read',
+  },
+};
+
+/**
+ * Encode an object of scope permissions into x-www-form-urlencoded body params
+ * for the Stripe restricted key API.
+ *
+ * Input: { charges: 'write', customers: 'read' }
+ * Output: 'permissions[charges][write]=true&permissions[customers][read]=true'
+ *
+ * @param {object} permissions - Map of resource to permission level.
+ * @returns {string} URL-encoded body string.
+ */
+function encodePermissionsBody(permissions) {
+  const parts = [];
+  for (const [resource, level] of Object.entries(permissions)) {
+    parts.push(`permissions[${encodeURIComponent(resource)}][${encodeURIComponent(level)}]=true`);
+  }
+  return parts.join('&');
+}
+
+/**
+ * Resolve the permission set for a scope, checking config overrides first,
+ * then falling back to DEFAULT_SCOPE_PERMISSIONS.
+ *
+ * @param {string} scope - The scope name.
+ * @param {object} config - Provider config.
+ * @returns {object|null} Permission map, or null if no mapping exists.
+ */
+function resolvePermissionsForScope(scope, config) {
+  if (config.scope_permissions && config.scope_permissions[scope]) {
+    return config.scope_permissions[scope];
+  }
+  return DEFAULT_SCOPE_PERMISSIONS[scope] || null;
+}
+
+/**
+ * Make an HTTPS (or HTTP for testing) request and return the parsed JSON response.
+ *
+ * @param {object} opts
+ * @param {string} opts.method - HTTP method.
+ * @param {string} opts.url - Full URL string.
+ * @param {object} opts.headers - Request headers.
+ * @param {string} [opts.body] - Request body.
+ * @param {number} [opts.timeout] - Request timeout in ms (default 30000).
+ * @returns {Promise<{ statusCode: number, body: object }>}
+ */
+function stripeRequest(opts) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(opts.url);
+    const transport = parsed.protocol === 'http:' ? http : https;
+
+    const reqOpts = {
+      method: opts.method,
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'http:' ? 80 : 443),
+      path: parsed.pathname + parsed.search,
+      headers: {
+        ...opts.headers,
+      },
+      timeout: opts.timeout || 30000,
+    };
+
+    if (opts.body) {
+      reqOpts.headers['Content-Length'] = Buffer.byteLength(opts.body, 'utf8');
+    }
+
+    const req = transport.request(reqOpts, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let body;
+        try {
+          body = JSON.parse(raw);
+        } catch (_parseErr) {
+          body = { raw_body: raw };
+        }
+        resolve({ statusCode: res.statusCode, body });
+      });
+    });
+
+    req.on('error', (err) => reject(err));
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Stripe API request timed out'));
+    });
+
+    if (opts.body) {
+      req.write(opts.body);
+    }
+    req.end();
+  });
+}
+
+/**
+ * Create a restricted API key via the Stripe API.
+ *
+ * POST /v1/api_keys
+ * Authorization: Bearer <master_key>
+ * Content-Type: application/x-www-form-urlencoded
+ *
+ * Expected response (success):
+ *   { "id": "rk_...", "object": "api_key", "secret": "rk_test_...", ... }
+ *
+ * @param {string} masterKey - The secret key with permission to create restricted keys.
+ * @param {object} permissions - Resource-to-level permission map.
+ * @param {string} apiBase - Stripe API base URL.
+ * @returns {Promise<{ ok: boolean, key_id?: string, key_secret?: string, error?: string, transient?: boolean }>}
+ */
+async function createRestrictedKey(masterKey, permissions, apiBase) {
+  const body = encodePermissionsBody(permissions);
+  const url = `${apiBase}/v1/api_keys`;
+
+  try {
+    const res = await stripeRequest({
+      method: 'POST',
+      url,
+      headers: {
+        'Authorization': `Bearer ${masterKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      const keyId = res.body.id;
+      const keySecret = res.body.secret || res.body.key;
+      if (!keyId || !keySecret) {
+        return {
+          ok: false,
+          transient: false,
+          error: `Stripe API returned success but missing id or secret in response: ${JSON.stringify(res.body)}`,
+        };
+      }
+      return { ok: true, key_id: keyId, key_secret: keySecret };
+    }
+
+    const isTransient = res.statusCode === 429 || res.statusCode >= 500;
+    const errorMsg = (res.body && res.body.error && res.body.error.message)
+      ? res.body.error.message
+      : `HTTP ${res.statusCode}`;
+    return {
+      ok: false,
+      transient: isTransient,
+      error: `Stripe API error creating restricted key: ${errorMsg}`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      transient: true,
+      error: `Stripe API request failed: ${err.message}`,
+    };
+  }
+}
+
+/**
+ * Delete a restricted API key via the Stripe API.
+ *
+ * DELETE /v1/api_keys/{key_id}
+ * Authorization: Bearer <master_key>
+ *
+ * @param {string} masterKey - The secret key with permission to manage restricted keys.
+ * @param {string} keyId - The restricted key ID to delete.
+ * @param {string} apiBase - Stripe API base URL.
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function deleteRestrictedKey(masterKey, keyId, apiBase) {
+  const url = `${apiBase}/v1/api_keys/${encodeURIComponent(keyId)}`;
+
+  try {
+    const res = await stripeRequest({
+      method: 'DELETE',
+      url,
+      headers: {
+        'Authorization': `Bearer ${masterKey}`,
+      },
+    });
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      return { ok: true };
+    }
+
+    const errorMsg = (res.body && res.body.error && res.body.error.message)
+      ? res.body.error.message
+      : `HTTP ${res.statusCode}`;
+    return { ok: false, error: `Stripe API error deleting key ${keyId}: ${errorMsg}` };
+  } catch (err) {
+    return { ok: false, error: `Stripe API request failed during key deletion: ${err.message}` };
+  }
+}
+
+/**
+ * Resolve the master key from the configured source (env, file, or command).
+ *
+ * @param {object} masterKeySource - { env?, file?, command? }
+ * @param {object} env - Environment object.
+ * @param {string} cwd - Working directory.
+ * @returns {{ ok: boolean, value?: string, error?: string, transient?: boolean }}
+ */
+function resolveMasterKey(masterKeySource, env, cwd) {
+  if (typeof masterKeySource.env === 'string' && masterKeySource.env.length > 0) {
+    return resolveEnvSource(masterKeySource.env, env);
+  }
+  if (typeof masterKeySource.file === 'string' && masterKeySource.file.length > 0) {
+    return resolveFileSource(masterKeySource.file);
+  }
+  if (typeof masterKeySource.command === 'string' && masterKeySource.command.length > 0) {
+    return resolveCommandSource(masterKeySource.command, 60000, { cwd, env });
+  }
+  return {
+    ok: false,
+    transient: false,
+    error: 'master_key_source has no valid source (env, file, or command)',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Provider implementation
 // ---------------------------------------------------------------------------
 
@@ -465,6 +734,29 @@ const stripeApiKeyProvider = {
           errors.push('master_key_source must declare at least one source: env, file, or command');
         }
       }
+
+      // api_base: optional, must be a valid URL if present
+      if (config.api_base !== undefined && config.api_base !== null) {
+        if (typeof config.api_base !== 'string' || config.api_base.length === 0) {
+          errors.push('provider_config.api_base must be a non-empty string URL');
+        } else {
+          try {
+            const parsed = new URL(config.api_base);
+            if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+              errors.push('provider_config.api_base must use https: or http: protocol');
+            }
+          } catch (_urlErr) {
+            errors.push(`provider_config.api_base is not a valid URL: ${config.api_base}`);
+          }
+        }
+      }
+
+      // default_expiry_buffer_s: optional, must be a positive number if present
+      if (config.default_expiry_buffer_s !== undefined && config.default_expiry_buffer_s !== null) {
+        if (typeof config.default_expiry_buffer_s !== 'number' || config.default_expiry_buffer_s <= 0) {
+          errors.push('provider_config.default_expiry_buffer_s must be a positive number');
+        }
+      }
     }
 
     // cache_ttl_s: optional, must be a positive number if present
@@ -503,11 +795,7 @@ const stripeApiKeyProvider = {
     const trustLevel = (profile.trust && profile.trust.level) || 'supervised';
 
     if (config.key_strategy === 'dynamic') {
-      return {
-        ok: false,
-        transient: false,
-        error: 'Dynamic key strategy not yet implemented',
-      };
+      return this._resolveDynamicSession(request, config, env, cwd, trustLevel);
     }
 
     // Precreated strategy
@@ -619,6 +907,122 @@ const stripeApiKeyProvider = {
   },
 
   /**
+   * Internal: resolve a dynamic session by minting a restricted key via Stripe API.
+   *
+   * @param {object} request - Session request.
+   * @param {object} config - Provider config.
+   * @param {object} env - Environment object.
+   * @param {string} cwd - Working directory.
+   * @param {string} trustLevel - Effective trust level.
+   * @returns {Promise<{ ok: boolean, session?: object, transient?: boolean, error?: string }>}
+   */
+  async _resolveDynamicSession(request, config, env, cwd, trustLevel) {
+    const scope = request.scope || 'full';
+    const accountMode = config.account_mode || 'test';
+    const apiBase = config.api_base || DEFAULT_API_BASE;
+    const expiryBufferS = (typeof config.default_expiry_buffer_s === 'number' && config.default_expiry_buffer_s > 0)
+      ? config.default_expiry_buffer_s
+      : DEFAULT_EXPIRY_BUFFER_S;
+
+    // Resolve the master key
+    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd);
+    if (!masterKeyResult.ok) {
+      return {
+        ok: false,
+        transient: masterKeyResult.transient,
+        error: `Failed to resolve master key: ${masterKeyResult.error}`,
+      };
+    }
+
+    // Validate master key format
+    const masterKeyCheck = validateKeyFormat(masterKeyResult.value, accountMode);
+    if (!masterKeyCheck.valid) {
+      return {
+        ok: false,
+        transient: false,
+        error: `Master key format invalid: ${masterKeyCheck.error}`,
+      };
+    }
+
+    // Resolve permissions for the requested scope
+    const permissions = resolvePermissionsForScope(scope, config);
+    if (!permissions || Object.keys(permissions).length === 0) {
+      return {
+        ok: false,
+        transient: false,
+        error: `No permission mapping found for scope "${scope}". Define scope_permissions["${scope}"] in provider_config or use a built-in scope (full, payments, readonly).`,
+      };
+    }
+
+    // Create the restricted key via Stripe API
+    const createResult = await createRestrictedKey(masterKeyResult.value, permissions, apiBase);
+    if (!createResult.ok) {
+      return {
+        ok: false,
+        transient: createResult.transient,
+        error: createResult.error,
+      };
+    }
+
+    // Compute expiry: task timeout (if known) + buffer, or just buffer from now
+    const taskTimeoutS = (request.task_timeout_s && typeof request.task_timeout_s === 'number')
+      ? request.task_timeout_s
+      : 0;
+    const expiresAt = new Date(Date.now() + ((taskTimeoutS + expiryBufferS) * 1000)).toISOString();
+
+    const session = {
+      provider: 'stripe-api-key',
+      subject: {
+        kind: 'service',
+        principal: `stripe:${accountMode}`,
+      },
+      instance: request.instanceId ? { id: request.instanceId, source: 'operator' } : null,
+      trust: {
+        declared_level: trustLevel,
+        effective_level: trustLevel,
+      },
+      credentials: {
+        api_key: {
+          kind: 'bearer',
+          value: createResult.key_secret,
+          scope,
+        },
+      },
+      provider_assertions: {
+        key_strategy: 'dynamic',
+        account_mode: accountMode,
+        scope,
+        stripe_key_id: createResult.key_id,
+        api_base: apiBase,
+      },
+      delegation_chain: [
+        {
+          kind: 'service',
+          principal: `stripe:${accountMode}`,
+          grant: `scope:${scope}`,
+          validated: true,
+        },
+      ],
+      delegation_validation: {
+        valid: true,
+        depth: 1,
+        acyclic: true,
+        escalation_detected: false,
+      },
+      refresh: {
+        supported: false,
+        expires_at: expiresAt,
+      },
+      handoff: {
+        mode: config.scope_hierarchy ? 'downscope' : 'none',
+        prepared: false,
+      },
+    };
+
+    return { ok: true, session };
+  },
+
+  /**
    * Materialize session credentials into environment variables for
    * subprocess injection.
    *
@@ -662,15 +1066,55 @@ const stripeApiKeyProvider = {
    * Clean up materialized credentials.
    *
    * For precreated strategy: no-op (keys are long-lived).
-   * For dynamic strategy: placeholder for future key revocation.
+   * For dynamic strategy: revokes the minted restricted key via Stripe API.
+   * Revocation is best-effort: failures are reported as warnings but
+   * do not cause the cleanup to fail overall.
    *
-   * @param {object} _materialization - The materialization result.
-   * @param {object} _ctx             - Resolution context.
-   * @returns {{ cleaned: boolean, warnings?: string[] }}
+   * @param {object} materialization - The materialization result (includes session reference).
+   * @param {object} ctx             - Resolution context: { session, env, cwd }.
+   * @returns {Promise<{ cleaned: boolean, warnings?: string[] }>|{ cleaned: boolean, warnings?: string[] }}
    */
-  cleanup(_materialization, _ctx) {
-    // Precreated keys need no cleanup -- they are long-lived and not minted per-job
-    return { cleaned: true };
+  cleanup(materialization, ctx) {
+    const session = (ctx && ctx.session) || (materialization && materialization.session) || null;
+    if (!session) {
+      return { cleaned: true };
+    }
+
+    const assertions = session.provider_assertions || {};
+    if (assertions.key_strategy !== 'dynamic') {
+      // Precreated keys need no cleanup -- they are long-lived and not minted per-job
+      return { cleaned: true };
+    }
+
+    const keyId = assertions.stripe_key_id;
+    if (!keyId) {
+      return { cleaned: true, warnings: ['Dynamic session has no stripe_key_id; nothing to revoke'] };
+    }
+
+    // Resolve master key for deletion
+    const env = (ctx && ctx.env) || process.env;
+    const cwd = (ctx && ctx.cwd) || process.cwd();
+    const config = (ctx && ctx.provider_config) || {};
+    const masterKeySource = config.master_key_source || {};
+    const apiBase = assertions.api_base || config.api_base || DEFAULT_API_BASE;
+
+    const masterKeyResult = resolveMasterKey(masterKeySource, env, cwd);
+    if (!masterKeyResult.ok) {
+      return {
+        cleaned: true,
+        warnings: [`Could not resolve master key for cleanup: ${masterKeyResult.error}`],
+      };
+    }
+
+    // Async deletion, best-effort
+    return deleteRestrictedKey(masterKeyResult.value, keyId, apiBase).then((delResult) => {
+      if (!delResult.ok) {
+        return { cleaned: true, warnings: [delResult.error] };
+      }
+      return { cleaned: true };
+    }).catch((err) => {
+      return { cleaned: true, warnings: [`Key revocation failed: ${err.message}`] };
+    });
   },
 
   /**
@@ -703,10 +1147,6 @@ const stripeApiKeyProvider = {
 
     const config = (parentProfile.auth && parentProfile.auth.provider_config) || {};
 
-    if (config.key_strategy === 'dynamic') {
-      return { prepared: false, error: 'Dynamic key strategy not yet implemented for handoff' };
-    }
-
     // Determine parent scope from the current session
     const parentScope = (session.credentials && session.credentials.api_key &&
       session.credentials.api_key.scope) || null;
@@ -724,7 +1164,11 @@ const stripeApiKeyProvider = {
       };
     }
 
-    // Look up the target scope's permission set
+    if (config.key_strategy === 'dynamic') {
+      return this._prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd);
+    }
+
+    // Look up the target scope's permission set (precreated strategy)
     const permSets = config.permission_sets || {};
     const targetPermSet = permSets[targetScope];
     if (!targetPermSet) {
@@ -807,6 +1251,103 @@ const stripeApiKeyProvider = {
       refresh: {
         supported: false,
         expires_at: null,
+      },
+      handoff: {
+        mode: 'downscope',
+        prepared: true,
+      },
+    };
+
+    return { prepared: true, session: childSession };
+  },
+
+  /**
+   * Internal: prepare a dynamic handoff by minting a new restricted key
+   * with narrower permissions for the target scope.
+   *
+   * @param {object} session - Parent session.
+   * @param {string} targetScope - Target scope for the child.
+   * @param {string} parentScope - Parent's current scope.
+   * @param {object} config - Provider config from parent profile.
+   * @param {object} env - Environment object.
+   * @param {string} cwd - Working directory.
+   * @returns {Promise<{ prepared: boolean, session?: object, error?: string }>}
+   */
+  async _prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd) {
+    const accountMode = config.account_mode || 'test';
+    const apiBase = config.api_base || DEFAULT_API_BASE;
+    const expiryBufferS = (typeof config.default_expiry_buffer_s === 'number' && config.default_expiry_buffer_s > 0)
+      ? config.default_expiry_buffer_s
+      : DEFAULT_EXPIRY_BUFFER_S;
+
+    // Resolve the master key for minting the child key
+    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd);
+    if (!masterKeyResult.ok) {
+      return { prepared: false, error: `Failed to resolve master key for handoff: ${masterKeyResult.error}` };
+    }
+
+    // Resolve narrower permissions for the target scope
+    const permissions = resolvePermissionsForScope(targetScope, config);
+    if (!permissions || Object.keys(permissions).length === 0) {
+      return {
+        prepared: false,
+        error: `No permission mapping for handoff scope "${targetScope}". Define scope_permissions["${targetScope}"] in provider_config.`,
+      };
+    }
+
+    // Mint a new restricted key with the narrower permissions
+    const createResult = await createRestrictedKey(masterKeyResult.value, permissions, apiBase);
+    if (!createResult.ok) {
+      return { prepared: false, error: createResult.error };
+    }
+
+    const expiresAt = new Date(Date.now() + (expiryBufferS * 1000)).toISOString();
+    const trustLevel = session.trust ? session.trust.effective_level : 'supervised';
+
+    const childSession = {
+      provider: 'stripe-api-key',
+      subject: {
+        kind: 'service',
+        principal: `stripe:${accountMode}`,
+      },
+      instance: session.instance,
+      trust: {
+        declared_level: trustLevel,
+        effective_level: trustLevel,
+      },
+      credentials: {
+        api_key: {
+          kind: 'bearer',
+          value: createResult.key_secret,
+          scope: targetScope,
+        },
+      },
+      provider_assertions: {
+        key_strategy: 'dynamic',
+        account_mode: accountMode,
+        scope: targetScope,
+        parent_scope: parentScope,
+        stripe_key_id: createResult.key_id,
+        api_base: apiBase,
+      },
+      delegation_chain: [
+        ...(session.delegation_chain || []),
+        {
+          kind: 'service',
+          principal: `stripe:${accountMode}`,
+          grant: `downscope:${parentScope}->${targetScope}`,
+          validated: true,
+        },
+      ],
+      delegation_validation: {
+        valid: true,
+        depth: (session.delegation_chain || []).length + 1,
+        acyclic: true,
+        escalation_detected: false,
+      },
+      refresh: {
+        supported: false,
+        expires_at: expiresAt,
       },
       handoff: {
         mode: 'downscope',
@@ -913,3 +1454,16 @@ const stripeApiKeyProvider = {
 
 export default stripeApiKeyProvider;
 export { stripeApiKeyProvider };
+
+// Exported for unit testing of internal helpers
+export {
+  encodePermissionsBody,
+  resolvePermissionsForScope,
+  stripeRequest,
+  createRestrictedKey,
+  deleteRestrictedKey,
+  resolveMasterKey,
+  DEFAULT_API_BASE,
+  DEFAULT_EXPIRY_BUFFER_S,
+  DEFAULT_SCOPE_PERMISSIONS,
+};

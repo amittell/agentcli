@@ -245,12 +245,17 @@ export async function applyManifestToScheduler(
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     handoffVersion = effectiveResult.handoff_version || '1';
 
-    const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+    const { errors: capabilityErrors, warnings: capabilityWarnings } = validateManifestCapabilities(compiled, effectiveResult);
     if (capabilityErrors.length > 0) {
       throw Object.assign(
         new Error(capabilityErrors.map(error => error.message).join('; ')),
         { code: 'unsupported_capability', capability_errors: capabilityErrors }
       );
+    }
+    if (capabilityWarnings.length > 0) {
+      for (const warning of capabilityWarnings) {
+        process.stderr.write(`warning: ${warning.message}\n`);
+      }
     }
   }
   const effectiveFeatures = effectiveResult.features;

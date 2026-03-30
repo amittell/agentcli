@@ -507,11 +507,24 @@ function resolveBudgets(task) {
   };
 }
 
+export function resolveVerify(workflow, task) {
+  const workflowVerify = workflow.verify || null;
+  const taskVerify = task.verify || null;
+  if (!taskVerify && !workflowVerify) return null;
+  const effective = taskVerify || workflowVerify;
+  return {
+    shell: effective.shell,
+    timeout_seconds: effective.timeout_seconds ?? 30,
+    on_failure: effective.on_failure ?? 'error',
+  };
+}
+
 export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
   const modelPolicy = resolveModelPolicy(workflow, task);
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
   const childCredentialPolicy = resolveChildCredentialPolicy(workflow, task);
+  const verify = resolveVerify(workflow, task);
   const intent = resolveIntent(task);
   const output = resolveOutput(task);
   const budgets = resolveBudgets(task);
@@ -562,6 +575,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     authorization: resolveAuthorization(workflow, task),
     evidence: resolveEvidence(workflow, task),
     child_credential_policy: childCredentialPolicy,
+    verify,
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

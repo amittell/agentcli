@@ -16,7 +16,8 @@ const KNOWN_MANIFEST_KEYS = new Set([
 
 const KNOWN_WORKFLOW_KEYS = new Set([
   'id', 'name', 'model_policy', 'identity', 'contract', 'tasks',
-  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy',
+  'verify'
 ]);
 
 const KNOWN_TASK_KEYS = new Set([
@@ -24,7 +25,8 @@ const KNOWN_TASK_KEYS = new Set([
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
   'identity', 'contract', 'on_failure', 'delete_after_run',
-  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy',
+  'verify'
 ]);
 
 const KNOWN_ON_FAILURE_KEYS = new Set([
@@ -610,6 +612,24 @@ function validateOptionalBlocks(errors, warnings, path, value) {
   checkBoolean(errors, `${path}.delete_after_run`, value.delete_after_run);
 }
 
+function validateVerify(errors, path, value) {
+  if (!isObject(value)) {
+    addError(errors, path, 'must be an object');
+    return;
+  }
+  if (value.shell == null || typeof value.shell !== 'string' || value.shell.trim() === '') {
+    addError(errors, `${path}.shell`, 'is required and must be a non-empty string');
+  } else if (hasUnsupportedControlChars(value.shell)) {
+    addError(errors, `${path}.shell`, 'contains unsupported control characters');
+  }
+  if (value.timeout_seconds != null) {
+    if (!Number.isInteger(value.timeout_seconds) || value.timeout_seconds < 1) {
+      addError(errors, `${path}.timeout_seconds`, 'must be an integer >= 1');
+    }
+  }
+  checkEnum(errors, `${path}.on_failure`, value.on_failure, ['error', 'warn']);
+}
+
 function validateOnFailure(errors, warnings, path, task) {
   if (task.on_failure == null) return;
   if (!isObject(task.on_failure)) {
@@ -846,6 +866,9 @@ export function validateManifest(manifest) {
         validateEvidenceRef(errors, `${workflowPath}.evidence`, workflow.evidence);
       }
       validateChildCredentialPolicy(errors, `${workflowPath}.child_credential_policy`, workflow.child_credential_policy);
+      if (checkOptionalObject(errors, `${workflowPath}.verify`, workflow.verify)) {
+        validateVerify(errors, `${workflowPath}.verify`, workflow.verify);
+      }
       if (workflow.id) {
         if (workflowIds.has(workflow.id)) addError(errors, `${workflowPath}.id`, 'must be unique');
         workflowIds.add(workflow.id);
@@ -912,6 +935,9 @@ export function validateManifest(manifest) {
 
         validateOptionalBlocks(errors, warnings, taskPath, task);
         validateChildCredentialPolicy(errors, `${taskPath}.child_credential_policy`, task.child_credential_policy);
+        if (checkOptionalObject(errors, `${taskPath}.verify`, task.verify)) {
+          validateVerify(errors, `${taskPath}.verify`, task.verify);
+        }
         if (task.target?.session_target === 'shell' && (task.intent?.mode === 'plan' || task.intent?.read_only)) {
           warnings.push({
             path: `${taskPath}.intent`,

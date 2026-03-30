@@ -327,6 +327,11 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
         child_credential_policy: plan.child_credential_policy ?? null,
 
+        // verify fields
+        verify_shell: plan.verify?.shell ?? null,
+        verify_timeout_s: plan.verify?.timeout_seconds ?? null,
+        verify_on_failure: plan.verify?.on_failure ?? null,
+
         delete_after_run: plan.delete_after_run ? 1 : 0
       };
       validateSchedulerStringLimits(targetErrors, taskPath, job);

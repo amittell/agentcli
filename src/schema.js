@@ -163,6 +163,17 @@ const shellField = {
   }
 };
 
+const verifyField = {
+  type: 'object',
+  nullable: true,
+  required: ['shell'],
+  fields: {
+    shell: { type: 'string', note: 'Shell command to run for post-completion verification' },
+    timeout_seconds: { type: 'integer', min: 1, nullable: true, note: 'Max time for verify command (default: 30)' },
+    on_failure: { type: 'string', enum: ['error', 'warn'], nullable: true, note: 'Behavior when verify fails (default: error)' }
+  }
+};
+
 const onFailureField = {
   type: 'object',
   nullable: true,
@@ -714,6 +725,7 @@ MANIFEST_SCHEMA.workflow = {
     authorization: authorizationRefField,
     evidence: evidenceRefField,
     child_credential_policy: childCredentialPolicyField,
+    verify: verifyField,
     tasks: { type: 'array', minItems: 1, items: { type: 'object' } }
   }
 };
@@ -768,6 +780,7 @@ MANIFEST_SCHEMA.task = {
     authorization: authorizationRefField,
     evidence: evidenceRefField,
     child_credential_policy: childCredentialPolicyField,
+    verify: verifyField,
     on_failure: onFailureField,
     delete_after_run: nullableBoolean
   }
@@ -800,5 +813,8 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   contract_required_trust_level: nullableString,
   contract_trust_enforcement: nullableString,
   child_credential_policy: childCredentialPolicyField,
-  authorization_proof_verification: { type: 'object', nullable: true }
+  authorization_proof_verification: { type: 'object', nullable: true },
+  verify_shell: nullableString,
+  verify_timeout_s: { type: 'integer', nullable: true },
+  verify_on_failure: nullableString,
 });
