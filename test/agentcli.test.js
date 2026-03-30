@@ -11250,6 +11250,54 @@ test('exec verify: v0.1 uses task cwd and shell env', () => {
   assert.strictEqual(result.verify.passed, true);
 });
 
+test('exec verify: respects strict sandbox enforcement on supported darwin runners', () => {
+  const support = resolveSandboxSupport();
+  if (process.platform !== 'darwin' || !support) {
+    return;
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-verify-sandbox-'));
+  const outsideRoot = process.env.HOME && !process.env.HOME.startsWith(tmpdir())
+    ? process.env.HOME
+    : process.cwd();
+  const deniedPath = join(outsideRoot, `agentcli-verify-denied-${Date.now()}.txt`);
+
+  try {
+    rmSync(deniedPath, { force: true });
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-lc', 'printf ok > allowed.txt'],
+            cwd: workdir,
+            env: { TARGET: deniedPath },
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { sandbox: 'strict', network: 'none', audit: 'none' },
+          verify: { shell: 'printf blocked > "$TARGET"' },
+        }]
+      }]
+    };
+
+    assert.throws(
+      () => executeTask(manifest, { taskId: 't' }),
+      (err) => {
+        assert.strictEqual(err.code, 'verify_failed');
+        return true;
+      }
+    );
+    assert.ok(!existsSync(deniedPath));
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(deniedPath, { force: true });
+  }
+});
+
 test('exec verify: v0.2 path verify succeeds', async () => {
   const manifest = {
     version: '0.2',

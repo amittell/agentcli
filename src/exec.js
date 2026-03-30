@@ -89,19 +89,34 @@ function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) 
  * Run the verify command after a task completes successfully.
  *
  * @param {object} verify  - Resolved verify block (shell, timeout_seconds, on_failure).
- * @param {object} options - { cwd, env } for spawn context.
+ * @param {object} options - { cwd, env, sandboxCommand } for spawn context.
  * @returns {object} { passed, exit_code, stdout, stderr, timed_out, duration_ms }
  */
-function runVerify(verify, { cwd = process.cwd(), env = process.env } = {}) {
+function runVerify(verify, {
+  cwd = process.cwd(),
+  env = process.env,
+  sandboxCommand = null,
+} = {}) {
   const timeoutMs = (verify.timeout_seconds ?? 30) * 1000;
   const startMs = Date.now();
-  const proc = spawnSync('sh', ['-c', verify.shell], {
+  const verifyProgram = 'sh';
+  const verifyArgs = ['-c', verify.shell];
+  const usesSandbox =
+    sandboxCommand?.sandboxed === true &&
+    sandboxCommand?.support?.kind === 'sandbox-exec' &&
+    typeof sandboxCommand?.profile === 'string';
+
+  const proc = spawnSync(
+    usesSandbox ? sandboxCommand.support.command : verifyProgram,
+    usesSandbox ? ['-p', sandboxCommand.profile, verifyProgram, ...verifyArgs] : verifyArgs,
+    {
     cwd,
     env: { ...process.env, ...env },
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 1 * 1024 * 1024,
-  });
+    }
+  );
   const durationMs = Date.now() - startMs;
   const stdout = proc.stdout || '';
   const stderr = proc.stderr || '';
@@ -647,6 +662,7 @@ function executeV1(common, { dryRun }) {
     verifyResult = runVerify(verify, {
       cwd: shell.cwd || cwd,
       env: spawnEnv,
+      sandboxCommand,
     });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
@@ -1366,6 +1382,7 @@ async function executeV2(common, {
     verifyResult = runVerify(verify, {
       cwd: shell.cwd || cwd,
       env: spawnEnv,
+      sandboxCommand,
     });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
