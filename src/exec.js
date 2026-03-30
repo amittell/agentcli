@@ -209,6 +209,45 @@ function summarizeHandoff(handoffResult, mode) {
   };
 }
 
+async function cleanupProviderArtifacts(identityProviderInstance, {
+  materialization = null,
+  session = null,
+  providerConfig = {},
+  env = process.env,
+  cwd = process.cwd(),
+  warningPrefix = 'Credential cleanup',
+} = {}, warnings = []) {
+  if (!identityProviderInstance?.cleanup) return;
+
+  const effectiveSession = session || materialization?.session || null;
+  const cleanupRequired =
+    Boolean(materialization?.cleanup_required) ||
+    Boolean(effectiveSession?.provider_assertions?.key_strategy === 'dynamic');
+
+  if (!cleanupRequired) return;
+
+  const cleanupMaterialization = materialization || {
+    materialized: false,
+    env_vars: {},
+    cleanup_required: true,
+    ...(effectiveSession ? { session: effectiveSession } : {}),
+  };
+
+  try {
+    const cleanupResult = await identityProviderInstance.cleanup(cleanupMaterialization, {
+      session: effectiveSession,
+      env,
+      cwd,
+      provider_config: providerConfig,
+    });
+    for (const warning of cleanupResult?.warnings || []) {
+      warnings.push(`${warningPrefix} warning: ${warning}`);
+    }
+  } catch (cleanupErr) {
+    warnings.push(`${warningPrefix} warning: ${cleanupErr.message}`);
+  }
+}
+
 /**
  * Validate and resolve common execution state shared by both v0.1 and v0.2 paths.
  *
@@ -605,7 +644,10 @@ function executeV1(common, { dryRun }) {
   let verifyResult = null;
   let verifyFailed = false;
   if (verify && exitCode === 0 && !dryRun) {
-    verifyResult = runVerify(verify, { cwd, env });
+    verifyResult = runVerify(verify, {
+      cwd: shell.cwd || cwd,
+      env: spawnEnv,
+    });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
         warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
@@ -817,6 +859,7 @@ async function executeV2(common, {
               profile: identityDeclaration,
               instanceId,
               scope: identityDeclaration.scope ?? null,
+              task_timeout_s: effectiveTimeout != null ? Math.max(1, Math.ceil(effectiveTimeout / 1000)) : null,
             },
             { env, cwd }
           ),
@@ -1099,6 +1142,22 @@ async function executeV2(common, {
   // ------------------------------------------------------------------
 
   if (dryRun) {
+    const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
+    await cleanupProviderArtifacts(identityProviderInstance, {
+      materialization,
+      session: identitySession,
+      providerConfig: identityProviderConfig,
+      env,
+      cwd,
+    }, warnings);
+    await cleanupProviderArtifacts(identityProviderInstance, {
+      session: handoffResult?.session ?? null,
+      providerConfig: identityProviderConfig,
+      env,
+      cwd,
+      warningPrefix: 'Credential handoff cleanup',
+    }, warnings);
+
     const { attestation, attestation_note } = buildAndSign();
 
     const record = {
@@ -1128,15 +1187,6 @@ async function executeV2(common, {
     if (auditPolicy === 'always') {
       const paths = getAgentcliPaths({ env });
       writeAuditRecord(record, { auditPath: paths.audit });
-    }
-
-    // Phase 8: Cleanup (even on dry-run if materialization occurred)
-    if (materialization && materialization.cleanup_required && identityProviderInstance) {
-      try {
-        identityProviderInstance.cleanup(materialization, { env });
-      } catch (cleanupErr) {
-        warnings.push(`Credential cleanup warning: ${cleanupErr.message}`);
-      }
     }
 
     return {
@@ -1307,7 +1357,10 @@ async function executeV2(common, {
   let verifyResult = null;
   let verifyFailed = false;
   if (verify && exitCode === 0) {
-    verifyResult = runVerify(verify, { cwd, env });
+    verifyResult = runVerify(verify, {
+      cwd: shell.cwd || cwd,
+      env: spawnEnv,
+    });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
         warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
@@ -1318,6 +1371,22 @@ async function executeV2(common, {
   }
 
   const effectiveOk = exitCode === 0 && !verifyFailed;
+
+  const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
+  await cleanupProviderArtifacts(identityProviderInstance, {
+    materialization,
+    session: identitySession,
+    providerConfig: identityProviderConfig,
+    env,
+    cwd,
+  }, warnings);
+  await cleanupProviderArtifacts(identityProviderInstance, {
+    session: handoffResult?.session ?? null,
+    providerConfig: identityProviderConfig,
+    env,
+    cwd,
+    warningPrefix: 'Credential handoff cleanup',
+  }, warnings);
 
   // ------------------------------------------------------------------
   // Phase 7: Enhanced Audit Record
@@ -1366,18 +1435,6 @@ async function executeV2(common, {
     };
     const paths = getAgentcliPaths({ env });
     writeAuditRecord(record, { auditPath: paths.audit });
-  }
-
-  // ------------------------------------------------------------------
-  // Phase 8: Cleanup
-  // ------------------------------------------------------------------
-
-  if (materialization && materialization.cleanup_required && identityProviderInstance) {
-    try {
-      identityProviderInstance.cleanup(materialization, { env });
-    } catch (cleanupErr) {
-      warnings.push(`Credential cleanup warning: ${cleanupErr.message}`);
-    }
   }
 
   if (verifyFailed) {

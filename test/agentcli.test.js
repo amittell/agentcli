@@ -10275,6 +10275,168 @@ test('stripe-api-key resolveSession dynamic: default scope is "full" when none p
   }
 });
 
+test('v0.2 exec stripe-api-key dynamic cleanup revokes minted key after execution', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_exec_cleanup_id',
+        object: 'api_key',
+        secret: 'rk_test_exec_cleanup_secret_value_12345',
+      }));
+      return;
+    }
+
+    if (req.method === 'DELETE' && req.url === '/v1/api_keys/rk_test_exec_cleanup_id') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_exec_cleanup_id',
+        deleted: true,
+      }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Unexpected request' } }));
+  });
+
+  try {
+    const manifest = {
+      version: '0.2',
+      identity_profiles: [{
+        id: 'stripe-dynamic',
+        provider: 'stripe-api-key',
+        subject: { kind: 'service', principal: 'stripe:test' },
+        auth: {
+          provider_config: {
+            key_strategy: 'dynamic',
+            account_mode: 'test',
+            api_base: mock.baseUrl,
+            master_key_source: { env: 'STRIPE_MASTER_KEY' },
+          },
+        },
+        trust: { level: 'supervised' },
+      }],
+      workflows: [{
+        id: 'w',
+        name: 'W',
+        tasks: [{
+          id: 't',
+          name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-c', 'printf ok'],
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'none' },
+          identity: { ref: 'stripe-dynamic', scope: 'readonly' },
+        }],
+      }],
+    };
+
+    const result = await executeTask(manifest, {
+      taskId: 't',
+      env: {
+        ...process.env,
+        STRIPE_MASTER_KEY: 'sk_test_master_key_cleanup_value_12345',
+      },
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'POST').length, 1);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'DELETE').length, 1);
+    assert.ok(mock.requests.some(request => request.url === '/v1/api_keys/rk_test_exec_cleanup_id'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('v0.2 exec stripe-api-key dynamic handoff cleanup revokes prepared child key during dry-run', async () => {
+  let createCount = 0;
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      createCount += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: `rk_test_handoff_cleanup_${createCount}`,
+        object: 'api_key',
+        secret: `rk_test_handoff_cleanup_secret_value_${createCount}`,
+      }));
+      return;
+    }
+
+    if (req.method === 'DELETE' && req.url.startsWith('/v1/api_keys/rk_test_handoff_cleanup_')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: req.url.split('/').pop(),
+        deleted: true,
+      }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Unexpected request' } }));
+  });
+
+  try {
+    const manifest = {
+      version: '0.2',
+      identity_profiles: [{
+        id: 'stripe-dynamic-handoff',
+        provider: 'stripe-api-key',
+        subject: { kind: 'service', principal: 'stripe:test' },
+        auth: {
+          provider_config: {
+            key_strategy: 'dynamic',
+            account_mode: 'test',
+            api_base: mock.baseUrl,
+            master_key_source: { env: 'STRIPE_MASTER_KEY' },
+            scope_hierarchy: {
+              full: ['readonly'],
+              readonly: [],
+            },
+          },
+        },
+        presentation: { handoff: 'downscope' },
+        trust: { level: 'supervised' },
+      }],
+      workflows: [{
+        id: 'w',
+        name: 'W',
+        tasks: [{
+          id: 't',
+          name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-c', 'printf ok'],
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'none' },
+          identity: { ref: 'stripe-dynamic-handoff', scope: 'readonly' },
+        }],
+      }],
+    };
+
+    const result = await executeTask(manifest, {
+      taskId: 't',
+      dryRun: true,
+      env: {
+        ...process.env,
+        STRIPE_MASTER_KEY: 'sk_test_master_key_handoff_cleanup_12345',
+      },
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.handoff?.prepared, true);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'POST').length, 2);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'DELETE').length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
 // -- cleanup dynamic: tests with mock server --
 
 test('stripe-api-key cleanup: dynamic session revokes key via API', async () => {
@@ -11055,6 +11217,39 @@ test('exec verify: null when no verify block declared', () => {
   assert.strictEqual(result.verify, null);
 });
 
+test('exec verify: v0.1 uses task cwd and shell env', () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'agentcli-verify-v1-'));
+  const workDir = join(tmpRoot, 'workspace');
+  mkdirSync(workDir);
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'sh',
+          args: ['-c', 'printf ok > marker.txt'],
+          cwd: workDir,
+          env: {
+            VERIFY_TOKEN: 'from-shell-env',
+          },
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'test "$VERIFY_TOKEN" = "from-shell-env" && test -f marker.txt' }
+      }]
+    }]
+  };
+
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+});
+
 test('exec verify: v0.2 path verify succeeds', async () => {
   const manifest = {
     version: '0.2',
@@ -11077,6 +11272,65 @@ test('exec verify: v0.2 path verify succeeds', async () => {
     }]
   };
   const result = await executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+});
+
+test('exec verify: v0.2 uses task cwd and materialized env', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'agentcli-verify-v2-'));
+  const workDir = join(tmpRoot, 'workspace');
+  mkdirSync(workDir);
+
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'verify-env-profile',
+      provider: 'env-bearer',
+      subject: { kind: 'service', principal: 'agent://test/verify-env' },
+      auth: {
+        mode: 'service',
+        provider_config: {
+          token_env: 'SOURCE_VERIFY_TOKEN',
+        },
+      },
+      presentation: {
+        bindings: [{
+          source: 'credentials.access_token.value',
+          target: {
+            kind: 'env',
+            name: 'VERIFY_TOKEN',
+          },
+        }],
+      },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'sh',
+          args: ['-c', 'printf ok > marker.txt'],
+          cwd: workDir,
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        identity: { ref: 'verify-env-profile' },
+        verify: { shell: 'test "$VERIFY_TOKEN" = "token-from-identity" && test -f marker.txt' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 't',
+    env: {
+      ...process.env,
+      SOURCE_VERIFY_TOKEN: 'token-from-identity',
+    },
+  });
+
   assert.strictEqual(result.ok, true);
   assert.ok(result.verify);
   assert.strictEqual(result.verify.passed, true);
