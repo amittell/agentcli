@@ -597,6 +597,9 @@ async function deleteRestrictedKey(masterKey, keyId, apiBase) {
  * @returns {{ ok: boolean, value?: string, error?: string, transient?: boolean }}
  */
 function resolveMasterKey(masterKeySource, env, cwd) {
+  if (!masterKeySource || typeof masterKeySource !== 'object') {
+    return { ok: false, transient: false, error: 'master_key_source is missing or not an object' };
+  }
   if (typeof masterKeySource.env === 'string' && masterKeySource.env.length > 0) {
     return resolveEnvSource(masterKeySource.env, env);
   }
@@ -742,8 +745,17 @@ const stripeApiKeyProvider = {
         } else {
           try {
             const parsed = new URL(config.api_base);
-            if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-              errors.push('provider_config.api_base must use https: or http: protocol');
+            if (parsed.protocol === 'https:') {
+              // OK: HTTPS is always allowed
+            } else if (parsed.protocol === 'http:') {
+              const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+              if (!isLocalhost && config.allow_insecure_http !== true) {
+                errors.push(
+                  'provider_config.api_base using http: is only allowed for localhost or when provider_config.allow_insecure_http is true'
+                );
+              }
+            } else {
+              errors.push('provider_config.api_base must use https: protocol');
             }
           } catch (_urlErr) {
             errors.push(`provider_config.api_base is not a valid URL: ${config.api_base}`);
@@ -1055,11 +1067,19 @@ const stripeApiKeyProvider = {
       }
     }
 
-    return {
+    const result = {
       materialized: true,
       env_vars: envVars,
       cleanup_required: config.key_strategy === 'dynamic',
     };
+
+    // Embed session reference so cleanup() can access stripe_key_id and
+    // provider_config without callers needing to thread the session through ctx.
+    if (config.key_strategy === 'dynamic') {
+      result.session = session;
+    }
+
+    return result;
   },
 
   /**

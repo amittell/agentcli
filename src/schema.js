@@ -815,6 +815,6 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   child_credential_policy: childCredentialPolicyField,
   authorization_proof_verification: { type: 'object', nullable: true },
   verify_shell: nullableString,
-  verify_timeout_s: { type: 'integer', nullable: true },
+  verify_timeout_s: { type: 'integer', nullable: true, min: 1 },
   verify_on_failure: nullableString,
 });
