@@ -9610,3 +9610,62 @@ test('stripe-api-key prepareHandoff: requires target_scope and parent_profile pe
   assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
   assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly_key_xyz789ab');
 });
+
+test('v0.2 exec stripe-api-key handoff with downscope produces prepared session', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-handoff',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:test' },
+      scope: 'full',
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_HO_FULL' },
+            readonly: { key_env: 'STRIPE_HO_READONLY' },
+          },
+          scope_hierarchy: {
+            full: ['readonly'],
+            readonly: [],
+          },
+        },
+      },
+      presentation: { handoff: 'downscope' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'stripe-ho-w',
+      name: 'Stripe Handoff Workflow',
+      tasks: [{
+        id: 'stripe-ho-task',
+        name: 'Stripe Handoff Task',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write(process.env.STRIPE_API_KEY || "MISSING")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'stripe-handoff', scope: 'readonly' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'stripe-ho-task',
+    dryRun: true,
+    presentationDebug: true,
+    env: {
+      ...process.env,
+      STRIPE_HO_FULL: 'sk_test_handoff_full_key_123456',
+      STRIPE_HO_READONLY: 'rk_test_handoff_readonly_654321',
+    },
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.handoff?.prepared, true);
+  assert.strictEqual(result.handoff?.mode, 'downscope');
+});
