@@ -1352,6 +1352,12 @@ async function executeV2(common, {
 
   // ------------------------------------------------------------------
   // Post-execution verify phase
+  //
+  // Runs AFTER evidence attestation. Evidence proves what the command did
+  // (exit status, output hashes); verify is an operator-local check that
+  // the expected deliverable exists. These are complementary, not sequential
+  // dependencies. If end-to-end proof including verify is needed, extend the
+  // evidence payload rather than reordering phases.
   // ------------------------------------------------------------------
 
   let verifyResult = null;

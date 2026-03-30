@@ -150,7 +150,11 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
       }
     }
 
-    // Soft warning: downscope policy requires credential_handoff at runtime
+    // Soft warning: downscope policy requires credential_handoff at runtime.
+    // Note: identity.presentation.handoff (above) is a hard error because
+    // the scheduler cannot persist the handoff contract without the feature.
+    // child_credential_policy is a soft warning because the column is always
+    // accepted by v23+ schedulers -- enforcement happens at dispatch time.
     if (job.child_credential_policy === 'downscope') {
       if (!features.credential_handoff) {
         warnings.push({

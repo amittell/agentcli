@@ -792,7 +792,8 @@ const stripeApiKeyProvider = {
    * For precreated strategy: resolves the key from the permission set entry
    * matching request.scope (env var, file, or shell command).
    *
-   * For dynamic strategy: not yet implemented; returns a permanent error.
+   * For dynamic strategy: resolves master key, mints a restricted key via
+   * POST /v1/api_keys, and returns a session with stripe_key_id and expiry.
    *
    * @param {object} request - Session request: { profile, instanceId, scope }.
    * @param {object} [ctx]   - Resolution context: { env, cwd }.
