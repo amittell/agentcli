@@ -114,7 +114,7 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   return spec;
 }
 
-function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
+export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
   const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
   const { source, ...spec } = job;
   const projected = projectSchedulerSpec(spec, fields, { includeNulls: false });
@@ -140,6 +140,14 @@ function duplicateNames(items) {
   return [...counts.entries()]
     .filter(([, count]) => count > 1)
     .map(([name]) => name);
+}
+
+function jobRequiresCapabilityNegotiation(job) {
+  return Boolean(
+    job.identity || job.identity_ref || job.authorization || job.authorization_ref
+    || job.evidence || job.evidence_ref || job.child_credential_policy
+    || job.contract_required_trust_level || job.authorization_proof || job.authorization_proof_ref
+  );
 }
 
 export function createSchedulerCliRunner(options = {}) {
@@ -218,8 +226,10 @@ export async function applyManifestToScheduler(
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
+  const hasV02Features = compiled.jobs.some(jobRequiresCapabilityNegotiation);
 
-  // Construct the scheduler runner early so we can query its capabilities
+  // Construct the scheduler runner once; runtime capability negotiation is only
+  // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
   const schedulerRunner = runner || createSchedulerCliRunner({
     schedulerPrefix,
     schedulerBin,
@@ -228,26 +238,22 @@ export async function applyManifestToScheduler(
     env
   });
 
-  // Runtime capability negotiation
-  const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
-  const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
-  const effectiveFeatures = effectiveResult.features;
-  const handoffVersion = effectiveResult.handoff_version || '1';
+  let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
+  let handoffVersion = '1';
+  if (hasV02Features) {
+    const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
+    effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+    handoffVersion = effectiveResult.handoff_version || '1';
 
-  // Only run the full capability validation for manifests with v0.2 features;
-  // pure v0.1 manifests have no provider/policy requirements to check.
-  const hasV02Features = compiled.jobs.some(j =>
-    j.identity || j.identity_ref || j.authorization || j.authorization_ref
-    || j.evidence || j.evidence_ref || j.child_credential_policy
-    || j.contract_required_trust_level || j.authorization_proof || j.authorization_proof_ref
-  );
-  const capabilityErrors = hasV02Features ? validateManifestCapabilities(compiled, effectiveResult) : [];
-  if (capabilityErrors.length > 0) {
-    throw Object.assign(
-      new Error(capabilityErrors.map(error => error.message).join('; ')),
-      { code: 'unsupported_capability', capability_errors: capabilityErrors }
-    );
+    const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+    if (capabilityErrors.length > 0) {
+      throw Object.assign(
+        new Error(capabilityErrors.map(error => error.message).join('; ')),
+        { code: 'unsupported_capability', capability_errors: capabilityErrors }
+      );
+    }
   }
+  const effectiveFeatures = effectiveResult.features;
 
   // v0.2: Authorization proof verification for backends lacking the capability
   if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {

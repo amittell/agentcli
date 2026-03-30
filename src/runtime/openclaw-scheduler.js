@@ -6,41 +6,26 @@
  */
 
 import { compileManifestToScheduler } from '../compiler/openclaw-scheduler.js';
-import { createSchedulerCliRunner } from '../apply.js';
+import { createSchedulerCliRunner, schedulerCreateSpec } from '../apply.js';
 import {
   querySchedulerCapabilities,
   resolveEffectiveFeatures,
   validateManifestCapabilities,
 } from '../capabilities.js';
-import { SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1 } from '../scheduler-fields.js';
 
-const JSON_BLOB_FIELDS = new Set([
-  'identity',
-  'authorization_proof',
-  'authorization',
-  'evidence',
-]);
+const compiledManifestCache = new WeakMap();
 
-/**
- * Project a compiled job object down to the fields accepted by a given
- * scheduler handoff version.  This mirrors the private `schedulerCreateSpec`
- * helper in apply.js without creating a cross-module dependency on it.
- */
-function projectJobToSpec(job, { fieldVersion = '1' } = {}) {
-  const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
-  const { source: _source, ...specBody } = job;
-  const spec = {};
-  for (const field of fields) {
-    if (!(field in specBody)) continue;
-    let value = field === 'enabled' ? Boolean(specBody[field]) : specBody[field];
-    if (value === undefined) continue;
-    if (value === null) continue;
-    if (typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
-      value = JSON.stringify(value);
-    }
-    spec[field] = value;
+export function compileManifestForDispatch(manifest) {
+  if (!manifest || typeof manifest !== 'object') {
+    return compileManifestToScheduler(manifest);
   }
-  return spec;
+
+  const cached = compiledManifestCache.get(manifest);
+  if (cached) return cached;
+
+  const compiled = compileManifestToScheduler(manifest);
+  compiledManifestCache.set(manifest, compiled);
+  return compiled;
 }
 
 export const schedulerAdapter = {
@@ -82,7 +67,7 @@ export const schedulerAdapter = {
     const { schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env } = options;
 
     // Compile the full manifest to get job specs for every task
-    const compiled = compileManifestToScheduler(manifest);
+    const compiled = compileManifestForDispatch(manifest);
     const taskId = task.id || task.name;
     const workflowId = workflow.id;
 
@@ -135,7 +120,7 @@ export const schedulerAdapter = {
       );
     }
 
-    const spec = projectJobToSpec(jobSpec, { fieldVersion: handoffVersion });
+    const spec = schedulerCreateSpec(jobSpec, { fieldVersion: handoffVersion });
     runner.addJob(spec);
 
     return {

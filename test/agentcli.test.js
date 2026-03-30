@@ -32,6 +32,7 @@ import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
 import { executeTask } from '../src/exec.js';
 import { readAuditLog } from '../src/audit.js';
+import { compileManifestForDispatch } from '../src/runtime/openclaw-scheduler.js';
 import { buildAttestationPayload, commandHash } from '../src/attestation.js';
 import {
   buildMacOSSandboxProfile,
@@ -7351,6 +7352,27 @@ test('applyManifestToScheduler rejects unsupported trust and evidence capabiliti
 });
 
 test('applyManifestToScheduler includes capabilities metadata in result', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'runtime-caps-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/runtime-caps' }
+    }],
+    workflows: [{
+      id: 'runtime-caps-wf',
+      name: 'Runtime Caps',
+      identity: { ref: 'runtime-caps-profile' },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'negotiate capabilities',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
   const runner = {
     invocation: { label: 'fake-scheduler' },
     queryCapabilities() {
@@ -7384,12 +7406,39 @@ test('applyManifestToScheduler includes capabilities metadata in result', async 
     }
   };
 
-  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  const result = await applyManifestToScheduler(manifest, { runner });
   assert.strictEqual(result.ok, true);
   assert.ok(result.capabilities);
   assert.strictEqual(result.capabilities.source, 'runtime');
   assert.strictEqual(result.capabilities.negotiated, true);
   assert.strictEqual(result.capabilities.handoff_version, '2');
+});
+
+test('applyManifestToScheduler skips runtime capability queries for pure v0.1 manifests', async () => {
+  let capabilityCalls = 0;
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      capabilityCalls += 1;
+      throw new Error('capabilities should not be queried for v0.1 manifests');
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(capabilityCalls, 0);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'static');
+  assert.strictEqual(result.capabilities.negotiated, false);
 });
 
 test('applyManifestToScheduler falls back to static when runner lacks queryCapabilities', async () => {
@@ -8413,6 +8462,31 @@ test('scheduler adapter canExecute checks context and session_target', () => {
   const shellResult = adapter.canExecute({ target: { session_target: 'shell' } }, { schedulerPrefix: '/x' });
   assert.strictEqual(shellResult.supported, false);
   assert.match(shellResult.reason, /Unsupported session target/);
+});
+
+test('compileManifestForDispatch caches compiled manifests by object identity', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'cache-w',
+      name: 'Cache W',
+      tasks: [{
+        id: 'cache-t',
+        name: 'Cache T',
+        prompt: 'cache this',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const first = compileManifestForDispatch(manifest);
+  const second = compileManifestForDispatch(manifest);
+  assert.strictEqual(second, first, 'same manifest object should reuse the cached compiled output');
+
+  const clonedManifest = structuredClone(manifest);
+  const third = compileManifestForDispatch(clonedManifest);
+  assert.notStrictEqual(third, first, 'different manifest objects should compile independently');
 });
 
 // ---------------------------------------------------------------------------

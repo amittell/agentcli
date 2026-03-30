@@ -345,8 +345,29 @@ if (!schedulerRuntime.ok) {
       assert.equal(job.contract_trust_enforcement, 'advisory', 'contract_trust_enforcement should be stored');
     });
 
-    it('apply response includes capability negotiation metadata', async () => {
-      const manifest = readExample('hello-world.json');
+    it('apply response includes capability negotiation metadata when v0.2 fields require it', { skip: v02RuntimeSkipReason || false }, async () => {
+      const manifest = {
+        version: '0.2',
+        identity_profiles: [{
+          id: 'caps-profile',
+          provider: 'none',
+          subject: { kind: 'service', principal: 'agent://test/caps-meta' },
+          trust: { level: 'supervised' },
+        }],
+        workflows: [{
+          id: 'caps-meta',
+          name: 'Capability metadata test',
+          tasks: [{
+            id: 'check',
+            name: 'capability metadata check',
+            shell: { program: 'echo', args: ['caps'] },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 11 * * *' },
+            identity: { ref: 'caps-profile' },
+            contract: { required_trust_level: 'supervised', trust_enforcement: 'strict' },
+          }],
+        }],
+      };
       const db = dbPath('caps-meta');
 
       const result = await applyManifestToScheduler(manifest, {
@@ -444,9 +465,12 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.target, 'openclaw-scheduler');
       assert.equal(result.dry_run, false);
 
-      // Capability negotiation should still succeed even for v0.1 manifests
+      // Pure v0.1 manifests skip the extra runtime capability probe on apply.
+      // Use `agentcli apply --check-capabilities` when the caller wants a full
+      // runtime capability snapshot without requiring v0.2 fields.
       assert.ok(result.capabilities, 'v0.1 apply should include capability metadata');
-      assert.equal(result.capabilities.negotiated, true, 'capabilities should be negotiated');
+      assert.equal(result.capabilities.source, 'static', 'v0.1 apply should use the static baseline');
+      assert.equal(result.capabilities.negotiated, false, 'v0.1 apply should skip negotiation');
 
       // All jobs should be created successfully
       for (const action of result.actions) {
