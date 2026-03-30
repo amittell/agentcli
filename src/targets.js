@@ -30,6 +30,9 @@ export const TARGETS = {
     name: 'openclaw-scheduler',
     description: 'Compile manifest tasks into OpenClaw Scheduler job specs for the durable runtime.',
     capabilities: ['compile', 'apply', 'inspect', 'field-mask', 'sanitize-basic', 'ndjson'],
+    // Static baseline features -- superseded by runtime capability negotiation when available.
+    // These serve as the fallback when the scheduler is unreachable or does not support
+    // the 'capabilities' command.
     features: {
       approvals: 'runtime',
       model_policy: 'model+thinking',

@@ -7,7 +7,12 @@ import { getTarget, listTargets } from './targets.js';
 import { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 import { parseFieldMask } from './fields.js';
 import { serveJsonRpc } from './jsonrpc.js';
-import { applyManifestToScheduler } from './apply.js';
+import { applyManifestToScheduler, createSchedulerCliRunner } from './apply.js';
+import {
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from './capabilities.js';
 import { executeTask } from './exec.js';
 import { readAuditLog } from './audit.js';
 import { resolveProviderForMethod } from './signing/index.js';
@@ -35,11 +40,12 @@ Commands:
   paths
   validate <path-or-json|->
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
-  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name]
+  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name] [--check-capabilities]
   exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms]
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
        [--instance-id id] [--require-evidence] [--require-authorization]
        [--identity-debug] [--presentation-debug]
+       [--db path] [--scheduler-prefix path|--scheduler-bin path]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   verify <execution-id> [--allowed-signers path]
@@ -263,6 +269,30 @@ export async function runCli(
     }
     case 'apply': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
+
+      if (flags['check-capabilities']) {
+        const runner = createSchedulerCliRunner({
+          schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
+          schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,
+          dbPath: flags.db || defaultDbPath,
+          cwd,
+          env: derivedEnv,
+        });
+        const caps = querySchedulerCapabilities(runner);
+        const effective = resolveEffectiveFeatures('openclaw-scheduler', caps);
+        const compiled = getTarget('openclaw-scheduler').compile(manifest);
+        const compatibilityErrors = validateManifestCapabilities(compiled, effective);
+        return formatOutput({
+          ok: true,
+          capabilities: caps,
+          effective: effective,
+          compatibility: {
+            ok: compatibilityErrors.length === 0,
+            errors: compatibilityErrors,
+          },
+        }, { mode: outputMode, pretty });
+      }
+
       const adoptBy = flags['adopt-by'] || 'id';
       if (adoptBy !== 'id' && adoptBy !== 'name') {
         throw Object.assign(
@@ -342,6 +372,9 @@ export async function runCli(
         requireAuthorization: flags['require-authorization'] ? true : undefined,
         identityDebug: flags['identity-debug'] ? true : undefined,
         presentationDebug: flags['presentation-debug'] ? true : undefined,
+        schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
+        schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,
+        dbPath: flags.db || defaultDbPath,
         cwd,
         env: derivedEnv,
       });

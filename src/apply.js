@@ -8,8 +8,18 @@ import {
   stableId
 } from './compiler/shared.js';
 import { expandManifestShorthands } from './shorthand.js';
-import { TARGETS } from './targets.js';
+import {
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from './capabilities.js';
+import {
+  SCHEDULER_FIELDS_V1,
+  SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELD_VERSIONS,
+} from './scheduler-fields.js';
 export { shellCommandInvocation } from './command.js';
+export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELD_VERSIONS };
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -83,75 +93,42 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
   }
 }
 
-const SCHEDULER_CREATE_FIELDS = [
-  'id',
-  'name',
-  'enabled',
-  'schedule_cron',
-  'schedule_tz',
-  'session_target',
-  'agent_id',
-  'payload_kind',
-  'payload_message',
-  'payload_model',
-  'payload_thinking',
-  'execution_intent',
-  'execution_read_only',
-  'run_timeout_ms',
-  'overlap_policy',
-  'max_retries',
-  'max_queued_dispatches',
-  'max_pending_approvals',
-  'max_trigger_fanout',
-  'delivery_mode',
-  'delivery_channel',
-  'delivery_to',
-  'delivery_opt_out_reason',
-  'delivery_guarantee',
-  'origin',
-  'parent_id',
-  'trigger_on',
-  'trigger_delay_s',
-  'trigger_condition',
-  'approval_required',
-  'approval_timeout_s',
-  'approval_auto',
-  'context_retrieval',
-  'context_retrieval_limit',
-  'output_store_limit_bytes',
-  'output_excerpt_limit_bytes',
-  'output_summary_limit_bytes',
-  'output_offload_threshold_bytes',
-  'preferred_session_key',
-  'delete_after_run'
-];
-
-const SCHEDULER_UPDATE_FIELDS = SCHEDULER_CREATE_FIELDS.filter(field => field !== 'id' && field !== 'origin');
+// Fields that the scheduler stores as JSON text blobs rather than scalar columns.
+const JSON_BLOB_FIELDS = new Set([
+  'identity', 'authorization_proof', 'authorization', 'evidence',
+]);
 
 function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
   const spec = {};
   for (const field of fields) {
     if (!(field in job)) continue;
-    const value = field === 'enabled' ? Boolean(job[field]) : job[field];
+    let value = field === 'enabled' ? Boolean(job[field]) : job[field];
     if (value === undefined) continue;
     if (value === null && !includeNulls) continue;
+    // Scheduler expects JSON blob fields as stringified JSON, not raw objects
+    if (value !== null && typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
+      value = JSON.stringify(value);
+    }
     spec[field] = value;
   }
   return spec;
 }
 
-function schedulerCreateSpec(job, { originOverride } = {}) {
+export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
+  const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
   const { source, ...spec } = job;
-  const projected = projectSchedulerSpec(spec, SCHEDULER_CREATE_FIELDS, { includeNulls: false });
+  const projected = projectSchedulerSpec(spec, fields, { includeNulls: false });
   if (originOverride != null) {
     projected.origin = originOverride;
   }
   return projected;
 }
 
-function schedulerUpdateSpec(job) {
+function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
+  const fields = (SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1)
+    .filter(f => f !== 'id' && f !== 'origin');
   const { source, ...spec } = job;
-  return projectSchedulerSpec(spec, SCHEDULER_UPDATE_FIELDS, { includeNulls: true });
+  return projectSchedulerSpec(spec, fields, { includeNulls: true });
 }
 
 function duplicateNames(items) {
@@ -163,6 +140,14 @@ function duplicateNames(items) {
   return [...counts.entries()]
     .filter(([, count]) => count > 1)
     .map(([name]) => name);
+}
+
+function jobRequiresCapabilityNegotiation(job) {
+  return Boolean(
+    job.identity || job.identity_ref || job.authorization || job.authorization_ref
+    || job.evidence || job.evidence_ref || job.child_credential_policy
+    || job.contract_required_trust_level || job.authorization_proof || job.authorization_proof_ref
+  );
 }
 
 export function createSchedulerCliRunner(options = {}) {
@@ -178,6 +163,10 @@ export function createSchedulerCliRunner(options = {}) {
 
   return {
     invocation,
+    queryCapabilities() {
+      try { return invoke(['capabilities']); }
+      catch { return null; }
+    },
     listJobs() {
       const payload = invoke(['jobs', 'list']);
       return Array.isArray(payload) ? payload : [];
@@ -237,10 +226,37 @@ export async function applyManifestToScheduler(
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
+  const hasV02Features = compiled.jobs.some(jobRequiresCapabilityNegotiation);
+
+  // Construct the scheduler runner once; runtime capability negotiation is only
+  // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
+  const schedulerRunner = runner || createSchedulerCliRunner({
+    schedulerPrefix,
+    schedulerBin,
+    dbPath,
+    cwd,
+    env
+  });
+
+  let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
+  let handoffVersion = '1';
+  if (hasV02Features) {
+    const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
+    effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+    handoffVersion = effectiveResult.handoff_version || '1';
+
+    const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+    if (capabilityErrors.length > 0) {
+      throw Object.assign(
+        new Error(capabilityErrors.map(error => error.message).join('; ')),
+        { code: 'unsupported_capability', capability_errors: capabilityErrors }
+      );
+    }
+  }
+  const effectiveFeatures = effectiveResult.features;
 
   // v0.2: Authorization proof verification for backends lacking the capability
-  const targetFeatures = TARGETS['openclaw-scheduler']?.features || {};
-  if (!targetFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
+  if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
     // Target cannot verify proofs at runtime; verify locally during apply
     const { readFileSync } = await import('node:fs');
     const { resolveVerifier } = await import('./authorization-proof/index.js');
@@ -296,7 +312,7 @@ export async function applyManifestToScheduler(
   }
 
   // v0.2: Reject manifests with authorization blocks when target lacks authorization_hook
-  if (!targetFeatures.authorization_hook) {
+  if (!effectiveFeatures.authorization_hook) {
     for (const job of compiled.jobs) {
       if (job.authorization_ref || job.authorization?.ref) {
         throw Object.assign(
@@ -309,14 +325,6 @@ export async function applyManifestToScheduler(
       }
     }
   }
-
-  const schedulerRunner = runner || createSchedulerCliRunner({
-    schedulerPrefix,
-    schedulerBin,
-    dbPath,
-    cwd,
-    env
-  });
 
   const existingJobs = schedulerRunner.listJobs();
   const existingById = new Map(existingJobs.map(job => [job.id, job]));
@@ -387,9 +395,9 @@ export async function applyManifestToScheduler(
 
     if (!dryRun) {
       if (action === 'created') {
-        schedulerRunner.addJob(schedulerCreateSpec(job));
+        schedulerRunner.addJob(schedulerCreateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'updated') {
-        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job));
+        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
         if (typeof schedulerRunner.deleteJob !== 'function') {
           throw Object.assign(
@@ -398,7 +406,7 @@ export async function applyManifestToScheduler(
           );
         }
         schedulerRunner.addJob(
-          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system' })
+          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system', fieldVersion: handoffVersion })
         );
         try {
           schedulerRunner.deleteJob(existingId);
@@ -442,6 +450,16 @@ export async function applyManifestToScheduler(
     scheduler: {
       command: schedulerRunner.invocation?.label || 'custom-runner',
       db_path: dbPath || null
+    },
+    capabilities: {
+      source: effectiveResult.source,
+      negotiated: effectiveResult.negotiated,
+      handoff_version: effectiveResult.handoff_version || null,
+    },
+    handoff: {
+      field_version: handoffVersion,
+      projected_fields: (SCHEDULER_FIELD_VERSIONS[handoffVersion] || SCHEDULER_FIELDS_V1).length,
+      v02_fields_included: handoffVersion !== '1',
     },
     job_count: compiled.jobs.length,
     actions,

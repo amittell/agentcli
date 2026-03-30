@@ -9,6 +9,7 @@ import {
   stableId
 } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
+import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../scheduler-fields.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
 const TRIGGERED_SENTINEL_TZ = 'UTC';
@@ -63,6 +64,7 @@ function isV2IdentityDeclaration(identity) {
   if (!identity || typeof identity !== 'object') return false;
   return (
     identity.ref != null ||
+    identity.scope != null ||
     identity.subject != null ||
     identity.auth != null ||
     identity.trust != null ||
@@ -323,10 +325,37 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         contract_required_trust_level: plan.contract?.required_trust_level ?? null,
         contract_trust_enforcement: plan.contract?.trust_enforcement ?? null,
 
+        child_credential_policy: plan.child_credential_policy ?? null,
+
         delete_after_run: plan.delete_after_run ? 1 : 0
       };
       validateSchedulerStringLimits(targetErrors, taskPath, job);
       validateSchedulerReservedValues(targetErrors, taskPath, job);
+
+      if (isTriggered && task.trigger?.parent) {
+        // The effective policy here uses a 3-level fallback (child -> parent task
+        // -> workflow) to match the scheduler's runtime resolution. The STORED
+        // value on the job (plan.child_credential_policy) only captures the
+        // 2-level task/workflow resolution -- the parent-task fallback happens at
+        // dispatch time when the scheduler reads the parent job's column.
+        const parentTask = workflow.tasks.find(t => t.id === task.trigger.parent);
+        const effectivePolicy =
+          plan.child_credential_policy
+          ?? (parentTask?.child_credential_policy ?? null)
+          ?? (workflow.child_credential_policy ?? null);
+        if (effectivePolicy === 'downscope') {
+          const childIdentityScope = resolvedIdentity?.scope ?? null;
+          if (!childIdentityScope) {
+            const parentLabel = task.trigger.parent;
+            addTargetValidationError(
+              targetErrors,
+              `${taskPath}.identity.scope`,
+              `Task '${task.id}' inherits downscope policy from parent '${parentLabel}' but declares no identity scope. Add identity: { ref: ..., scope: ... } or set child_credential_policy: none.`
+            );
+          }
+        }
+      }
+
       jobs.push(job);
 
       explain.push({
@@ -376,6 +405,11 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
   return {
     target: 'openclaw-scheduler',
     version: '0.2',
+    handoff: {
+      field_version: '2',
+      v1_field_count: SCHEDULER_FIELDS_V1.length,
+      v2_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length,
+    },
     jobs,
     ...profiles,
     ...(includeExplain ? { explain } : {})

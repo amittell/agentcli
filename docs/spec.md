@@ -65,6 +65,7 @@ Each workflow MAY also define:
 - `authorization_proof` (v0.2)
 - `authorization` (v0.2)
 - `evidence` (v0.2)
+- `child_credential_policy` (v0.2)
 
 Rules:
 
@@ -92,6 +93,7 @@ Each task MAY also define:
 - `authorization_proof` (v0.2, see Authorization Proof Profiles below)
 - `authorization` (v0.2, see Authorization Profiles below)
 - `evidence` (v0.2, see Evidence Profiles below)
+- `child_credential_policy` (v0.2)
 
 ### Enabled State
 
@@ -426,12 +428,15 @@ This block establishes the chain of trust: agents executing CLI tasks carry the 
 In v0.2, `identity` MAY additionally define:
 
 - `ref` -- a reference to a named identity profile (see Identity Profiles below)
+- `scope` -- a provider-defined scope selector used by scoped identity providers and child handoff flows
 - `subject` -- an object describing the subject kind and attributes
 - `auth` -- an object describing the authentication mode
 - `trust` -- an object describing the trust level
 - `presentation` -- an object describing credential presentation bindings
 
 When `ref` is present, the identity is resolved by looking up the named profile from the top-level `identity_profiles` array. Inline fields (`subject`, `auth`, `trust`, `presentation`) override profile-level values key by key.
+
+`identity.scope`, if present, MUST be a non-empty string.
 
 `identity.subject.kind`, if present, MUST be one of:
 
@@ -467,6 +472,21 @@ When `ref` is present, the identity is resolved by looking up the named profile 
 - `default_redaction` -- if present, MUST be a boolean indicating whether credential values are redacted by default in audit output
 
 Workflow-level v0.2 identity fields act as defaults for tasks in that workflow. Task-level fields override workflow-level fields key by key.
+
+## Child Credential Policy
+
+*v0.2*
+
+`child_credential_policy`, if present on a workflow or task, MUST be one of:
+
+- `none`
+- `inherit`
+- `downscope`
+- `independent`
+
+Workflow-level `child_credential_policy` acts as a default for tasks in that workflow.
+
+Task-level `child_credential_policy` overrides the workflow-level value.
 
 ## Identity Profiles
 

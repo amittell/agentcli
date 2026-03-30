@@ -41,6 +41,7 @@ constraints). When in doubt, the source code is authoritative.
 | `authorization_proof` | object | No | Authorization proof reference (v0.2). See [Authorization Proof Reference Fields](#authorization-proof-reference-fields). |
 | `authorization` | object | No | Authorization reference (v0.2). See [Authorization Reference Fields](#authorization-reference-fields). |
 | `evidence` | object | No | Evidence reference (v0.2). See [Evidence Reference Fields](#evidence-reference-fields). |
+| `child_credential_policy` | string | No | Child credential flow policy for triggered children. See [Child Credential Policy Fields](#child-credential-policy-fields). |
 
 ---
 
@@ -72,6 +73,7 @@ constraints). When in doubt, the source code is authoritative.
 | `authorization_proof` | object | No | Authorization proof reference (v0.2). See [Authorization Proof Reference Fields](#authorization-proof-reference-fields). |
 | `authorization` | object | No | Authorization reference (v0.2). See [Authorization Reference Fields](#authorization-reference-fields). |
 | `evidence` | object | No | Evidence reference (v0.2). See [Evidence Reference Fields](#evidence-reference-fields). |
+| `child_credential_policy` | string | No | Child credential flow policy for triggered children. See [Child Credential Policy Fields](#child-credential-policy-fields). |
 | `on_failure` | object | No | Failure handler shorthand. See [On-Failure Fields](#on-failure-fields). |
 | `delete_after_run` | boolean | No | Remove the compiled job after first successful execution. |
 
@@ -245,19 +247,30 @@ Workflow-level identity acts as a default for tasks. Task-level overrides key by
 
 ## Identity Fields (v0.2)
 
-The v0.2 identity shape is used when any of `ref`, `subject`, `auth`, `trust`, or `presentation` are present.
+The v0.2 identity shape is used when any of `ref`, `scope`, `subject`, `auth`, `trust`, or `presentation` are present.
 
 ### Top-Level
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `ref` | string | No | Reference to a named identity profile from `identity_profiles`. |
+| `scope` | string | No | Provider-defined scope selector (for example `full`, `payments`, or `readonly`). |
 | `subject` | object | No | Subject descriptor. See [subject](#identity-subject-fields). |
 | `auth` | object | No | Authentication configuration. See [auth](#identity-auth-fields). |
 | `trust` | object | No | Trust level declaration. See [trust](#identity-trust-fields). |
 | `presentation` | object | No | Credential presentation bindings. See [presentation](#identity-presentation-fields). |
 
 When `ref` is present, the referenced profile is loaded first, then inline fields override the profile values key by key.
+
+`scope` resolves from workflow to task the same way as the other inline identity fields.
+
+---
+
+## Child Credential Policy Fields
+
+| Field | Type | Required | Values | Description |
+|-------|------|----------|--------|-------------|
+| `child_credential_policy` | string | No | `none`, `inherit`, `downscope`, `independent` | Controls how a child task receives or derives credentials relative to its parent. Workflow-level values act as defaults for tasks. |
 
 ### Identity Subject Fields
 

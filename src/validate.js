@@ -3,6 +3,7 @@ import { onFailureTaskId } from './shorthand.js';
 
 const SUPPORTED_VERSIONS = ['0.1', MANIFEST_VERSION];
 const TRUST_LEVELS = ['untrusted', 'restricted', 'supervised', 'autonomous'];
+const CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'];
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
@@ -15,7 +16,7 @@ const KNOWN_MANIFEST_KEYS = new Set([
 
 const KNOWN_WORKFLOW_KEYS = new Set([
   'id', 'name', 'model_policy', 'identity', 'contract', 'tasks',
-  'authorization_proof', 'authorization', 'evidence'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
 ]);
 
 const KNOWN_TASK_KEYS = new Set([
@@ -23,7 +24,7 @@ const KNOWN_TASK_KEYS = new Set([
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
   'identity', 'contract', 'on_failure', 'delete_after_run',
-  'authorization_proof', 'authorization', 'evidence'
+  'authorization_proof', 'authorization', 'evidence', 'child_credential_policy'
 ]);
 
 const KNOWN_ON_FAILURE_KEYS = new Set([
@@ -349,8 +350,16 @@ function validateIdentity(errors, path, value) {
   }
 
   // v0.2 identity (has ref or subject)
-  if (value.ref != null || value.subject != null || value.auth != null || value.trust != null || value.presentation != null) {
+  if (
+    value.ref != null ||
+    value.scope != null ||
+    value.subject != null ||
+    value.auth != null ||
+    value.trust != null ||
+    value.presentation != null
+  ) {
     checkString(errors, `${path}.ref`, value.ref, { required: false });
+    checkString(errors, `${path}.scope`, value.scope, { required: false });
     if (checkOptionalObject(errors, `${path}.subject`, value.subject)) {
       validateSubject(errors, `${path}.subject`, value.subject);
     }
@@ -467,6 +476,10 @@ function validateContract(errors, path, value) {
   checkEnum(errors, `${path}.audit`, value.audit, ['none', 'on-failure', 'always']);
   checkEnum(errors, `${path}.required_trust_level`, value.required_trust_level, ['untrusted', 'restricted', 'supervised', 'autonomous']);
   checkEnum(errors, `${path}.trust_enforcement`, value.trust_enforcement, ['none', 'advisory', 'strict']);
+}
+
+function validateChildCredentialPolicy(errors, path, value) {
+  checkEnum(errors, path, value, CHILD_CREDENTIAL_POLICIES);
 }
 
 function checkOptionalObject(errors, path, value) {
@@ -633,6 +646,7 @@ function compareTrustLevels(a, b) {
 function hasV2IdentityShape(identity) {
   return isObject(identity) && (
     identity.ref != null ||
+    identity.scope != null ||
     identity.subject != null ||
     identity.auth != null ||
     identity.trust != null ||
@@ -831,6 +845,7 @@ export function validateManifest(manifest) {
       if (checkOptionalObject(errors, `${workflowPath}.evidence`, workflow.evidence)) {
         validateEvidenceRef(errors, `${workflowPath}.evidence`, workflow.evidence);
       }
+      validateChildCredentialPolicy(errors, `${workflowPath}.child_credential_policy`, workflow.child_credential_policy);
       if (workflow.id) {
         if (workflowIds.has(workflow.id)) addError(errors, `${workflowPath}.id`, 'must be unique');
         workflowIds.add(workflow.id);
@@ -896,6 +911,7 @@ export function validateManifest(manifest) {
         }
 
         validateOptionalBlocks(errors, warnings, taskPath, task);
+        validateChildCredentialPolicy(errors, `${taskPath}.child_credential_policy`, task.child_credential_policy);
         if (task.target?.session_target === 'shell' && (task.intent?.mode === 'plan' || task.intent?.read_only)) {
           warnings.push({
             path: `${taskPath}.intent`,

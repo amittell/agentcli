@@ -23,6 +23,10 @@ export const COMMAND_DESCRIPTIONS = [
     summary: 'Compile a manifest into a target-specific artifact, optionally writing it to disk safely under the current working directory.'
   },
   {
+    command: 'convert',
+    summary: 'Convert a v0.1 manifest to v0.2 with safe defaults for new identity, authorization, and evidence surfaces.'
+  },
+  {
     command: 'apply',
     summary: 'Upsert a manifest into an OpenClaw Scheduler runtime. Supports --adopt-by name for migrating existing jobs.'
   },
@@ -47,12 +51,32 @@ export const COMMAND_DESCRIPTIONS = [
     summary: 'Execute a shell-target task from a manifest with identity verification, contract enforcement, signing provider attestation, and audit logging. Use --signer to select a signing provider (ssh, none).'
   },
   {
+    command: 'identity',
+    summary: 'Inspect identity providers, schemas, effective task identity, and delegation validation state.'
+  },
+  {
+    command: 'authorization-proof',
+    summary: 'List authorization proof methods, inspect verifier metadata, and verify a task’s configured proof.'
+  },
+  {
+    command: 'authorization',
+    summary: 'Inspect authorization providers and evaluate authorization for a task.'
+  },
+  {
+    command: 'evidence',
+    summary: 'Inspect evidence providers and provider metadata.'
+  },
+  {
     command: 'audit',
     summary: 'Read the local execution audit log.'
   },
   {
     command: 'verify',
     summary: 'Cryptographically verify an execution audit record. Dispatches to the signing provider that produced the attestation (e.g. ssh-signature dispatches to the ssh provider).'
+  },
+  {
+    command: 'whoami',
+    summary: 'Resolve and print the effective task identity, trust, and contract view without executing the task.'
   },
   {
     command: 'skill-path',

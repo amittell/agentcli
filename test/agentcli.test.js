@@ -19,7 +19,8 @@ import {
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
-import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation } from '../src/apply.js';
+import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation, SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../src/apply.js';
+import { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from '../src/capabilities.js';
 import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
@@ -31,6 +32,7 @@ import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
 import { executeTask } from '../src/exec.js';
 import { readAuditLog } from '../src/audit.js';
+import { compileManifestForDispatch } from '../src/runtime/openclaw-scheduler.js';
 import { buildAttestationPayload, commandHash } from '../src/attestation.js';
 import {
   buildMacOSSandboxProfile,
@@ -50,6 +52,16 @@ import {
   verifySignature,
   generateAllowedSigners,
 } from '../src/signing/ssh.js';
+import {
+  registerRuntimeAdapter,
+  getRuntimeAdapter,
+  resolveRuntimeAdapter,
+  listRuntimeAdapters,
+} from '../src/runtime/index.js';
+import {
+  registerProvider as registerIdentityProvider,
+  getProvider as getIdentityProvider,
+} from '../src/identity/index.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -68,6 +80,71 @@ const shellManifest = readExample('shell-workflow.json');
 const publicBotHealthManifest = readExample('public-bot-health.json');
 const publicFailureTriageManifest = readExample('public-shell-failure-triage.json');
 const publicReportPublishManifest = readExample('public-report-publish.json');
+const TEST_ASYNC_HANDOFF_PROVIDER = 'test-async-handoff';
+
+if (!getIdentityProvider(TEST_ASYNC_HANDOFF_PROVIDER)) {
+  registerIdentityProvider({
+    name: TEST_ASYNC_HANDOFF_PROVIDER,
+    type: 'identity',
+    capabilities: {
+      auth_modes: ['service'],
+      credential_types: ['access_token'],
+      presentation_kinds: ['env'],
+      handoff_modes: ['none', 'downscope'],
+      refreshable: false,
+      delegation: false,
+      trust_levels: ['supervised'],
+      approval_mechanisms: [],
+    },
+    validateProfile() {
+      return { valid: true };
+    },
+    resolveSession(request) {
+      return {
+        ok: true,
+        session: {
+          provider: TEST_ASYNC_HANDOFF_PROVIDER,
+          subject: request.profile?.subject || { kind: 'service', principal: 'agent://mock/test' },
+          trust: {
+            declared_level: 'supervised',
+            effective_level: 'supervised',
+          },
+          credentials: {},
+          provider_assertions: {},
+          refresh: { supported: false, expires_at: null },
+          handoff: { mode: 'downscope', prepared: false },
+        },
+      };
+    },
+    describeSession(session) {
+      return structuredClone(session);
+    },
+    materialize() {
+      return {
+        materialized: true,
+        cleanup_required: false,
+        env_vars: {},
+        temp_files: [],
+        stdin: null,
+      };
+    },
+    cleanup() {
+      return { cleaned: true, warnings: [] };
+    },
+    async prepareHandoff() {
+      return {
+        prepared: true,
+        mode: 'downscope',
+        credentials: {
+          access_token: {
+            kind: 'bearer',
+            value: 'mock-downscoped-token',
+          },
+        },
+      };
+    },
+  });
+}
 
 test('all example manifests validate and compile', () => {
   for (const name of readdirSync(join(process.cwd(), 'examples')).filter(file => file.endsWith('.json')).sort()) {
@@ -709,6 +786,22 @@ test('cli schema manifest marks workflow and task authorization refs as required
   assert.deepEqual(taskFields.authorization.required, ['ref']);
 });
 
+test('cli schema exposes child_credential_policy on workflow and task surfaces', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const workflowFields = output.schema.fields.workflows.items.fields;
+  const taskFields = workflowFields.tasks.items.fields;
+
+  assert.equal(output.ok, true);
+  assert.deepEqual(
+    workflowFields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
+  assert.deepEqual(
+    taskFields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
+});
+
 test('cli -h prints usage', async () => {
   const output = await runCli(['-h']);
   assert.match(output, /^agentcli <command> \[args\]/);
@@ -876,6 +969,15 @@ test('applyManifestToScheduler strips non-runtime scheduler metadata from backen
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        handoff_version: '1',
+        features: {
+          trust_evaluation: true,
+        }
+      };
+    },
     listJobs() { return []; },
     addJob(spec) {
       calls.push(spec);
@@ -1011,6 +1113,62 @@ test('cli apply supports dry-run without invoking scheduler writes', async () =>
   assert.equal(result.dry_run, true);
   assert.equal(result.job_count, 2);
   assert.deepEqual(result.actions.map(action => action.action), ['created', 'created']);
+});
+
+test('cli apply --check-capabilities returns negotiated compatibility data', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/check-capabilities' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'cap-check',
+      name: 'Capability Check',
+      tasks: [{
+        id: 'review',
+        name: 'Review',
+        prompt: 'Review this change',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'svc' },
+        contract: { required_trust_level: 'supervised', trust_enforcement: 'advisory' },
+      }],
+    }],
+  };
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-check-capabilities-'));
+  const fakeBin = join(workdir, 'fake-scheduler.sh');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'if [ "$2" = "capabilities" ]; then',
+    '  echo \'{"features":{"authorization_hook":true,"evidence_generation":true,"trust_evaluation":true},"handoff_version":"2","scheduler_version":"0.0.0-test"}\'',
+    'else',
+    '  echo "unexpected scheduler command: $*" >&2',
+    '  exit 99',
+    'fi',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const output = JSON.parse(await runCli([
+      'apply',
+      JSON.stringify(manifest),
+      '--check-capabilities',
+      '--scheduler-bin',
+      fakeBin,
+    ]));
+
+    assert.equal(output.ok, true);
+    assert.equal(output.capabilities.source, 'runtime');
+    assert.equal(output.effective.negotiated, true);
+    assert.equal(output.effective.handoff_version, '2');
+    assert.equal(output.compatibility.ok, true);
+    assert.deepEqual(output.compatibility.errors, []);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test('applyManifestToScheduler adopt-by-name matches existing job by name and re-keys to stable id', async () => {
@@ -1769,10 +1927,21 @@ test('barrel export includes new public APIs', () => {
   assert.equal(typeof expandManifestShorthands, 'function');
 });
 
-test('cli describe commands includes version command', async () => {
+test('cli describe commands lists the full top-level command surface', async () => {
   const output = JSON.parse(await runCli(['describe', 'commands']));
   assert.equal(output.ok, true);
-  assert.ok(output.description.items.some(item => item.command === 'version'));
+  const commands = new Set(output.description.items.map(item => item.command));
+  for (const command of [
+    'version',
+    'convert',
+    'identity',
+    'authorization-proof',
+    'authorization',
+    'evidence',
+    'whoami',
+  ]) {
+    assert.ok(commands.has(command), `describe commands should include ${command}`);
+  }
 });
 
 test('cli describe rpc includes version method', async () => {
@@ -1895,6 +2064,23 @@ test('schema task has required fields on schedule and trigger', async () => {
 test('schema task has mutual exclusion note', async () => {
   const output = JSON.parse(await runCli(['schema', 'task']));
   assert.match(output.schema.note, /Exactly one of schedule or trigger/);
+});
+
+test('schema task includes child_credential_policy', async () => {
+  const output = JSON.parse(await runCli(['schema', 'task']));
+  assert.deepEqual(
+    output.schema.fields.child_credential_policy.enum,
+    ['none', 'inherit', 'downscope', 'independent']
+  );
+});
+
+test('schema workflow and task identity surfaces include scope', async () => {
+  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const workflowFields = output.schema.fields.workflows.items.fields;
+  const taskFields = workflowFields.tasks.items.fields;
+  assert.strictEqual(workflowFields.identity.fields.scope.type, 'string');
+  assert.strictEqual(taskFields.identity.fields.scope.type, 'string');
+  assert.strictEqual(taskFields.on_failure.fields.identity.fields.scope.type, 'string');
 });
 
 test('barrel export includes resolveManifestCandidate', () => {
@@ -3601,10 +3787,14 @@ test('exec runs a shell task and returns structured result', () => {
   assert.equal(result.result.timed_out, false);
 });
 
-test('exec rejects non-shell tasks', () => {
+test('exec delegates non-shell tasks and throws no_runtime when scheduler is not configured', () => {
   assert.throws(
     () => executeTask(exampleManifest, { taskId: 'collect' }),
-    /exec only supports shell-target tasks/
+    (err) => {
+      assert.match(err.message, /requires runtime delegation/);
+      assert.equal(err.code, 'no_runtime');
+      return true;
+    }
   );
 });
 
@@ -4124,6 +4314,26 @@ test('cli exec --dry-run does not execute', async () => {
   assert.equal(output.ok, true);
   assert.equal(output.dry_run, true);
   assert.ok(!output.result);
+});
+
+test('cli exec --dry-run previews delegated non-shell tasks without scheduler config', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Run a prompt',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const output = JSON.parse(await runCli(['exec', JSON.stringify(manifest), 'prompt-task', '--dry-run']));
+  assert.equal(output.ok, true);
+  assert.equal(output.dry_run, true);
+  assert.equal(output.delegated, true);
+  assert.equal(output.runtime, 'openclaw-scheduler');
 });
 
 test('cli exec without task-id throws usage error', async () => {
@@ -5960,15 +6170,18 @@ test('normalizeAuthorizationRequest includes only listed fields', async () => {
 test('resolveIdentityV2 merges workflow and task identity', () => {
   const workflowIdentity = {
     ref: 'profile-a',
+    scope: 'full',
     subject: { kind: 'agent', principal: 'agent://a' },
     trust: { level: 'supervised' }
   };
   const taskIdentity = {
+    scope: 'readonly',
     subject: { principal: 'agent://b' },
     trust: { level: 'restricted' }
   };
   const result = resolveIdentityV2(workflowIdentity, taskIdentity);
   assert.strictEqual(result.ref, 'profile-a');
+  assert.strictEqual(result.scope, 'readonly');
   assert.strictEqual(result.subject.principal, 'agent://b');
   assert.strictEqual(result.subject.kind, 'agent');
   assert.strictEqual(result.trust.level, 'restricted');
@@ -6052,6 +6265,7 @@ test('resolveIdentityV2 merges trust constraints', () => {
 test('resolveIdentityV2 returns nulls for empty inputs', () => {
   const result = resolveIdentityV2({}, {});
   assert.strictEqual(result.ref, null);
+  assert.strictEqual(result.scope, null);
   assert.strictEqual(result.subject.kind, null);
   assert.strictEqual(result.subject.principal, null);
   assert.strictEqual(result.trust.level, null);
@@ -6098,6 +6312,105 @@ test('v0.2 exec with env-bearer identity and missing optional token succeeds', a
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.declared_identity.provider, 'env-bearer');
   assert.strictEqual(result.declared_identity.subject.kind, 'service');
+});
+
+test('v0.2 exec passes identity scope through to scoped providers', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-test',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:test' },
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_KEY_FULL' },
+            readonly: { key_env: 'STRIPE_KEY_READONLY' },
+          },
+          scope_hierarchy: {
+            full: ['readonly'],
+            readonly: [],
+          },
+        },
+      },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'stripe-w',
+      name: 'Stripe Workflow',
+      tasks: [{
+        id: 'echo-stripe-scope',
+        name: 'Echo Stripe Scope',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write(process.env.STRIPE_API_KEY || "MISSING")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'stripe-test', scope: 'readonly' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'echo-stripe-scope',
+    env: {
+      ...process.env,
+      STRIPE_KEY_FULL: 'sk_test_full_scope_value_123456',
+      STRIPE_KEY_READONLY: 'rk_test_readonly_scope_value_654321',
+    },
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.result.stdout, 'rk_test_readonly_scope_value_654321');
+});
+
+test('v0.2 exec awaits async handoff preparation and summarizes credentials', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'async-handoff-profile',
+      provider: TEST_ASYNC_HANDOFF_PROVIDER,
+      subject: { kind: 'service', principal: 'agent://mock/handoff' },
+      presentation: { handoff: 'downscope' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'handoff-workflow',
+      name: 'Handoff Workflow',
+      tasks: [{
+        id: 'handoff-task',
+        name: 'Handoff Task',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write("ok")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'async-handoff-profile' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'handoff-task',
+    dryRun: true,
+    presentationDebug: true,
+    signer: 'none',
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.deepStrictEqual(result.handoff, { mode: 'downscope', prepared: true });
+  assert.deepStrictEqual(result.presentation_debug.handoff, {
+    mode: 'downscope',
+    prepared: true,
+    credential_types: ['access_token'],
+    reason: null,
+  });
 });
 
 test('v0.2 exec runs command and returns output', async () => {
@@ -6751,6 +7064,677 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.ok(failureSpec);
   assert.strictEqual('authorization_proof' in failureSpec, false);
   assert.strictEqual('authorization_proof_verification' in failureSpec, false);
+});
+
+// ---------------------------------------------------------------------------
+// Runtime Capability Negotiation (Track 7)
+// ---------------------------------------------------------------------------
+
+test('querySchedulerCapabilities returns ok with features from a valid runner', () => {
+  const runner = {
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.source, 'runtime');
+  assert.strictEqual(result.version, '0.2.0');
+  assert.strictEqual(result.handoff_version, '2');
+  assert.strictEqual(result.schema_version, 22);
+  assert.strictEqual(result.features.authorization_hook, true);
+  assert.strictEqual(result.features.runtime_identity_resolution, true);
+});
+
+test('querySchedulerCapabilities returns ok:false when runner throws', () => {
+  const runner = {
+    queryCapabilities() {
+      throw new Error('connection refused');
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+  assert.strictEqual(result.error, 'connection refused');
+});
+
+test('querySchedulerCapabilities returns ok:false with null runner', () => {
+  const result = querySchedulerCapabilities(null);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('querySchedulerCapabilities returns ok:false when runner lacks queryCapabilities', () => {
+  const result = querySchedulerCapabilities({ listJobs() { return []; } });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('querySchedulerCapabilities returns ok:false when response has no features', () => {
+  const runner = {
+    queryCapabilities() {
+      return { scheduler_version: '0.2.0' };
+    }
+  };
+  const result = querySchedulerCapabilities(runner);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('resolveEffectiveFeatures upgrades static false to runtime true', () => {
+  const caps = {
+    ok: true,
+    features: {
+      authorization_hook: true,
+      trust_evaluation: true,
+      evidence_generation: true,
+      runtime_identity_resolution: true,
+      authorization_proof_verification: true,
+      credential_handoff: true,
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.negotiated, true);
+  assert.strictEqual(result.source, 'runtime');
+  assert.strictEqual(result.features.authorization_hook, true);
+  assert.strictEqual(result.features.trust_evaluation, true);
+  assert.strictEqual(result.features.evidence_generation, true);
+  assert.strictEqual(result.features.runtime_identity_resolution, true);
+  assert.strictEqual(result.features.authorization_proof_verification, true);
+  assert.strictEqual(result.features.credential_handoff, true);
+});
+
+test('resolveEffectiveFeatures cannot downgrade static true to runtime false', () => {
+  const caps = {
+    ok: true,
+    features: {
+      runtime_execution: false,
+      identity_declaration: false,
+      audit_export: false,
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.features.runtime_execution, true);
+  assert.strictEqual(result.features.identity_declaration, true);
+  assert.strictEqual(result.features.audit_export, true);
+});
+
+test('resolveEffectiveFeatures replaces string values from runtime', () => {
+  const caps = {
+    ok: true,
+    features: {
+      approvals: 'full',
+      model_policy: 'enforced',
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.features.approvals, 'full');
+  assert.strictEqual(result.features.model_policy, 'enforced');
+});
+
+test('resolveEffectiveFeatures ignores unknown runtime keys', () => {
+  const caps = {
+    ok: true,
+    features: {
+      completely_new_feature: true,
+      another_unknown: 'value',
+    }
+  };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual('completely_new_feature' in result.features, false);
+  assert.strictEqual('another_unknown' in result.features, false);
+});
+
+test('resolveEffectiveFeatures returns static features when no runtime capabilities', () => {
+  const result = resolveEffectiveFeatures('openclaw-scheduler', null);
+  assert.strictEqual(result.negotiated, false);
+  assert.strictEqual(result.source, 'static');
+  assert.strictEqual(result.features.authorization_hook, false);
+  assert.strictEqual(result.features.runtime_execution, true);
+});
+
+test('resolveEffectiveFeatures returns static features when runtime ok is false', () => {
+  const caps = { ok: false, error: 'connection refused', source: 'static' };
+  const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
+  assert.strictEqual(result.negotiated, false);
+  assert.strictEqual(result.source, 'static');
+});
+
+test('resolveEffectiveFeatures throws for unknown target', () => {
+  assert.throws(
+    () => resolveEffectiveFeatures('nonexistent-target', null),
+    /Unknown target: nonexistent-target/
+  );
+});
+
+test('validateManifestCapabilities detects authorization_hook mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Job One', authorization_ref: 'authz-profile' },
+    ]
+  };
+  const features = { authorization_hook: false, trust_evaluation: true, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'authorization_hook');
+  assert.ok(errors[0].message.includes('Job One'));
+});
+
+test('validateManifestCapabilities detects trust_evaluation mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Trust Job', contract_required_trust_level: 'supervised' },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: false, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'trust_evaluation');
+  assert.ok(errors[0].message.includes('Trust Job'));
+});
+
+test('validateManifestCapabilities detects evidence_generation mismatch', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Evidence Job', evidence_ref: 'ev-profile' },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: false };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'evidence_generation');
+  assert.ok(errors[0].message.includes('Evidence Job'));
+});
+
+test('validateManifestCapabilities detects credential_handoff mismatch', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Handoff Job',
+        identity: {
+          presentation: {
+            handoff: 'downscope',
+          },
+        },
+      },
+    ]
+  };
+  const features = {
+    authorization_hook: true,
+    trust_evaluation: true,
+    evidence_generation: true,
+    credential_handoff: false,
+  };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].feature, 'credential_handoff');
+  assert.ok(errors[0].message.includes('Handoff Job'));
+});
+
+test('validateManifestCapabilities returns no errors when all features satisfied', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Full Job',
+        authorization_ref: 'authz',
+        contract_required_trust_level: 'supervised',
+        evidence_ref: 'ev',
+      },
+    ]
+  };
+  const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: true };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+});
+
+test('validateManifestCapabilities returns no errors for jobs without v0.2 features', () => {
+  const compiled = {
+    jobs: [
+      { id: 'j1', name: 'Simple Job', schedule_cron: '0 * * * *' },
+    ]
+  };
+  const features = { authorization_hook: false, trust_evaluation: false, evidence_generation: false };
+  const errors = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+});
+
+test('validateManifestCapabilities handles null/empty compiled output', () => {
+  const features = { authorization_hook: false };
+  assert.strictEqual(validateManifestCapabilities(null, { features }).length, 0);
+  assert.strictEqual(validateManifestCapabilities({}, { features }).length, 0);
+  assert.strictEqual(validateManifestCapabilities({ jobs: [] }, { features }).length, 0);
+});
+
+test('applyManifestToScheduler rejects unsupported trust and evidence capabilities before writing', async () => {
+  let addCalls = 0;
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        handoff_version: '1',
+        features: {},
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob() {
+      addCalls += 1;
+      return { ok: true };
+    },
+    updateJob() {
+      addCalls += 1;
+      return { ok: true };
+    }
+  };
+
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [
+      { id: 'evidence', provider: 'none' }
+    ],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        prompt: 'Summarize logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        contract: { required_trust_level: 'supervised' },
+        evidence: { ref: 'evidence' },
+      }]
+    }]
+  };
+
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner }),
+    err => {
+      assert.strictEqual(err.code, 'unsupported_capability');
+      assert.ok(Array.isArray(err.capability_errors));
+      assert.strictEqual(err.capability_errors.length, 2);
+      assert.ok(err.capability_errors.some(error => error.feature === 'trust_evaluation'));
+      assert.ok(err.capability_errors.some(error => error.feature === 'evidence_generation'));
+      return true;
+    }
+  );
+  assert.strictEqual(addCalls, 0);
+});
+
+test('applyManifestToScheduler includes capabilities metadata in result', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'runtime-caps-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/runtime-caps' }
+    }],
+    workflows: [{
+      id: 'runtime-caps-wf',
+      name: 'Runtime Caps',
+      identity: { ref: 'runtime-caps-profile' },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'negotiate capabilities',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'runtime');
+  assert.strictEqual(result.capabilities.negotiated, true);
+  assert.strictEqual(result.capabilities.handoff_version, '2');
+});
+
+test('applyManifestToScheduler skips runtime capability queries for pure v0.1 manifests', async () => {
+  let capabilityCalls = 0;
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      capabilityCalls += 1;
+      throw new Error('capabilities should not be queried for v0.1 manifests');
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(capabilityCalls, 0);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'static');
+  assert.strictEqual(result.capabilities.negotiated, false);
+});
+
+test('applyManifestToScheduler falls back to static when runner lacks queryCapabilities', async () => {
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(exampleManifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.capabilities);
+  assert.strictEqual(result.capabilities.source, 'static');
+  assert.strictEqual(result.capabilities.negotiated, false);
+});
+
+// ---------------------------------------------------------------------------
+// Versioned Scheduler Field Projection (Track 8)
+// ---------------------------------------------------------------------------
+
+test('SCHEDULER_FIELD_VERSIONS v1 matches original 40-field list', () => {
+  const v1 = SCHEDULER_FIELD_VERSIONS['1'];
+  assert.ok(Array.isArray(v1));
+  assert.strictEqual(v1.length, 40);
+  assert.ok(v1.includes('id'));
+  assert.ok(v1.includes('name'));
+  assert.ok(v1.includes('delete_after_run'));
+  assert.ok(!v1.includes('identity_ref'));
+  assert.ok(!v1.includes('authorization_proof'));
+  assert.ok(!v1.includes('evidence'));
+});
+
+test('SCHEDULER_FIELD_VERSIONS v2 includes v1 plus 22 v0.2 fields', () => {
+  const v2 = SCHEDULER_FIELD_VERSIONS['2'];
+  assert.ok(Array.isArray(v2));
+  assert.strictEqual(v2.length, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
+  // all v1 fields present
+  for (const f of SCHEDULER_FIELDS_V1) {
+    assert.ok(v2.includes(f), `v2 should include v1 field "${f}"`);
+  }
+  // all v0.2 fields present
+  for (const f of SCHEDULER_FIELDS_V02) {
+    assert.ok(v2.includes(f), `v2 should include v0.2 field "${f}"`);
+  }
+});
+
+test('v1 and v0.2 field lists are disjoint', () => {
+  const overlap = SCHEDULER_FIELDS_V1.filter(f => SCHEDULER_FIELDS_V02.includes(f));
+  assert.strictEqual(overlap.length, 0, `Fields overlap between v1 and v0.2: ${overlap.join(', ')}`);
+});
+
+test('applyManifestToScheduler with handoff_version 2 sends v0.2 fields to addJob', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/handoff-v2' }
+    }],
+    workflows: [{
+      id: 'handoff-wf',
+      name: 'Handoff Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+        required_trust_level: 'restricted',
+        trust_enforcement: 'advisory'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Handoff Task',
+        prompt: 'test handoff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() { return []; },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(calls.length, 1);
+  // v0.2 fields should be present
+  assert.ok('identity_ref' in calls[0], 'identity_ref should be in spec');
+  assert.ok('identity' in calls[0], 'identity should be in spec');
+  assert.ok('contract_sandbox' in calls[0], 'contract_sandbox should be in spec');
+  assert.ok('contract_required_trust_level' in calls[0], 'contract_required_trust_level should be in spec');
+  assert.ok('contract_trust_enforcement' in calls[0], 'contract_trust_enforcement should be in spec');
+  // handoff metadata
+  assert.ok(result.handoff);
+  assert.strictEqual(result.handoff.field_version, '2');
+  assert.strictEqual(result.handoff.v02_fields_included, true);
+  assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELD_VERSIONS['2'].length);
+});
+
+test('applyManifestToScheduler without capabilities (old scheduler) strips v0.2 fields', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/handoff-v1' }
+    }],
+    workflows: [{
+      id: 'handoff-old-wf',
+      name: 'Old Scheduler Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Old Scheduler Task',
+        prompt: 'test old scheduler',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const calls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    // No queryCapabilities -- old scheduler
+    listJobs() { return []; },
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(calls.length, 1);
+  // v0.2 fields should NOT be present
+  assert.strictEqual('identity_ref' in calls[0], false);
+  assert.strictEqual('identity' in calls[0], false);
+  assert.strictEqual('contract_sandbox' in calls[0], false);
+  assert.strictEqual('authorization_proof' in calls[0], false);
+  assert.strictEqual('evidence' in calls[0], false);
+  // handoff metadata
+  assert.ok(result.handoff);
+  assert.strictEqual(result.handoff.field_version, '1');
+  assert.strictEqual(result.handoff.v02_fields_included, false);
+  assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELDS_V1.length);
+});
+
+test('applyManifestToScheduler with handoff_version 2 passes v0.2 fields to updateJob', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'svc-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/update-v2' }
+    }],
+    workflows: [{
+      id: 'update-wf',
+      name: 'Update v2 Test',
+      identity: { ref: 'svc-profile' },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+        required_trust_level: 'restricted'
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Update Task',
+        prompt: 'test update',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const updateCalls = [];
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() { return compiled.jobs.map(j => ({ id: j.id, name: j.name })); },
+    addJob() { throw new Error('should not add'); },
+    updateJob(id, spec) {
+      updateCalls.push({ id, spec });
+      return { ok: true, job: spec };
+    }
+  };
+
+  const result = await applyManifestToScheduler(manifest, { runner });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(updateCalls.length, 1);
+  // v0.2 fields in update spec
+  assert.ok('identity_ref' in updateCalls[0].spec, 'identity_ref should be in update spec');
+  assert.ok('contract_sandbox' in updateCalls[0].spec, 'contract_sandbox should be in update spec');
+  assert.ok('contract_required_trust_level' in updateCalls[0].spec, 'contract_required_trust_level should be in update spec');
+  // id and origin should NOT be in update spec
+  assert.strictEqual('id' in updateCalls[0].spec, false);
+  assert.strictEqual('origin' in updateCalls[0].spec, false);
+});
+
+test('compiler output includes handoff metadata', () => {
+  const compiled = compileManifestToScheduler(exampleManifest);
+  assert.ok(compiled.handoff);
+  assert.strictEqual(compiled.handoff.field_version, '2');
+  assert.strictEqual(compiled.handoff.v1_field_count, SCHEDULER_FIELDS_V1.length);
+  assert.strictEqual(compiled.handoff.v2_field_count, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
 });
 
 // ---------------------------------------------------------------------------
@@ -7423,4 +8407,1295 @@ test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', 
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Runtime adapter registry
+// ---------------------------------------------------------------------------
+
+test('runtime adapter registry has built-in shell and scheduler adapters', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.ok(shell, 'shell adapter should be registered');
+  assert.deepStrictEqual(shell.capabilities.session_targets, ['shell']);
+
+  const scheduler = getRuntimeAdapter('openclaw-scheduler');
+  assert.ok(scheduler, 'openclaw-scheduler adapter should be registered');
+  assert.deepStrictEqual(scheduler.capabilities.session_targets, ['main', 'isolated']);
+});
+
+test('resolveRuntimeAdapter finds adapter by session_target', () => {
+  assert.strictEqual(resolveRuntimeAdapter('shell')?.name, 'shell');
+  assert.strictEqual(resolveRuntimeAdapter('main')?.name, 'openclaw-scheduler');
+  assert.strictEqual(resolveRuntimeAdapter('isolated')?.name, 'openclaw-scheduler');
+  assert.strictEqual(resolveRuntimeAdapter('nonexistent'), null);
+});
+
+test('listRuntimeAdapters returns all registered adapters', () => {
+  const list = listRuntimeAdapters();
+  assert.ok(list.length >= 2, 'should have at least shell and scheduler adapters');
+  const names = list.map(a => a.name);
+  assert.ok(names.includes('shell'));
+  assert.ok(names.includes('openclaw-scheduler'));
+  for (const entry of list) {
+    assert.ok(typeof entry.name === 'string');
+    assert.ok(typeof entry.capabilities === 'object');
+  }
+});
+
+test('registerRuntimeAdapter rejects adapter without name', () => {
+  assert.throws(
+    () => registerRuntimeAdapter({ dispatch() {} }),
+    /Adapter must have a string name/
+  );
+});
+
+test('registerRuntimeAdapter rejects adapter without dispatch', () => {
+  assert.throws(
+    () => registerRuntimeAdapter({ name: 'test-no-dispatch' }),
+    /must implement dispatch/
+  );
+});
+
+test('shell adapter canExecute returns true for shell targets', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.deepStrictEqual(
+    shell.canExecute({ target: { session_target: 'shell' } }),
+    { supported: true }
+  );
+  assert.deepStrictEqual(
+    shell.canExecute({ target: { session_target: 'isolated' } }),
+    { supported: false }
+  );
+});
+
+test('shell adapter dispatch throws (shell tasks bypass adapter dispatch)', () => {
+  const shell = getRuntimeAdapter('shell');
+  assert.throws(
+    () => shell.dispatch(),
+    /Shell tasks are executed directly/
+  );
+});
+
+test('scheduler adapter canExecute checks context and session_target', () => {
+  const adapter = getRuntimeAdapter('openclaw-scheduler');
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'main' } }, {}),
+    { supported: false, reason: 'No scheduler configured' }
+  );
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'main' } }, { schedulerPrefix: '/some/path' }),
+    { supported: true }
+  );
+  assert.deepStrictEqual(
+    adapter.canExecute({ target: { session_target: 'isolated' } }, { schedulerBin: '/bin/sched' }),
+    { supported: true }
+  );
+  const shellResult = adapter.canExecute({ target: { session_target: 'shell' } }, { schedulerPrefix: '/x' });
+  assert.strictEqual(shellResult.supported, false);
+  assert.match(shellResult.reason, /Unsupported session target/);
+});
+
+test('compileManifestForDispatch caches compiled manifests by object identity', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'cache-w',
+      name: 'Cache W',
+      tasks: [{
+        id: 'cache-t',
+        name: 'Cache T',
+        prompt: 'cache this',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  const first = compileManifestForDispatch(manifest);
+  const second = compileManifestForDispatch(manifest);
+  assert.strictEqual(second, first, 'same manifest object should reuse the cached compiled output');
+
+  const clonedManifest = structuredClone(manifest);
+  const third = compileManifestForDispatch(clonedManifest);
+  assert.notStrictEqual(third, first, 'different manifest objects should compile independently');
+});
+
+// ---------------------------------------------------------------------------
+// Runtime delegation via executeTask
+// ---------------------------------------------------------------------------
+
+test('exec delegates non-shell task with dry-run and returns delegation receipt', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Run a prompt',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  // Dry-run delegation short-circuits before calling the scheduler CLI, so
+  // the preview should work without any runtime configuration.
+  const result = executeTask(manifest, {
+    taskId: 'prompt-task',
+    dryRun: true,
+    signer: 'none',
+  });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.dry_run, true);
+  assert.strictEqual(result.delegated, true);
+  assert.strictEqual(result.runtime, 'openclaw-scheduler');
+  assert.strictEqual(result.session_target, 'isolated');
+  assert.ok(result.job_spec, 'dry-run receipt should include the job spec');
+  assert.ok(result.job_id, 'dry-run receipt should include a job_id');
+});
+
+test('exec shell task still works unchanged after delegation plumbing', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'echo-test', name: 'Echo Test',
+        shell: { program: 'echo', args: ['delegation-ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 'echo-test' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.result.exit_code, 0);
+  assert.ok(result.result.stdout.includes('delegation-ok'));
+});
+
+test('exec delegates prompt task to mock scheduler runner', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+
+  // We need a fake scheduler binary that responds to --json capabilities
+  // and --json jobs add.  The simplest approach: point schedulerBin at a
+  // script that returns valid JSON for the commands the adapter calls.
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-delegation-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'case "$*" in',
+    '  *capabilities*)',
+    '    echo \'{"features":{},"scheduler_version":"0.0.0-test"}\'',
+    '    ;;',
+    '  *"jobs add"*|*jobs\\ add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *jobs*add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *)',
+    '    echo \'{}\'',
+    '    ;;',
+    'esac',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      schedulerBin: fakeBin,
+      signer: 'none',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.delegated, true);
+    assert.strictEqual(result.runtime, 'openclaw-scheduler');
+    assert.strictEqual(result.session_target, 'main');
+    assert.strictEqual(result.status, 'dispatched');
+    assert.ok(result.job_id);
+    assert.ok(result.handoff_version);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('exec delegated task uses the selected workflow when task ids collide', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [
+      {
+        id: 'alpha',
+        name: 'Alpha',
+        tasks: [{
+          id: 'shared-task',
+          name: 'Shared Task',
+          prompt: 'Run alpha',
+          target: { session_target: 'main', agent_id: 'main' },
+          schedule: { cron: '0 * * * *' }
+        }]
+      },
+      {
+        id: 'beta',
+        name: 'Beta',
+        tasks: [{
+          id: 'shared-task',
+          name: 'Shared Task',
+          prompt: 'Run beta',
+          target: { session_target: 'main', agent_id: 'main' },
+          schedule: { cron: '15 * * * *' }
+        }]
+      }
+    ]
+  };
+
+  const result = executeTask(manifest, {
+    workflowId: 'beta',
+    taskId: 'shared-task',
+    dryRun: true,
+    schedulerPrefix: '/fake/prefix',
+    signer: 'none',
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.job_id, stableId('beta', 'shared-task'));
+  assert.strictEqual(result.job_spec.source.workflow_id, 'beta');
+  assert.strictEqual(result.job_spec.source.task_id, 'shared-task');
+});
+
+test('exec delegated task respects env scheduler config and stringifies v0.2 blob fields', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'prompt-task',
+        name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: {
+          subject: {
+            kind: 'service',
+            principal: 'agent://example.com/reviewer',
+          }
+        }
+      }]
+    }]
+  };
+
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-delegation-capture-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  const captureFile = join(tmpDir, 'job-spec.json');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'if [ "$2" = "capabilities" ]; then',
+    '  echo \'{"features":{"authorization_hook":true,"evidence_generation":true,"trust_evaluation":true},"handoff_version":"2","scheduler_version":"0.0.0-test"}\'',
+    'elif [ "$2" = "jobs" ] && [ "$3" = "add" ]; then',
+    `  printf '%s' "$4" > '${captureFile}'`,
+    '  echo \'{"ok":true}\'',
+    'else',
+    '  echo \'{}\'',
+    'fi',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      signer: 'none',
+      env: {
+        ...process.env,
+        AGENTCLI_SCHEDULER_BIN: fakeBin,
+      },
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.delegated, true);
+
+    const captured = JSON.parse(readFileSync(captureFile, 'utf8'));
+    assert.strictEqual(typeof captured.identity, 'string');
+    assert.strictEqual(
+      JSON.parse(captured.identity).subject.principal,
+      'agent://example.com/reviewer'
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// child_credential_policy compilation
+// ---------------------------------------------------------------------------
+
+test('child_credential_policy validates cleanly on workflow and task surfaces', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'inherit',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        shell: { program: 'echo', args: ['ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'independent',
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(
+    result.warnings.some(warning => warning.path.includes('child_credential_policy')),
+    false
+  );
+});
+
+test('validation rejects invalid child_credential_policy values', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'bogus',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        shell: { program: 'echo', args: ['ok'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+      }]
+    }]
+  };
+
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(error => error.path.endsWith('.child_credential_policy')));
+});
+
+test('child_credential_policy: workflow-level policy flows to compiled job', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'downscope',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, 'downscope');
+});
+
+test('child_credential_policy: task-level policy overrides workflow-level', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'inherit',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'independent',
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, 'independent');
+});
+
+test('child_credential_policy: no policy results in null', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.child_credential_policy, null);
+});
+
+test('child_credential_policy: invalid policy value throws', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      child_credential_policy: 'invalid_value',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['hello'] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(err.validation, 'compile error should include validation details');
+      assert.ok(
+        err.validation.errors.some(error =>
+          error.path.endsWith('.child_credential_policy') &&
+          /none, inherit, downscope, independent/.test(error.message)
+        ),
+        'validation should include the child_credential_policy enum error'
+      );
+      return true;
+    },
+  );
+});
+
+test('child_credential_policy: downscope child with scope compiles OK', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live', scope: 'full' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+        identity: { ref: 'stripe-live', scope: 'readonly' },
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.strictEqual(compiled.jobs.length, 2);
+  const parentJob = compiled.jobs.find(j => j.source.task_id === 'parent');
+  const childJob = compiled.jobs.find(j => j.source.task_id === 'child');
+  assert.strictEqual(parentJob.identity.scope, 'full');
+  assert.ok(childJob);
+  assert.strictEqual(childJob.identity.scope, 'readonly');
+});
+
+test('child_credential_policy: downscope child without scope produces error', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+      }],
+    }],
+  };
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    (err) => {
+      assert.ok(err.validation);
+      assert.ok(err.validation.errors.some(
+        e => /declares no identity scope/.test(e.message),
+      ), 'should contain error about missing identity scope');
+      return true;
+    },
+  );
+});
+
+test('child_credential_policy: child with own policy independent overrides inherited downscope', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-live',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:live' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'parent',
+        name: 'Parent',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['parent'] },
+        schedule: { cron: '0 * * * *' },
+        child_credential_policy: 'downscope',
+        identity: { ref: 'stripe-live', scope: 'full' },
+      }, {
+        id: 'child',
+        name: 'Child',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo', args: ['child'] },
+        trigger: { parent: 'parent', on: 'success' },
+        child_credential_policy: 'independent',
+      }],
+    }],
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.strictEqual(compiled.jobs.length, 2);
+  const childJob = compiled.jobs.find(j => j.source.task_id === 'child');
+  assert.ok(childJob);
+  assert.strictEqual(childJob.child_credential_policy, 'independent');
+});
+
+test('child_credential_policy: field is in SCHEDULER_FIELDS_V02', () => {
+  assert.ok(
+    SCHEDULER_FIELDS_V02.includes('child_credential_policy'),
+    'SCHEDULER_FIELDS_V02 should include child_credential_policy',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// stripe-api-key identity provider
+// ---------------------------------------------------------------------------
+
+import stripeApiKeyProvider from '../src/identity/stripe-api-key.js';
+
+const validPrecreatedProfile = {
+  auth: {
+    provider_config: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      permission_sets: {
+        full: { key_env: 'STRIPE_KEY_FULL' },
+        readonly: { key_env: 'STRIPE_KEY_READONLY' },
+      },
+      scope_hierarchy: {
+        full: ['readonly'],
+        readonly: [],
+      },
+    },
+  },
+  trust: { level: 'supervised' },
+};
+
+// -- validateProfile tests --
+
+test('stripe-api-key validateProfile: valid precreated config passes', () => {
+  const result = stripeApiKeyProvider.validateProfile(validPrecreatedProfile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: missing key_strategy fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        account_mode: 'test',
+        permission_sets: { full: { key_env: 'X' } },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key_strategy/.test(e)));
+});
+
+test('stripe-api-key validateProfile: invalid key_strategy value fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'magic',
+        account_mode: 'test',
+        permission_sets: { full: { key_env: 'X' } },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key_strategy/.test(e)));
+});
+
+test('stripe-api-key validateProfile: missing permission_sets (precreated) fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /permission_sets/.test(e)));
+});
+
+test('stripe-api-key validateProfile: empty permission_sets fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {},
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /at least one scope entry/.test(e)));
+});
+
+test('stripe-api-key validateProfile: permission set without any key source fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: {},
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /key source/.test(e)));
+});
+
+test('stripe-api-key validateProfile: cyclic scope_hierarchy fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          a: { key_env: 'K_A' },
+          b: { key_env: 'K_B' },
+        },
+        scope_hierarchy: {
+          a: ['b'],
+          b: ['a'],
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /cycle/.test(e)));
+});
+
+test('stripe-api-key validateProfile: valid scope_hierarchy passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'K_FULL' },
+          payments: { key_env: 'K_PAY' },
+          readonly: { key_env: 'K_RO' },
+        },
+        scope_hierarchy: {
+          full: ['payments', 'readonly'],
+          payments: [],
+          readonly: [],
+        },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: valid dynamic config with master_key_source passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: dynamic config without master_key_source fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /master_key_source/.test(e)));
+});
+
+// -- resolveSession tests --
+
+test('stripe-api-key resolveSession: precreated with env source resolves key', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-1',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_test_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.session.provider, 'stripe-api-key');
+  assert.strictEqual(result.session.subject.kind, 'service');
+  assert.strictEqual(result.session.subject.principal, 'stripe:test');
+  assert.strictEqual(result.session.credentials.api_key.value, 'sk_test_abc123def456');
+  assert.strictEqual(result.session.credentials.api_key.scope, 'full');
+  assert.strictEqual(result.session.credentials.api_key.kind, 'bearer');
+  assert.strictEqual(result.session.instance.id, 'test-1');
+  assert.strictEqual(result.session.trust.declared_level, 'supervised');
+  assert.strictEqual(result.session.provider_assertions.key_strategy, 'precreated');
+  assert.strictEqual(result.session.provider_assertions.account_mode, 'test');
+  assert.strictEqual(result.session.provider_assertions.scope, 'full');
+  assert.strictEqual(result.session.delegation_validation.valid, true);
+});
+
+test('stripe-api-key resolveSession: returns error when env var is not set', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-2',
+    scope: 'full',
+  };
+  const ctx = { env: {}, cwd: '/tmp' };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/STRIPE_KEY_FULL/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: rejects invalid key format', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-3',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'not_a_stripe_key' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/does not match expected Stripe format/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: rejects key mode mismatch (live key with test profile)', () => {
+  const request = {
+    profile: validPrecreatedProfile,
+    instanceId: 'test-4',
+    scope: 'full',
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_live_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/mode mismatch/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: dynamic strategy returns not-implemented error', () => {
+  const dynamicProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile: dynamicProfile, instanceId: 'test-5' };
+  const result = stripeApiKeyProvider.resolveSession(request, {});
+  assert.strictEqual(result.ok, false);
+  assert.ok(/not yet implemented/.test(result.error));
+});
+
+test('stripe-api-key resolveSession: key_command cache distinguishes cwd (same snippet)', () => {
+  const d1 = mkdtempSync(join(tmpdir(), 'stripe-cmd-'));
+  const d2 = mkdtempSync(join(tmpdir(), 'stripe-cmd-'));
+  const key1 = 'sk_test_abcdefghijklmnopqrstuvwxyz';
+  const key2 = 'sk_test_XYZabcdefghijklmnopqrstuvw';
+  writeFileSync(join(d1, 'stripe_key.txt'), key1, 'utf8');
+  writeFileSync(join(d2, 'stripe_key.txt'), key2, 'utf8');
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        cache_ttl_s: 60,
+        permission_sets: {
+          full: {
+            key_command:
+              'node -e "const fs=require(\'fs\');const p=require(\'path\');console.log(fs.readFileSync(p.join(process.cwd(),\'stripe_key.txt\'),\'utf8\').trim())"',
+          },
+        },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile, instanceId: 'kc1', scope: 'full' };
+  const r1 = stripeApiKeyProvider.resolveSession(request, { cwd: d1, env: process.env });
+  const r2 = stripeApiKeyProvider.resolveSession(request, { cwd: d2, env: process.env });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(r1.session.credentials.api_key.value, key1);
+  assert.strictEqual(r2.session.credentials.api_key.value, key2);
+  rmSync(d1, { recursive: true, force: true });
+  rmSync(d2, { recursive: true, force: true });
+});
+
+test('stripe-api-key resolveSession: key_command cache distinguishes explicit env payloads', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        cache_ttl_s: 60,
+        permission_sets: {
+          full: {
+            key_command: 'node -p "process.env.STRIPE_CMD_SECRET"',
+          },
+        },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile, instanceId: 'kc2', scope: 'full' };
+  const keyA = 'sk_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const keyB = 'sk_test_bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const base = { PATH: process.env.PATH || '', ...process.env };
+  const r1 = stripeApiKeyProvider.resolveSession(request, { cwd: tmpdir(), env: { ...base, STRIPE_CMD_SECRET: keyA } });
+  const r2 = stripeApiKeyProvider.resolveSession(request, { cwd: tmpdir(), env: { ...base, STRIPE_CMD_SECRET: keyB } });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(r1.session.credentials.api_key.value, keyA);
+  assert.strictEqual(r2.session.credentials.api_key.value, keyB);
+});
+
+// -- materialize tests --
+
+
+test('stripe-api-key materialize: produces correct env_vars with STRIPE_API_KEY default binding', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'sk_test_abc123def456',
+        scope: 'full',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+  };
+  const result = stripeApiKeyProvider.materialize(session, {}, {});
+  assert.strictEqual(result.materialized, true);
+  assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.cleanup_required, false);
+});
+
+test('stripe-api-key materialize: additional presentation bindings are included', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'sk_test_abc123def456',
+        scope: 'full',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+  };
+  const presentation = {
+    bindings: [
+      {
+        source: 'credentials.api_key.value',
+        target: { kind: 'env', name: 'MY_STRIPE_KEY' },
+      },
+      {
+        source: 'provider_assertions.scope',
+        target: { kind: 'env', name: 'STRIPE_SCOPE' },
+      },
+    ],
+  };
+  const result = stripeApiKeyProvider.materialize(session, presentation, {});
+  assert.strictEqual(result.materialized, true);
+  assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.env_vars['MY_STRIPE_KEY'], 'sk_test_abc123def456');
+  assert.strictEqual(result.env_vars['STRIPE_SCOPE'], 'full');
+});
+
+// -- prepareHandoff tests --
+
+test('stripe-api-key prepareHandoff: downscope to reachable scope succeeds', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    instance: { id: 'test-1', source: 'operator' },
+    trust: { declared_level: 'supervised', effective_level: 'supervised' },
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'test',
+      scope: 'full',
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    ],
+  };
+  const handoff = {
+    target_scope: 'readonly',
+    parent_profile: validPrecreatedProfile,
+  };
+  const ctx = {
+    env: { STRIPE_KEY_READONLY: 'rk_test_readonly1234' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly1234');
+  assert.strictEqual(result.session.provider_assertions.parent_scope, 'full');
+  assert.strictEqual(result.session.handoff.mode, 'downscope');
+  assert.strictEqual(result.session.handoff.prepared, true);
+  assert.strictEqual(result.session.delegation_chain.length, 2);
+  assert.ok(/downscope:full->readonly/.test(result.session.delegation_chain[1].grant));
+});
+
+test('stripe-api-key prepareHandoff: downscope to unreachable scope fails', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: { kind: 'bearer', value: 'rk_test_readonly1234', scope: 'readonly' },
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:readonly', validated: true },
+    ],
+  };
+  const handoff = {
+    target_scope: 'full',
+    parent_profile: validPrecreatedProfile,
+  };
+  const ctx = {
+    env: { STRIPE_KEY_FULL: 'sk_test_abc123def456' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, false);
+  assert.ok(/not reachable/.test(result.error));
+});
+
+test('stripe-api-key prepareHandoff: missing parent_profile returns error', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+  };
+  const handoff = { target_scope: 'readonly' };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, {});
+  assert.strictEqual(result.prepared, false);
+  assert.ok(/parent_profile/.test(result.error));
+});
+
+test('stripe-api-key prepareHandoff: reads permission_sets from parent_profile.provider_config', () => {
+  const parentSession = {
+    provider: 'stripe-api-key',
+    instance: { id: 'test-1', source: 'operator' },
+    trust: { declared_level: 'supervised', effective_level: 'supervised' },
+    credentials: {
+      api_key: { kind: 'bearer', value: 'sk_test_abc123def456', scope: 'full' },
+    },
+    delegation_chain: [
+      { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    ],
+  };
+  const customProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'CUSTOM_FULL' },
+          limited: { key_env: 'CUSTOM_LIMITED' },
+        },
+        scope_hierarchy: {
+          full: ['limited'],
+          limited: [],
+        },
+      },
+    },
+  };
+  const handoff = {
+    target_scope: 'limited',
+    parent_profile: customProfile,
+  };
+  const ctx = {
+    env: { CUSTOM_LIMITED: 'rk_test_limited12345' },
+    cwd: '/tmp',
+  };
+  const result = stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'limited');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_limited12345');
+});
+
+// -- validateDelegation tests --
+
+test('stripe-api-key validateDelegation: chain within max_depth passes', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:full->readonly', validated: true },
+  ];
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, true);
+  assert.strictEqual(result.depth, 2);
+  assert.strictEqual(result.acyclic, true);
+  assert.strictEqual(result.escalation_detected, false);
+});
+
+test('stripe-api-key validateDelegation: chain exceeding max_depth fails', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:full->payments', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:payments->readonly', validated: true },
+  ];
+  const policy = {
+    max_depth: 2,
+    scope_hierarchy: {
+      full: ['payments'],
+      payments: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, false);
+  assert.strictEqual(result.depth, 3);
+});
+
+test('stripe-api-key validateDelegation: detects scope escalation in chain', () => {
+  const chain = [
+    { kind: 'service', principal: 'stripe:test', grant: 'scope:readonly', validated: true },
+    { kind: 'service', principal: 'stripe:test', grant: 'downscope:readonly->full', validated: true },
+  ];
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation(chain, policy, {});
+  assert.strictEqual(result.valid, false);
+  assert.strictEqual(result.escalation_detected, true);
+});
+
+test('stripe-api-key validateDelegation: empty chain passes', () => {
+  const policy = {
+    max_depth: 5,
+    scope_hierarchy: {
+      full: ['readonly'],
+      readonly: [],
+    },
+  };
+  const result = stripeApiKeyProvider.validateDelegation([], policy, {});
+  assert.strictEqual(result.valid, true);
+  assert.strictEqual(result.depth, 0);
+  assert.strictEqual(result.acyclic, true);
+  assert.strictEqual(result.escalation_detected, false);
+});
+
+// -- describeSession tests --
+
+test('stripe-api-key describeSession: masks key values (shows prefix + last 4 chars)', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'rk_live_abcdefghijklmnop',
+        scope: 'payments',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'precreated',
+      account_mode: 'live',
+      scope: 'payments',
+    },
+  };
+  const described = stripeApiKeyProvider.describeSession(session, {});
+  assert.strictEqual(described.credentials.api_key.value, 'rk_live_...mnop');
+  assert.strictEqual(described.credentials.api_key.scope, 'payments');
+  assert.strictEqual(described.provider_assertions.account_mode, 'live');
+});
+
+test('stripe-api-key prepareHandoff: requires target_scope and parent_profile per provider contract', () => {
+  // Verify the provider rejects calls without target_scope/parent_profile
+  const parentSession = {
+    credentials: { api_key: { kind: 'bearer', value: 'sk_test_parent_full_key_123456', scope: 'full' } },
+    trust: { effective_level: 'supervised' },
+  };
+  const missingScope = stripeApiKeyProvider.prepareHandoff(parentSession, { parent_profile: {} }, {});
+  assert.strictEqual(missingScope.prepared, false);
+  assert.ok(missingScope.error.includes('target_scope'), 'error mentions target_scope');
+
+  const missingProfile = stripeApiKeyProvider.prepareHandoff(parentSession, { target_scope: 'readonly' }, {});
+  assert.strictEqual(missingProfile.prepared, false);
+  assert.ok(missingProfile.error.includes('parent_profile'), 'error mentions parent_profile');
+
+  // Verify a well-formed handoff with target_scope + parent_profile succeeds
+  const parentProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'STRIPE_FULL' },
+          readonly: { key_env: 'STRIPE_READONLY' },
+        },
+        scope_hierarchy: { full: ['readonly'], readonly: [] },
+      },
+    },
+  };
+  const ctx = { env: { STRIPE_FULL: 'sk_test_full_key_abcdef123456', STRIPE_READONLY: 'rk_test_readonly_key_xyz789ab' } };
+  const result = stripeApiKeyProvider.prepareHandoff(
+    parentSession,
+    { target_scope: 'readonly', parent_profile: parentProfile },
+    ctx,
+  );
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly_key_xyz789ab');
+});
+
+test('v0.2 exec stripe-api-key handoff with downscope produces prepared session', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'stripe-handoff',
+      provider: 'stripe-api-key',
+      subject: { kind: 'service', principal: 'stripe:test' },
+      scope: 'full',
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_HO_FULL' },
+            readonly: { key_env: 'STRIPE_HO_READONLY' },
+          },
+          scope_hierarchy: {
+            full: ['readonly'],
+            readonly: [],
+          },
+        },
+      },
+      presentation: { handoff: 'downscope' },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'stripe-ho-w',
+      name: 'Stripe Handoff Workflow',
+      tasks: [{
+        id: 'stripe-ho-task',
+        name: 'Stripe Handoff Task',
+        shell: {
+          program: process.execPath,
+          args: ['-e', 'process.stdout.write(process.env.STRIPE_API_KEY || "MISSING")'],
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'stripe-handoff', scope: 'readonly' },
+        contract: { audit: 'none' },
+      }],
+    }],
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 'stripe-ho-task',
+    dryRun: true,
+    presentationDebug: true,
+    env: {
+      ...process.env,
+      STRIPE_HO_FULL: 'sk_test_handoff_full_key_123456',
+      STRIPE_HO_READONLY: 'rk_test_handoff_readonly_654321',
+    },
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.handoff?.prepared, true);
+  assert.strictEqual(result.handoff?.mode, 'downscope');
 });

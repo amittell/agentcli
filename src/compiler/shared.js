@@ -99,7 +99,20 @@ export function resolveIdentity(workflow, task) {
   const taskIdentity = task.identity || {};
 
   // v0.2 path: identity has ref or subject
-  if (taskIdentity.ref || taskIdentity.subject || workflowIdentity.ref || workflowIdentity.subject) {
+  if (
+    taskIdentity.ref ||
+    taskIdentity.scope ||
+    taskIdentity.subject ||
+    taskIdentity.auth ||
+    taskIdentity.trust ||
+    taskIdentity.presentation ||
+    workflowIdentity.ref ||
+    workflowIdentity.scope ||
+    workflowIdentity.subject ||
+    workflowIdentity.auth ||
+    workflowIdentity.trust ||
+    workflowIdentity.presentation
+  ) {
     return resolveIdentityV2(workflowIdentity, taskIdentity);
   }
 
@@ -114,6 +127,7 @@ export function resolveIdentity(workflow, task) {
 export function resolveIdentityV2(workflowIdentity, taskIdentity) {
   // ref: task replaces workflow
   const ref = taskIdentity.ref ?? workflowIdentity.ref ?? null;
+  const scope = taskIdentity.scope ?? workflowIdentity.scope ?? null;
 
   // subject: merge key by key
   const workflowSubject = workflowIdentity.subject || {};
@@ -183,7 +197,7 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
     default_redaction: taskPres.default_redaction ?? workflowPres.default_redaction ?? null,
   };
 
-  return { ref, subject, auth, trust, presentation };
+  return { ref, scope, subject, auth, trust, presentation };
 }
 
 export function resolveContract(workflow, task) {
@@ -332,6 +346,7 @@ export function mergeIdentityProfile(profile, identity) {
 
   return {
     ref: declaration.ref ?? base.id ?? null,
+    scope: declaration.scope ?? base.scope ?? null,
     provider: base.provider ?? null,
     subject: {
       kind: declarationSubject.kind ?? baseSubject.kind ?? null,
@@ -451,6 +466,19 @@ export function mergeEvidenceProfile(profile, declaration) {
   };
 }
 
+const VALID_CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'];
+
+export function resolveChildCredentialPolicy(workflow, task) {
+  const value = task.child_credential_policy ?? workflow.child_credential_policy ?? null;
+  if (value === null) return null;
+  if (!VALID_CHILD_CREDENTIAL_POLICIES.includes(value)) {
+    throw new Error(
+      `Invalid child_credential_policy "${value}"; must be one of: ${VALID_CHILD_CREDENTIAL_POLICIES.join(', ')}`,
+    );
+  }
+  return value;
+}
+
 function resolveIntent(task) {
   if (!task.intent) {
     return { mode: 'execute', read_only: null };
@@ -483,6 +511,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
   const modelPolicy = resolveModelPolicy(workflow, task);
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
+  const childCredentialPolicy = resolveChildCredentialPolicy(workflow, task);
   const intent = resolveIntent(task);
   const output = resolveOutput(task);
   const budgets = resolveBudgets(task);
@@ -532,6 +561,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
     authorization_proof: resolveAuthorizationProof(workflow, task),
     authorization: resolveAuthorization(workflow, task),
     evidence: resolveEvidence(workflow, task),
+    child_credential_policy: childCredentialPolicy,
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

@@ -21,6 +21,7 @@ import { generateExecutionId, writeAuditRecord } from './audit.js';
 import { getAgentcliPaths } from './home.js';
 import { buildAttestationPayload, commandHash } from './attestation.js';
 import { resolveProvider } from './signing/index.js';
+import { resolveRuntimeAdapter } from './runtime/index.js';
 
 // Ensure the ssh signing provider is registered on import
 import './signing/ssh.js';
@@ -123,13 +124,54 @@ function summarizeMaterialization(materialization) {
   };
 }
 
+function normalizeIdentitySessionResult(result, providerName) {
+  if (
+    result &&
+    typeof result === 'object' &&
+    Object.prototype.hasOwnProperty.call(result, 'ok')
+  ) {
+    if (!result.ok) {
+      throw Object.assign(
+        new Error(
+          result.error || `Identity provider "${providerName}" failed to resolve credentials`
+        ),
+        {
+          code: result.code || 'resolution_failed',
+          retryable: Boolean(result.transient),
+        }
+      );
+    }
+
+    if (!result.session || typeof result.session !== 'object') {
+      throw Object.assign(
+        new Error(
+          `Identity provider "${providerName}" returned ok=true without a session payload`
+        ),
+        {
+          code: 'resolution_failed',
+          retryable: false,
+        }
+      );
+    }
+
+    return result.session;
+  }
+
+  return result;
+}
+
+function handoffPrepared(handoffResult) {
+  return Boolean(handoffResult?.prepared ?? handoffResult?.session?.handoff?.prepared);
+}
+
 function summarizeHandoff(handoffResult, mode) {
   if (!handoffResult && !mode) return null;
+  const credentialSet = handoffResult?.credentials ?? handoffResult?.session?.credentials ?? {};
   return {
-    mode: mode ?? handoffResult?.mode ?? null,
-    prepared: Boolean(handoffResult?.prepared),
-    credential_types: handoffResult?.credentials ? Object.keys(handoffResult.credentials) : [],
-    reason: handoffResult?.reason ?? null,
+    mode: mode ?? handoffResult?.mode ?? handoffResult?.session?.handoff?.mode ?? null,
+    prepared: handoffPrepared(handoffResult),
+    credential_types: Object.keys(credentialSet),
+    reason: handoffResult?.reason ?? handoffResult?.error ?? null,
   };
 }
 
@@ -194,13 +236,7 @@ function resolveCommonState(manifest, {
   }
 
   if (task.target?.session_target !== 'shell') {
-    throw Object.assign(
-      new Error(
-        `exec only supports shell-target tasks. Task "${taskId}" has session_target "${task.target?.session_target}". ` +
-        'Prompt-based tasks require an agent runtime.'
-      ),
-      { code: 'invalid_argument' }
-    );
+    return { requiresDelegation: true, manifest: expanded, workflow, task };
   }
 
   if (!task.shell) {
@@ -260,6 +296,9 @@ export function executeTask(manifest, {
   requireAuthorization = false,
   identityDebug = false,
   presentationDebug = false,
+  schedulerPrefix = '',
+  schedulerBin = '',
+  dbPath = '',
   cwd = process.cwd(),
   env = process.env,
 } = {}) {
@@ -269,6 +308,13 @@ export function executeTask(manifest, {
     workflowId, taskId, signer, signingKey: explicitSigningKey,
     cwd, env, timeoutMs,
   });
+
+  // Non-shell tasks are delegated to a runtime adapter (e.g. the scheduler)
+  if (common.requiresDelegation) {
+    return executeDelegated(common, {
+      schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env,
+    });
+  }
 
   // v0.1 path: fully synchronous, preserves exact existing behavior
   if (!common.isV2) {
@@ -280,6 +326,50 @@ export function executeTask(manifest, {
     dryRun, evidenceProviderOverride, instanceId,
     requireEvidence, requireAuthorization,
     identityDebug, presentationDebug, env,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Delegation path -- non-shell tasks forwarded to a runtime adapter
+// ---------------------------------------------------------------------------
+
+function executeDelegated(common, options) {
+  const { manifest, task, workflow } = common;
+  const {
+    schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env,
+  } = options;
+
+  const effectivePrefix = schedulerPrefix || env.AGENTCLI_SCHEDULER_PREFIX || '';
+  const effectiveBin = schedulerBin || env.AGENTCLI_SCHEDULER_BIN || '';
+
+  if (!effectivePrefix && !effectiveBin && !dryRun) {
+    throw Object.assign(
+      new Error(
+        `Task "${task.id || task.name}" requires runtime delegation ` +
+        `(session_target: "${task.target?.session_target}") ` +
+        'but no scheduler is configured. Set --scheduler-prefix, --scheduler-bin, AGENTCLI_SCHEDULER_PREFIX, or AGENTCLI_SCHEDULER_BIN.'
+      ),
+      { code: 'no_runtime' }
+    );
+  }
+
+  const adapter = resolveRuntimeAdapter(task.target?.session_target);
+  if (!adapter) {
+    throw Object.assign(
+      new Error(
+        `No runtime adapter registered for session_target "${task.target?.session_target}"`
+      ),
+      { code: 'no_runtime' }
+    );
+  }
+
+  return adapter.dispatch(manifest, task, workflow, {
+    schedulerPrefix: effectivePrefix,
+    schedulerBin: effectiveBin,
+    dbPath,
+    dryRun,
+    cwd,
+    env,
   });
 }
 
@@ -655,7 +745,17 @@ async function executeV2(common, {
       identityProviderInstance = idProvider;
 
       try {
-        identitySession = await idProvider.resolveSession({ profile: identityDeclaration, instanceId }, { env, cwd });
+        identitySession = normalizeIdentitySessionResult(
+          await idProvider.resolveSession(
+            {
+              profile: identityDeclaration,
+              instanceId,
+              scope: identityDeclaration.scope ?? null,
+            },
+            { env, cwd }
+          ),
+          providerName
+        );
         resolvedIdentity = idProvider.describeSession(identitySession, { env });
       } catch (resolveError) {
         // Write resolution failure audit record
@@ -904,7 +1004,15 @@ async function executeV2(common, {
   if (declaredHandoff !== 'none' && identitySession && identityProviderInstance) {
     if (identityProviderInstance.prepareHandoff && identityProviderInstance.capabilities?.handoff_modes?.includes(declaredHandoff)) {
       try {
-        handoffResult = identityProviderInstance.prepareHandoff(identitySession, { mode: declaredHandoff }, { env });
+        handoffResult = await identityProviderInstance.prepareHandoff(
+          identitySession,
+          {
+            mode: declaredHandoff,
+            target_scope: identityDeclaration.scope ?? identityDeclaration.auth?.scopes?.[0] ?? null,
+            parent_profile: identityDeclaration,
+          },
+          { env, cwd }
+        );
       } catch (err) {
         warnings.push(`Credential handoff (${declaredHandoff}) failed: ${err.message}`);
       }
@@ -942,7 +1050,7 @@ async function executeV2(common, {
       command_hash: cmdHash,
       trust: trustInfo,
       hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       signer: provider.name,
       attestation,
       attestation_note,
@@ -981,7 +1089,7 @@ async function executeV2(common, {
       authorization: authorizationDecision,
       trust: trustInfo,
       hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       signer: provider.name,
       attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
       attestation_note,
@@ -1159,7 +1267,7 @@ async function executeV2(common, {
       contract,
       command: commandMeta,
       hashes: { command: cmdHash, result: `sha256:${outputHash}` },
-      handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       evidence: evidenceMetadata,
       identity: identityDeclaration,
       command_hash: cmdHash,
@@ -1205,7 +1313,7 @@ async function executeV2(common, {
     trust: trustInfo,
     evidence: evidenceMetadata,
     hashes: { command: cmdHash, result: `sha256:${outputHash}` },
-    handoff: { mode: declaredHandoff, prepared: Boolean(handoffResult) },
+    handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
     signer: provider.name,
     attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
     attestation_note,

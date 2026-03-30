@@ -16,6 +16,8 @@
  *   validateDelegation   - (chain, policy, ctx) => validation result (when capabilities.delegation is true)
  */
 
+import { stripeApiKeyProvider } from './stripe-api-key.js';
+
 const providers = new Map();
 
 const REQUIRED_METHODS = [
@@ -123,3 +125,5 @@ export function listProviderCapabilities() {
   }
   return result;
 }
+
+registerProvider(stripeApiKeyProvider);

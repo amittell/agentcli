@@ -124,8 +124,10 @@ Params:
 
 Result:
 
-- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
+- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "capabilities": { "source": "static|runtime", "negotiated": <boolean>, "handoff_version": "..." }, "handoff": { "field_version": "1|2", "projected_fields": <int>, "v02_fields_included": <boolean> }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
 - `adopted_from_job_id` is present only when `action` is `"adopted"`
+- `capabilities` summarizes runtime capability negotiation for the selected scheduler
+- `handoff` summarizes which scheduler field version was projected during apply
 - `authorization_proof_verification` is present on an action when local proof verification was performed for that compiled execution unit
 - `authorization_proof_verifications` is present only when `apply` performed local proof verification because the target backend does not advertise `authorization_proof_verification`
 - `explain` is present only when the `explain` param is `true`
