@@ -9571,3 +9571,42 @@ test('stripe-api-key describeSession: masks key values (shows prefix + last 4 ch
   assert.strictEqual(described.credentials.api_key.scope, 'payments');
   assert.strictEqual(described.provider_assertions.account_mode, 'live');
 });
+
+test('stripe-api-key prepareHandoff: requires target_scope and parent_profile per provider contract', () => {
+  // Verify the provider rejects calls without target_scope/parent_profile
+  const parentSession = {
+    credentials: { api_key: { kind: 'bearer', value: 'sk_test_parent_full_key_123456', scope: 'full' } },
+    trust: { effective_level: 'supervised' },
+  };
+  const missingScope = stripeApiKeyProvider.prepareHandoff(parentSession, { parent_profile: {} }, {});
+  assert.strictEqual(missingScope.prepared, false);
+  assert.ok(missingScope.error.includes('target_scope'), 'error mentions target_scope');
+
+  const missingProfile = stripeApiKeyProvider.prepareHandoff(parentSession, { target_scope: 'readonly' }, {});
+  assert.strictEqual(missingProfile.prepared, false);
+  assert.ok(missingProfile.error.includes('parent_profile'), 'error mentions parent_profile');
+
+  // Verify a well-formed handoff with target_scope + parent_profile succeeds
+  const parentProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'precreated',
+        account_mode: 'test',
+        permission_sets: {
+          full: { key_env: 'STRIPE_FULL' },
+          readonly: { key_env: 'STRIPE_READONLY' },
+        },
+        scope_hierarchy: { full: ['readonly'], readonly: [] },
+      },
+    },
+  };
+  const ctx = { env: { STRIPE_FULL: 'sk_test_full_key_abcdef123456', STRIPE_READONLY: 'rk_test_readonly_key_xyz789ab' } };
+  const result = stripeApiKeyProvider.prepareHandoff(
+    parentSession,
+    { target_scope: 'readonly', parent_profile: parentProfile },
+    ctx,
+  );
+  assert.strictEqual(result.prepared, true);
+  assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+  assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly_key_xyz789ab');
+});

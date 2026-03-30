@@ -1006,7 +1006,11 @@ async function executeV2(common, {
       try {
         handoffResult = await identityProviderInstance.prepareHandoff(
           identitySession,
-          { mode: declaredHandoff },
+          {
+            mode: declaredHandoff,
+            target_scope: identityDeclaration.scope ?? identityDeclaration.auth?.scopes?.[0] ?? null,
+            parent_profile: identityDeclaration,
+          },
           { env, cwd }
         );
       } catch (err) {

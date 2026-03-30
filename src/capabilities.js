@@ -77,9 +77,11 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
 
   // Apply-time gating is intentionally limited to features that must exist to
   // persist or hand off the compiled durable job spec. Runtime identity
-  // resolution and delegation validation remain execution-time concerns:
-  // persisted identity declarations may already be sufficient for dispatch,
-  // and delegation chains are only known after a concrete session is resolved.
+  // resolution, delegation validation, and child_credential_policy remain
+  // execution-time concerns: persisted identity declarations may already be
+  // sufficient for dispatch, delegation chains are only known after a concrete
+  // session is resolved, and child_credential_policy is a runtime column that
+  // all v23+ schedulers accept regardless of whether providers are loaded.
   for (const job of compiledOutput.jobs) {
     // Check authorization hook requirement
     if (job.authorization || job.authorization_ref) {
