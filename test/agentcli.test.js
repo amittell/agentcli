@@ -1927,10 +1927,21 @@ test('barrel export includes new public APIs', () => {
   assert.equal(typeof expandManifestShorthands, 'function');
 });
 
-test('cli describe commands includes version command', async () => {
+test('cli describe commands lists the full top-level command surface', async () => {
   const output = JSON.parse(await runCli(['describe', 'commands']));
   assert.equal(output.ok, true);
-  assert.ok(output.description.items.some(item => item.command === 'version'));
+  const commands = new Set(output.description.items.map(item => item.command));
+  for (const command of [
+    'version',
+    'convert',
+    'identity',
+    'authorization-proof',
+    'authorization',
+    'evidence',
+    'whoami',
+  ]) {
+    assert.ok(commands.has(command), `describe commands should include ${command}`);
+  }
 });
 
 test('cli describe rpc includes version method', async () => {
@@ -4303,6 +4314,26 @@ test('cli exec --dry-run does not execute', async () => {
   assert.equal(output.ok, true);
   assert.equal(output.dry_run, true);
   assert.ok(!output.result);
+});
+
+test('cli exec --dry-run previews delegated non-shell tasks without scheduler config', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 'prompt-task', name: 'Prompt Task',
+        prompt: 'Run a prompt',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const output = JSON.parse(await runCli(['exec', JSON.stringify(manifest), 'prompt-task', '--dry-run']));
+  assert.equal(output.ok, true);
+  assert.equal(output.dry_run, true);
+  assert.equal(output.delegated, true);
+  assert.equal(output.runtime, 'openclaw-scheduler');
 });
 
 test('cli exec without task-id throws usage error', async () => {
@@ -8506,12 +8537,11 @@ test('exec delegates non-shell task with dry-run and returns delegation receipt'
       }]
     }]
   };
-  // Dry-run delegation: no scheduler binary needed because the adapter
-  // short-circuits before calling the CLI.
+  // Dry-run delegation short-circuits before calling the scheduler CLI, so
+  // the preview should work without any runtime configuration.
   const result = executeTask(manifest, {
     taskId: 'prompt-task',
     dryRun: true,
-    schedulerPrefix: '/fake/prefix',
     signer: 'none',
   });
   assert.strictEqual(result.ok, true);

@@ -342,7 +342,7 @@ function executeDelegated(common, options) {
   const effectivePrefix = schedulerPrefix || env.AGENTCLI_SCHEDULER_PREFIX || '';
   const effectiveBin = schedulerBin || env.AGENTCLI_SCHEDULER_BIN || '';
 
-  if (!effectivePrefix && !effectiveBin) {
+  if (!effectivePrefix && !effectiveBin && !dryRun) {
     throw Object.assign(
       new Error(
         `Task "${task.id || task.name}" requires runtime delegation ` +
