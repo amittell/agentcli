@@ -135,6 +135,54 @@ Single-workflow manifests compile task names without a workflow prefix (e.g., `"
 
 Multi-workflow manifests include the prefix to avoid name collisions between workflows.
 
+### Choosing session targets
+
+Each task declares a `session_target` that controls how it executes:
+
+| Target | Behavior | Best for |
+|--------|----------|----------|
+| `shell` | Runs a shell command directly. Fastest, most predictable. | Scripts, pipelines, CLI tools, data syncs |
+| `isolated` | Creates a fresh agent session per run. Waits for response. | Agent tasks that need response capture and delivery |
+| `main` | Runs in the persistent main agent session (conversation context preserved). | Tasks that benefit from ongoing context (email checks, pending reviews) |
+
+**Main session dispatch modes:**
+
+Main session tasks default to sync (wait for response). For long-running tasks that would block interactive chat, set `execution_intent: "fire-and-forget"`:
+
+```json
+{
+  "tasks": [
+    {
+      "id": "quick-acks-check",
+      "name": "Pending Acks Check",
+      "prompt": "Check for any pending acknowledgment requests.",
+      "target": { "session_target": "main" },
+      "schedule": { "cron": "*/30 * * * *" }
+    },
+    {
+      "id": "deep-email-scan",
+      "name": "Deep Email Analysis",
+      "prompt": "Scan inbox for important messages and summarize.",
+      "target": { "session_target": "main" },
+      "execution": { "intent": "fire-and-forget" },
+      "delivery": { "mode": "announce-always", "channel": "telegram", "to": "484946046" },
+      "schedule": { "cron": "0 9 * * *" }
+    }
+  ]
+}
+```
+
+- **Sync (default):** The scheduler waits for the agent's response, captures it in the run summary, and delivers it through the scheduler's delivery pipeline. Your DMs queue behind the task -- fine for quick tasks (< 10s).
+- **Fire-and-forget:** The scheduler injects a system event and returns immediately. The prompt includes a reply-to instruction so the agent sends results to the delivery channel via the message tool when done. Your DMs are never blocked.
+
+### Delivery modes
+
+| Mode | Delivers on | Use when |
+|------|------------|----------|
+| `announce` | Error only | You only want to know when things break |
+| `announce-always` | Success and error | You want results from every run (betting card, fitness summary) |
+| `none` | Never | Silent background tasks (backups, health checks) |
+
 ## Adoption Risks
 
 The main current risks are:
