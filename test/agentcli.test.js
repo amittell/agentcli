@@ -7577,6 +7577,78 @@ test('applyManifestToScheduler includes capabilities metadata in result', async 
   assert.strictEqual(result.capabilities.handoff_version, '2');
 });
 
+test('applyManifestToScheduler preserves capability warnings in structured result', async () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'warning-wf',
+      name: 'Warning Workflow',
+      tasks: [{
+        id: 'child-task',
+        name: 'Downscope Child',
+        prompt: 'exercise capability warning path',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' },
+        child_credential_policy: 'downscope',
+      }]
+    }]
+  };
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: false,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const stderrWrites = [];
+  const originalStderrWrite = process.stderr.write;
+  process.stderr.write = (chunk, ...args) => {
+    stderrWrites.push(String(chunk));
+    const cb = args.find(arg => typeof arg === 'function');
+    if (cb) cb();
+    return true;
+  };
+
+  try {
+    const result = await applyManifestToScheduler(manifest, { runner });
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.capabilities?.warnings));
+    assert.strictEqual(result.capabilities.warnings.length, 1);
+    assert.strictEqual(result.capabilities.warnings[0].feature, 'credential_handoff');
+    assert.ok(result.capabilities.warnings[0].message.includes('child_credential_policy="downscope"'));
+    assert.ok(stderrWrites.some(line => line.includes('child_credential_policy="downscope"')));
+  } finally {
+    process.stderr.write = originalStderrWrite;
+  }
+});
+
 test('applyManifestToScheduler skips runtime capability queries for pure v0.1 manifests', async () => {
   let capabilityCalls = 0;
   const runner = {

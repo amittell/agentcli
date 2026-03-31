@@ -274,11 +274,15 @@ When `ref` is present, the referenced profile is loaded first, then inline field
 |-------|------|----------|--------|-------------|
 | `child_credential_policy` | string | No | `none`, `inherit`, `downscope`, `independent` | Controls how a child task receives or derives credentials relative to its parent. Workflow-level values act as defaults for tasks. |
 
+`child_credential_policy: "downscope"` is validated as a capability warning when a backend lacks `credential_handoff`: the scheduler can still persist the job, but child narrowing will not be enforceable at dispatch. This is intentionally softer than `identity.presentation.handoff != "none"`, which is a hard compatibility requirement because the active runtime/backend must advertise explicit handoff semantics up front.
+
 ---
 
 ## Task Verify Fields
 
 Runs a shell command after the main task succeeds. Workflow-level `verify` acts as the default for tasks; a task-level `verify` replaces the workflow block and omitted optional fields fall back to built-in defaults.
+
+In the v0.2 execution pipeline, `verify` runs after evidence generation. Evidence and attestation therefore describe the main command result; the `verify` outcome is recorded separately and can still flip the final task status according to `on_failure`. If operators need end-to-end proof that includes the verification step, model that requirement in the evidence payload rather than assuming `verify` is part of the attested result.
 
 | Field | Type | Required | Values | Description |
 |-------|------|----------|--------|-------------|
@@ -345,6 +349,8 @@ Runs a shell command after the main task succeeds. Workflow-level `verify` acts 
 | `handoff` | string | No | `none`, `downscope`, `transaction-token` | Credential handoff mode at task boundaries. |
 | `cleanup` | string | No | `always`, `on-success`, `on-failure`, `never` | When credential cleanup runs. |
 | `default_redaction` | boolean | No | -- | Whether credential values are redacted by default in audit output. |
+
+`identity.presentation.handoff` is stricter than `child_credential_policy`: any non-`none` handoff mode requires explicit `credential_handoff` support from the active runtime/backend during capability negotiation, because the handoff boundary itself must be modeled first-class.
 
 ### Identity Presentation Bindings
 

@@ -1722,6 +1722,14 @@ Evidence verification occurs after execution (Phase 5) has already completed. A 
 - when `verify.required` is `false`, a verification failure is recorded as a warning but does not affect the exit code
 - the evidence envelope (including the failed verification status) is always written to the audit record so that operators can investigate
 
+### Phase 6.5: Post-execution Verify
+
+- only enter this phase when the main command exited successfully and a workflow/task `verify` block resolves
+- run the declared verify shell in the task's effective execution context
+- treat `verify` as an operator-local postcondition separate from evidence attestation; the attested evidence payload reflects the main command result, not the later verify shell outcome
+- when `verify.on_failure` is `error`, return a non-zero status after cleanup and audit
+- when `verify.on_failure` is `warn`, record the verify failure as a warning without changing the exit code
+
 ### Phase 7: Audit
 
 - write append-only audit record

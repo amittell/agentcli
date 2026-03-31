@@ -68,6 +68,7 @@ Each provider file auto-registers with its registry on import (side-effect regis
 - **Phase 4.5: Authorization** (optional) -- invoke external policy engine (OPA, Cedar, Topaz) when an authorization block is configured. Decisions: `permit`, `deny`, `require-escalation`. Skipped entirely when no authorization block resolves for the task.
 - **Phase 5: Execution** -- run the tool, capture stdout/stderr/exit code/duration, compute hashes.
 - **Phase 6: Evidence Generation** -- build canonical evidence payload, attest execution, verify evidence if required.
+- **Phase 6.5: Post-exec Verify** (optional) -- run `workflow.verify` / `task.verify` after a successful command. This is an operator-local postcondition check recorded separately from evidence; verify failures can still fail the task or downgrade to warnings according to `verify.on_failure`.
 - **Phase 7: Audit** -- write structured append-only audit record with declared/resolved identity, authorization proof summary, delegation chain, trust level, authorization decision, and runtime instance attribution.
 - **Phase 8: Cleanup** -- delete temporary files, destroy ephemeral materialization and derived handoff credentials.
 
