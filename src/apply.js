@@ -240,17 +240,24 @@ export async function applyManifestToScheduler(
 
   let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
   let handoffVersion = '1';
+  let capabilityWarnings = [];
   if (hasV02Features) {
     const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     handoffVersion = effectiveResult.handoff_version || '1';
 
-    const capabilityErrors = validateManifestCapabilities(compiled, effectiveResult);
+    const { errors: capabilityErrors, warnings } = validateManifestCapabilities(compiled, effectiveResult);
+    capabilityWarnings = warnings;
     if (capabilityErrors.length > 0) {
       throw Object.assign(
         new Error(capabilityErrors.map(error => error.message).join('; ')),
         { code: 'unsupported_capability', capability_errors: capabilityErrors }
       );
+    }
+    if (capabilityWarnings.length > 0) {
+      for (const warning of capabilityWarnings) {
+        process.stderr.write(`warning: ${warning.message}\n`);
+      }
     }
   }
   const effectiveFeatures = effectiveResult.features;
@@ -455,6 +462,7 @@ export async function applyManifestToScheduler(
       source: effectiveResult.source,
       negotiated: effectiveResult.negotiated,
       handoff_version: effectiveResult.handoff_version || null,
+      ...(capabilityWarnings?.length > 0 ? { warnings: capabilityWarnings } : {}),
     },
     handoff: {
       field_version: handoffVersion,

@@ -34,6 +34,9 @@ export const SCHEDULER_FIELDS_V02 = [
   'contract_sandbox', 'contract_allowed_paths', 'contract_network',
   'contract_max_cost_usd', 'contract_audit',
   'child_credential_policy',
+  'verify_shell',
+  'verify_timeout_s',
+  'verify_on_failure',
 ];
 
 export const SCHEDULER_FIELD_VERSIONS = {

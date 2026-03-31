@@ -15,7 +15,8 @@ import {
   resolveAuthorizationProof,
   resolveContract,
   resolveEvidence,
-  resolveIdentity
+  resolveIdentity,
+  resolveVerify
 } from './compiler/shared.js';
 import { generateExecutionId, writeAuditRecord } from './audit.js';
 import { getAgentcliPaths } from './home.js';
@@ -82,6 +83,54 @@ function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) 
   }
 
   return { violations, warnings };
+}
+
+/**
+ * Run the verify command after a task completes successfully.
+ *
+ * @param {object} verify  - Resolved verify block (shell, timeout_seconds, on_failure).
+ * @param {object} options - { cwd, env, sandboxCommand } for spawn context.
+ * @returns {object} { passed, exit_code, stdout, stderr, timed_out, duration_ms }
+ */
+function runVerify(verify, {
+  cwd = process.cwd(),
+  env = process.env,
+  sandboxCommand = null,
+} = {}) {
+  const timeoutMs = (verify.timeout_seconds ?? 30) * 1000;
+  const startMs = Date.now();
+  const verifyProgram = 'sh';
+  const verifyArgs = ['-c', verify.shell];
+  const usesSandbox =
+    sandboxCommand?.sandboxed === true &&
+    sandboxCommand?.support?.kind === 'sandbox-exec' &&
+    typeof sandboxCommand?.profile === 'string';
+
+  const proc = spawnSync(
+    usesSandbox ? sandboxCommand.support.command : verifyProgram,
+    usesSandbox ? ['-p', sandboxCommand.profile, verifyProgram, ...verifyArgs] : verifyArgs,
+    {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 1 * 1024 * 1024,
+    }
+  );
+  const durationMs = Date.now() - startMs;
+  const stdout = proc.stdout || '';
+  const stderr = proc.stderr || '';
+  const exitCode = proc.status;
+  const timedOut = Boolean(proc.error && proc.error.code === 'ETIMEDOUT') || proc.signal === 'SIGTERM';
+
+  return {
+    passed: exitCode === 0 && !timedOut,
+    exit_code: exitCode,
+    stdout,
+    stderr,
+    timed_out: timedOut,
+    duration_ms: durationMs,
+  };
 }
 
 function resolvePrincipal(identity) {
@@ -175,6 +224,45 @@ function summarizeHandoff(handoffResult, mode) {
   };
 }
 
+async function cleanupProviderArtifacts(identityProviderInstance, {
+  materialization = null,
+  session = null,
+  providerConfig = {},
+  env = process.env,
+  cwd = process.cwd(),
+  warningPrefix = 'Credential cleanup',
+} = {}, warnings = []) {
+  if (!identityProviderInstance?.cleanup) return;
+
+  const effectiveSession = session || materialization?.session || null;
+  const cleanupRequired =
+    Boolean(materialization?.cleanup_required) ||
+    Boolean(effectiveSession?.provider_assertions?.key_strategy === 'dynamic');
+
+  if (!cleanupRequired) return;
+
+  const cleanupMaterialization = materialization || {
+    materialized: false,
+    env_vars: {},
+    cleanup_required: true,
+    ...(effectiveSession ? { session: effectiveSession } : {}),
+  };
+
+  try {
+    const cleanupResult = await identityProviderInstance.cleanup(cleanupMaterialization, {
+      session: effectiveSession,
+      env,
+      cwd,
+      provider_config: providerConfig,
+    });
+    for (const warning of cleanupResult?.warnings || []) {
+      warnings.push(`${warningPrefix} warning: ${warning}`);
+    }
+  } catch (cleanupErr) {
+    warnings.push(`${warningPrefix} warning: ${cleanupErr.message}`);
+  }
+}
+
 /**
  * Validate and resolve common execution state shared by both v0.1 and v0.2 paths.
  *
@@ -250,6 +338,7 @@ function resolveCommonState(manifest, {
 
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
+  const verify = resolveVerify(workflow, task);
   const auditPolicy = contract.audit ?? 'always';
   const shell = normalizeShellExecution(task.shell);
   const effectiveTimeout = timeoutMs ?? task.runtime?.timeout_ms ?? null;
@@ -268,7 +357,7 @@ function resolveCommonState(manifest, {
   const providerConfig = provider.resolve({ env, signingKey: explicitSigningKey });
 
   return {
-    expanded, workflow, task, isV2, identity, contract,
+    expanded, workflow, task, isV2, identity, contract, verify,
     auditPolicy, shell, sandboxCommand, effectiveTimeout, violations, warnings,
     provider, providerConfig, cwd, env,
   };
@@ -379,7 +468,7 @@ function executeDelegated(common, options) {
 
 function executeV1(common, { dryRun }) {
   const {
-    workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
+    workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd, env,
   } = common;
 
@@ -563,9 +652,32 @@ function executeV1(common, { dryRun }) {
     structured_present: structured != null,
   };
 
+  // ------------------------------------------------------------------
+  // Post-execution verify phase
+  // ------------------------------------------------------------------
+
+  let verifyResult = null;
+  let verifyFailed = false;
+  if (verify && exitCode === 0 && !dryRun) {
+    verifyResult = runVerify(verify, {
+      cwd: shell.cwd || cwd,
+      env: spawnEnv,
+      sandboxCommand,
+    });
+    if (!verifyResult.passed) {
+      if (verify.on_failure === 'warn') {
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+      } else {
+        verifyFailed = true;
+      }
+    }
+  }
+
+  const effectiveOk = exitCode === 0 && !verifyFailed;
+
   const shouldAudit =
     auditPolicy === 'always' ||
-    (auditPolicy === 'on-failure' && exitCode !== 0);
+    (auditPolicy === 'on-failure' && !effectiveOk);
 
   if (shouldAudit) {
     const record = {
@@ -587,6 +699,7 @@ function executeV1(common, { dryRun }) {
       signer: provider.name,
       attestation,
       attestation_note,
+      verify: verifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -595,8 +708,18 @@ function executeV1(common, { dryRun }) {
     writeAuditRecord(record, { auditPath: paths.audit });
   }
 
+  if (verifyFailed) {
+    const verifyStdout = verifyResult.stdout || '';
+    const verifyStderr = verifyResult.stderr || '';
+    const detail = verifyStderr || verifyStdout || '(no output)';
+    throw Object.assign(
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      { code: 'verify_failed', verify: verifyResult }
+    );
+  }
+
   return {
-    ok: exitCode === 0,
+    ok: effectiveOk,
     execution_id: executionId,
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
@@ -605,6 +728,7 @@ function executeV1(common, { dryRun }) {
     principal_used: principal,
     contract,
     result,
+    verify: verifyResult,
     trust: trustInfo,
     signer: provider.name,
     attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
@@ -629,7 +753,7 @@ async function executeV2(common, {
   env,
 }) {
   const {
-    expanded, workflow, task, identity, contract, auditPolicy, shell, sandboxCommand,
+    expanded, workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd,
   } = common;
 
@@ -751,6 +875,7 @@ async function executeV2(common, {
               profile: identityDeclaration,
               instanceId,
               scope: identityDeclaration.scope ?? null,
+              task_timeout_s: effectiveTimeout != null ? Math.max(1, Math.ceil(effectiveTimeout / 1000)) : null,
             },
             { env, cwd }
           ),
@@ -1033,6 +1158,22 @@ async function executeV2(common, {
   // ------------------------------------------------------------------
 
   if (dryRun) {
+    const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
+    await cleanupProviderArtifacts(identityProviderInstance, {
+      materialization,
+      session: identitySession,
+      providerConfig: identityProviderConfig,
+      env,
+      cwd,
+    }, warnings);
+    await cleanupProviderArtifacts(identityProviderInstance, {
+      session: handoffResult?.session ?? null,
+      providerConfig: identityProviderConfig,
+      env,
+      cwd,
+      warningPrefix: 'Credential handoff cleanup',
+    }, warnings);
+
     const { attestation, attestation_note } = buildAndSign();
 
     const record = {
@@ -1062,15 +1203,6 @@ async function executeV2(common, {
     if (auditPolicy === 'always') {
       const paths = getAgentcliPaths({ env });
       writeAuditRecord(record, { auditPath: paths.audit });
-    }
-
-    // Phase 8: Cleanup (even on dry-run if materialization occurred)
-    if (materialization && materialization.cleanup_required && identityProviderInstance) {
-      try {
-        identityProviderInstance.cleanup(materialization, { env });
-      } catch (cleanupErr) {
-        warnings.push(`Credential cleanup warning: ${cleanupErr.message}`);
-      }
     }
 
     return {
@@ -1235,6 +1367,51 @@ async function executeV2(common, {
   }
 
   // ------------------------------------------------------------------
+  // Post-execution verify phase
+  //
+  // Runs AFTER evidence attestation. Evidence proves what the command did
+  // (exit status, output hashes); verify is an operator-local check that
+  // the expected deliverable exists. These are complementary, not sequential
+  // dependencies. If end-to-end proof including verify is needed, extend the
+  // evidence payload rather than reordering phases.
+  // ------------------------------------------------------------------
+
+  let verifyResult = null;
+  let verifyFailed = false;
+  if (verify && exitCode === 0) {
+    verifyResult = runVerify(verify, {
+      cwd: shell.cwd || cwd,
+      env: spawnEnv,
+      sandboxCommand,
+    });
+    if (!verifyResult.passed) {
+      if (verify.on_failure === 'warn') {
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+      } else {
+        verifyFailed = true;
+      }
+    }
+  }
+
+  const effectiveOk = exitCode === 0 && !verifyFailed;
+
+  const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
+  await cleanupProviderArtifacts(identityProviderInstance, {
+    materialization,
+    session: identitySession,
+    providerConfig: identityProviderConfig,
+    env,
+    cwd,
+  }, warnings);
+  await cleanupProviderArtifacts(identityProviderInstance, {
+    session: handoffResult?.session ?? null,
+    providerConfig: identityProviderConfig,
+    env,
+    cwd,
+    warningPrefix: 'Credential handoff cleanup',
+  }, warnings);
+
+  // ------------------------------------------------------------------
   // Phase 7: Enhanced Audit Record
   // ------------------------------------------------------------------
 
@@ -1251,7 +1428,7 @@ async function executeV2(common, {
 
   const shouldAudit =
     auditPolicy === 'always' ||
-    (auditPolicy === 'on-failure' && exitCode !== 0);
+    (auditPolicy === 'on-failure' && !effectiveOk);
 
   if (shouldAudit) {
     const record = {
@@ -1274,6 +1451,7 @@ async function executeV2(common, {
       signer: provider.name,
       attestation,
       attestation_note,
+      verify: verifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -1282,16 +1460,14 @@ async function executeV2(common, {
     writeAuditRecord(record, { auditPath: paths.audit });
   }
 
-  // ------------------------------------------------------------------
-  // Phase 8: Cleanup
-  // ------------------------------------------------------------------
-
-  if (materialization && materialization.cleanup_required && identityProviderInstance) {
-    try {
-      identityProviderInstance.cleanup(materialization, { env });
-    } catch (cleanupErr) {
-      warnings.push(`Credential cleanup warning: ${cleanupErr.message}`);
-    }
+  if (verifyFailed) {
+    const verifyStdout = verifyResult.stdout || '';
+    const verifyStderr = verifyResult.stderr || '';
+    const detail = verifyStderr || verifyStdout || '(no output)';
+    throw Object.assign(
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      { code: 'verify_failed', verify: verifyResult }
+    );
   }
 
   // ------------------------------------------------------------------
@@ -1299,7 +1475,7 @@ async function executeV2(common, {
   // ------------------------------------------------------------------
 
   return {
-    ok: exitCode === 0,
+    ok: effectiveOk,
     execution_id: executionId,
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
@@ -1308,6 +1484,7 @@ async function executeV2(common, {
     principal_used: principal,
     contract,
     result,
+    verify: verifyResult,
     authorization_proof: authorizationProofSummary,
     authorization: authorizationDecision,
     trust: trustInfo,

@@ -281,7 +281,7 @@ export async function runCli(
         const caps = querySchedulerCapabilities(runner);
         const effective = resolveEffectiveFeatures('openclaw-scheduler', caps);
         const compiled = getTarget('openclaw-scheduler').compile(manifest);
-        const compatibilityErrors = validateManifestCapabilities(compiled, effective);
+        const { errors: compatibilityErrors, warnings: compatibilityWarnings } = validateManifestCapabilities(compiled, effective);
         return formatOutput({
           ok: true,
           capabilities: caps,
@@ -289,6 +289,7 @@ export async function runCli(
           compatibility: {
             ok: compatibilityErrors.length === 0,
             errors: compatibilityErrors,
+            warnings: compatibilityWarnings,
           },
         }, { mode: outputMode, pretty });
       }

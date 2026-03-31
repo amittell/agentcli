@@ -1722,6 +1722,14 @@ Evidence verification occurs after execution (Phase 5) has already completed. A 
 - when `verify.required` is `false`, a verification failure is recorded as a warning but does not affect the exit code
 - the evidence envelope (including the failed verification status) is always written to the audit record so that operators can investigate
 
+### Phase 6.5: Post-execution Verify
+
+- only enter this phase when the main command exited successfully and a workflow/task `verify` block resolves
+- run the declared verify shell in the task's effective execution context
+- treat `verify` as an operator-local postcondition separate from evidence attestation; the attested evidence payload reflects the main command result, not the later verify shell outcome
+- when `verify.on_failure` is `error`, return a non-zero status after cleanup and audit
+- when `verify.on_failure` is `warn`, record the verify failure as a warning without changing the exit code
+
 ### Phase 7: Audit
 
 - write append-only audit record
@@ -2099,6 +2107,47 @@ Authorization evaluation results SHOULD return:
 - audit-safe policy reference or explanation
 
 ## Security Model
+
+### Execution Principal Separation
+
+The security model rests on a separation between the control plane
+(agentcli) and the execution runtime (openclaw-scheduler or another
+backend).
+
+**agentcli's role:** declare identity, compile trust constraints, validate
+delegation chains (cycle detection via DFS on scope hierarchy), and verify
+authorization proofs at apply time. agentcli does not persist runtime
+credentials and does not own the dispatch queue.
+
+**Scheduler's role:** resolve credentials at dispatch time, enforce trust
+gates, apply child credential policies, mint or resolve scoped credentials
+via identity providers, materialize them into execution environments, and
+record audit trails with full identity provenance.
+
+**When the boundary is a real security boundary:** the scheduler/child
+separation is a meaningful security boundary when the child is narrower
+than the parent in identity, credentials, tools, state, or
+network/filesystem scope. The `child_credential_policy` field (`none`,
+`inherit`, `downscope`, `independent`) controls this. When the policy is
+`downscope`, the provider mints a per-task restricted key scoped to
+exactly the permissions the child declared -- the child literally cannot
+access the parent's full credential set.
+
+**When the boundary is operational:** if the child inherits the parent's
+full credentials without narrowing, the boundary provides lifecycle
+isolation, attribution, context isolation, and blast radius containment
+for crashes -- but not credential-based access control. This is still
+valuable, but operators should not treat it as a security guarantee unless
+narrowing is actually configured.
+
+The honest summary: if you cannot make the child meaningfully narrower in
+identity, tools, state, or network/filesystem scope, then the sub-agent
+boundary is mostly an execution/lifecycle boundary, not a strong security
+boundary. The stronger design is scheduler as broker/orchestrator, child
+as bounded actor, with explicit narrowing at each level.
+
+For the runtime perspective on this architecture, see
+`openclaw-scheduler/docs/trust-architecture.md`.
 
 ### Secret Handling
 

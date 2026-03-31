@@ -112,7 +112,7 @@ export const schedulerAdapter = {
     const runtimeCaps = querySchedulerCapabilities(runner);
     const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     const handoffVersion = effectiveResult.handoff_version || '1';
-    const capabilityErrors = validateManifestCapabilities({ jobs: [jobSpec] }, effectiveResult);
+    const { errors: capabilityErrors } = validateManifestCapabilities({ jobs: [jobSpec] }, effectiveResult);
     if (capabilityErrors.length > 0) {
       throw Object.assign(
         new Error(capabilityErrors.map(error => error.message).join('; ')),

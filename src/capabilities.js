@@ -67,21 +67,27 @@ export function resolveEffectiveFeatures(targetName, runtimeCapabilities) {
 
 /**
  * Check if the manifest's requirements are satisfied by the effective features.
- * Returns an array of mismatch errors (empty if all satisfied).
+ * Returns { errors: [...], warnings: [...] } where errors are hard gates and
+ * warnings are soft advisories that do not block apply.
  */
 export function validateManifestCapabilities(compiledOutput, effectiveFeatures) {
   const errors = [];
+  const warnings = [];
   const features = effectiveFeatures.features || effectiveFeatures;
 
-  if (!compiledOutput || !compiledOutput.jobs) return errors;
+  if (!compiledOutput || !compiledOutput.jobs) return { errors, warnings };
 
-  // Apply-time gating is intentionally limited to features that must exist to
-  // persist or hand off the compiled durable job spec. Runtime identity
-  // resolution, delegation validation, and child_credential_policy remain
-  // execution-time concerns: persisted identity declarations may already be
-  // sufficient for dispatch, delegation chains are only known after a concrete
-  // session is resolved, and child_credential_policy is a runtime column that
-  // all v23+ schedulers accept regardless of whether providers are loaded.
+  // Hard gates: features that must exist to persist or hand off the compiled
+  // durable job spec. These block apply when absent.
+  //
+  // Soft warnings: runtime_identity_resolution and credential_handoff (for
+  // child_credential_policy) are checked here as advisories. Persisted identity
+  // declarations may already be sufficient for dispatch and
+  // child_credential_policy is a runtime column that all v23+ schedulers accept
+  // regardless of whether providers are loaded, but a missing runtime feature
+  // means execution will fail -- so we surface the gap early. Delegation
+  // validation remains execution-time only (chains are only known after a
+  // concrete session is resolved).
   for (const job of compiledOutput.jobs) {
     // Check authorization hook requirement
     if (job.authorization || job.authorization_ref) {
@@ -130,7 +136,36 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
         });
       }
     }
+
+    // Soft warning: identity with a real provider requires runtime resolution
+    const identityProvider = job.identity?.provider ?? null;
+    if (identityProvider && identityProvider !== 'none') {
+      if (!features.runtime_identity_resolution) {
+        warnings.push({
+          code: 'capability_warning',
+          feature: 'runtime_identity_resolution',
+          required_by: `job "${job.name || job.id}"`,
+          message: `Job "${job.name || job.id}" declares identity provider "${identityProvider}" but the runtime does not support runtime_identity_resolution; credentials will not resolve at execution time`,
+        });
+      }
+    }
+
+    // Soft warning: downscope policy requires credential_handoff at runtime.
+    // Note: identity.presentation.handoff (above) is a hard error because
+    // the scheduler cannot persist the handoff contract without the feature.
+    // child_credential_policy is a soft warning because the column is always
+    // accepted by v23+ schedulers -- enforcement happens at dispatch time.
+    if (job.child_credential_policy === 'downscope') {
+      if (!features.credential_handoff) {
+        warnings.push({
+          code: 'capability_warning',
+          feature: 'credential_handoff',
+          required_by: `job "${job.name || job.id}"`,
+          message: `Job "${job.name || job.id}" declares child_credential_policy="downscope" but the runtime does not support credential_handoff; child credential scoping will not be enforced`,
+        });
+      }
+    }
   }
 
-  return errors;
+  return { errors, warnings };
 }

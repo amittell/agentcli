@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -26,7 +27,7 @@ import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
 import { ensureAgentcliHome } from '../src/home.js';
-import { stableId, resolveIdentityV2 } from '../src/compiler/shared.js';
+import { stableId, resolveIdentityV2, resolveVerify } from '../src/compiler/shared.js';
 import { applyFieldMask, parseFieldMask } from '../src/fields.js';
 import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
@@ -7231,7 +7232,7 @@ test('validateManifestCapabilities detects authorization_hook mismatch', () => {
     ]
   };
   const features = { authorization_hook: false, trust_evaluation: true, evidence_generation: true };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 1);
   assert.strictEqual(errors[0].feature, 'authorization_hook');
   assert.ok(errors[0].message.includes('Job One'));
@@ -7244,7 +7245,7 @@ test('validateManifestCapabilities detects trust_evaluation mismatch', () => {
     ]
   };
   const features = { authorization_hook: true, trust_evaluation: false, evidence_generation: true };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 1);
   assert.strictEqual(errors[0].feature, 'trust_evaluation');
   assert.ok(errors[0].message.includes('Trust Job'));
@@ -7257,7 +7258,7 @@ test('validateManifestCapabilities detects evidence_generation mismatch', () => 
     ]
   };
   const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: false };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 1);
   assert.strictEqual(errors[0].feature, 'evidence_generation');
   assert.ok(errors[0].message.includes('Evidence Job'));
@@ -7283,7 +7284,7 @@ test('validateManifestCapabilities detects credential_handoff mismatch', () => {
     evidence_generation: true,
     credential_handoff: false,
   };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 1);
   assert.strictEqual(errors[0].feature, 'credential_handoff');
   assert.ok(errors[0].message.includes('Handoff Job'));
@@ -7302,7 +7303,7 @@ test('validateManifestCapabilities returns no errors when all features satisfied
     ]
   };
   const features = { authorization_hook: true, trust_evaluation: true, evidence_generation: true };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 0);
 });
 
@@ -7313,15 +7314,146 @@ test('validateManifestCapabilities returns no errors for jobs without v0.2 featu
     ]
   };
   const features = { authorization_hook: false, trust_evaluation: false, evidence_generation: false };
-  const errors = validateManifestCapabilities(compiled, { features });
+  const { errors } = validateManifestCapabilities(compiled, { features });
   assert.strictEqual(errors.length, 0);
 });
 
 test('validateManifestCapabilities handles null/empty compiled output', () => {
   const features = { authorization_hook: false };
-  assert.strictEqual(validateManifestCapabilities(null, { features }).length, 0);
-  assert.strictEqual(validateManifestCapabilities({}, { features }).length, 0);
-  assert.strictEqual(validateManifestCapabilities({ jobs: [] }, { features }).length, 0);
+  assert.strictEqual(validateManifestCapabilities(null, { features }).errors.length, 0);
+  assert.strictEqual(validateManifestCapabilities({}, { features }).errors.length, 0);
+  assert.strictEqual(validateManifestCapabilities({ jobs: [] }, { features }).errors.length, 0);
+});
+
+test('validateManifestCapabilities warns when identity provider requires runtime_identity_resolution', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Stripe Job',
+        identity: {
+          provider: 'stripe-api-key',
+          subject: { kind: 'service' },
+        },
+      },
+    ]
+  };
+  const features = {
+    authorization_hook: true,
+    trust_evaluation: true,
+    evidence_generation: true,
+    runtime_identity_resolution: false,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(warnings[0].code, 'capability_warning');
+  assert.strictEqual(warnings[0].feature, 'runtime_identity_resolution');
+  assert.ok(warnings[0].message.includes('Stripe Job'));
+  assert.ok(warnings[0].message.includes('stripe-api-key'));
+});
+
+test('validateManifestCapabilities does not warn for identity provider "none"', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'None Provider Job',
+        identity: {
+          provider: 'none',
+          subject: { kind: 'service' },
+        },
+      },
+    ]
+  };
+  const features = {
+    runtime_identity_resolution: false,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 0);
+});
+
+test('validateManifestCapabilities does not warn when runtime_identity_resolution is true', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Resolved Job',
+        identity: {
+          provider: 'gcp-workload-identity',
+          subject: { kind: 'service' },
+        },
+      },
+    ]
+  };
+  const features = {
+    runtime_identity_resolution: true,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 0);
+});
+
+test('validateManifestCapabilities warns when child_credential_policy is downscope without credential_handoff', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Downscope Job',
+        child_credential_policy: 'downscope',
+      },
+    ]
+  };
+  const features = {
+    authorization_hook: true,
+    trust_evaluation: true,
+    evidence_generation: true,
+    credential_handoff: false,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(warnings[0].code, 'capability_warning');
+  assert.strictEqual(warnings[0].feature, 'credential_handoff');
+  assert.ok(warnings[0].message.includes('Downscope Job'));
+  assert.ok(warnings[0].message.includes('downscope'));
+});
+
+test('validateManifestCapabilities does not warn for child_credential_policy "inherit"', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Inherit Job',
+        child_credential_policy: 'inherit',
+      },
+    ]
+  };
+  const features = {
+    credential_handoff: false,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 0);
+});
+
+test('validateManifestCapabilities does not warn for downscope when credential_handoff is true', () => {
+  const compiled = {
+    jobs: [
+      {
+        id: 'j1',
+        name: 'Supported Downscope Job',
+        child_credential_policy: 'downscope',
+      },
+    ]
+  };
+  const features = {
+    credential_handoff: true,
+  };
+  const { errors, warnings } = validateManifestCapabilities(compiled, { features });
+  assert.strictEqual(errors.length, 0);
+  assert.strictEqual(warnings.length, 0);
 });
 
 test('applyManifestToScheduler rejects unsupported trust and evidence capabilities before writing', async () => {
@@ -7445,6 +7577,78 @@ test('applyManifestToScheduler includes capabilities metadata in result', async 
   assert.strictEqual(result.capabilities.handoff_version, '2');
 });
 
+test('applyManifestToScheduler preserves capability warnings in structured result', async () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'warning-wf',
+      name: 'Warning Workflow',
+      tasks: [{
+        id: 'child-task',
+        name: 'Downscope Child',
+        prompt: 'exercise capability warning path',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        delivery: { mode: 'none' },
+        child_credential_policy: 'downscope',
+      }]
+    }]
+  };
+  const runner = {
+    invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: '0.2.0',
+        schema_version: 22,
+        handoff_version: '2',
+        features: {
+          approvals: 'runtime',
+          runtime_execution: true,
+          identity_declaration: true,
+          runtime_identity_resolution: true,
+          trust_evaluation: true,
+          authorization_proof_verification: true,
+          authorization_hook: true,
+          evidence_generation: true,
+          delegation_validation: false,
+          credential_handoff: false,
+          audit_export: true
+        }
+      };
+    },
+    listJobs() {
+      return [];
+    },
+    addJob(spec) {
+      return { ok: true, job: spec };
+    },
+    updateJob(id, spec) {
+      return { ok: true, job: spec };
+    }
+  };
+
+  const stderrWrites = [];
+  const originalStderrWrite = process.stderr.write;
+  process.stderr.write = (chunk, ...args) => {
+    stderrWrites.push(String(chunk));
+    const cb = args.find(arg => typeof arg === 'function');
+    if (cb) cb();
+    return true;
+  };
+
+  try {
+    const result = await applyManifestToScheduler(manifest, { runner });
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.capabilities?.warnings));
+    assert.strictEqual(result.capabilities.warnings.length, 1);
+    assert.strictEqual(result.capabilities.warnings[0].feature, 'credential_handoff');
+    assert.ok(result.capabilities.warnings[0].message.includes('child_credential_policy="downscope"'));
+    assert.ok(stderrWrites.some(line => line.includes('child_credential_policy="downscope"')));
+  } finally {
+    process.stderr.write = originalStderrWrite;
+  }
+});
+
 test('applyManifestToScheduler skips runtime capability queries for pure v0.1 manifests', async () => {
   let capabilityCalls = 0;
   const runner = {
@@ -7509,7 +7713,7 @@ test('SCHEDULER_FIELD_VERSIONS v1 matches original 40-field list', () => {
   assert.ok(!v1.includes('evidence'));
 });
 
-test('SCHEDULER_FIELD_VERSIONS v2 includes v1 plus 22 v0.2 fields', () => {
+test('SCHEDULER_FIELD_VERSIONS v2 includes v1 plus 25 v0.2 fields', () => {
   const v2 = SCHEDULER_FIELD_VERSIONS['2'];
   assert.ok(Array.isArray(v2));
   assert.strictEqual(v2.length, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
@@ -9006,7 +9210,16 @@ test('child_credential_policy: field is in SCHEDULER_FIELDS_V02', () => {
 // stripe-api-key identity provider
 // ---------------------------------------------------------------------------
 
-import stripeApiKeyProvider from '../src/identity/stripe-api-key.js';
+import stripeApiKeyProvider, {
+  encodePermissionsBody,
+  resolvePermissionsForScope,
+  createRestrictedKey,
+  deleteRestrictedKey,
+  resolveMasterKey,
+  DEFAULT_API_BASE,
+  DEFAULT_EXPIRY_BUFFER_S,
+  DEFAULT_SCOPE_PERMISSIONS,
+} from '../src/identity/stripe-api-key.js';
 
 const validPrecreatedProfile = {
   auth: {
@@ -9251,7 +9464,7 @@ test('stripe-api-key resolveSession: rejects key mode mismatch (live key with te
   assert.ok(/mode mismatch/.test(result.error));
 });
 
-test('stripe-api-key resolveSession: dynamic strategy returns not-implemented error', () => {
+test('stripe-api-key resolveSession: dynamic strategy without master key env returns error', async () => {
   const dynamicProfile = {
     auth: {
       provider_config: {
@@ -9263,9 +9476,9 @@ test('stripe-api-key resolveSession: dynamic strategy returns not-implemented er
     trust: { level: 'supervised' },
   };
   const request = { profile: dynamicProfile, instanceId: 'test-5' };
-  const result = stripeApiKeyProvider.resolveSession(request, {});
+  const result = await stripeApiKeyProvider.resolveSession(request, { env: {}, cwd: '/tmp' });
   assert.strictEqual(result.ok, false);
-  assert.ok(/not yet implemented/.test(result.error));
+  assert.ok(/master key/.test(result.error) || /STRIPE_MASTER_KEY/.test(result.error));
 });
 
 test('stripe-api-key resolveSession: key_command cache distinguishes cwd (same snippet)', () => {
@@ -9698,4 +9911,1577 @@ test('v0.2 exec stripe-api-key handoff with downscope produces prepared session'
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.handoff?.prepared, true);
   assert.strictEqual(result.handoff?.mode, 'downscope');
+});
+
+// ---------------------------------------------------------------------------
+// stripe-api-key: dynamic key strategy tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a mock Stripe API HTTP server for testing dynamic key minting.
+ * Returns { server, port, close(), requests[] }.
+ */
+function createMockStripeServer(handler) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      requests.push({ method: req.method, url: req.url, headers: req.headers, body });
+      handler(req, res, body);
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      resolve({
+        server,
+        port,
+        baseUrl: `http://127.0.0.1:${port}`,
+        requests,
+        close: () => new Promise((r) => server.close(r)),
+      });
+    });
+  });
+}
+
+// -- encodePermissionsBody tests --
+
+test('stripe-api-key encodePermissionsBody: encodes resource permissions correctly', () => {
+  const result = encodePermissionsBody({ charges: 'write', customers: 'read' });
+  assert.ok(result.includes('permissions[charges][write]=true'));
+  assert.ok(result.includes('permissions[customers][read]=true'));
+  assert.strictEqual(result.split('&').length, 2);
+});
+
+test('stripe-api-key encodePermissionsBody: empty permissions produces empty string', () => {
+  const result = encodePermissionsBody({});
+  assert.strictEqual(result, '');
+});
+
+// -- resolvePermissionsForScope tests --
+
+test('stripe-api-key resolvePermissionsForScope: returns default for built-in scopes', () => {
+  const config = {};
+  const fullPerms = resolvePermissionsForScope('full', config);
+  assert.ok(fullPerms);
+  assert.strictEqual(fullPerms.charges, 'write');
+  assert.strictEqual(fullPerms.balance, 'read');
+
+  const readonlyPerms = resolvePermissionsForScope('readonly', config);
+  assert.ok(readonlyPerms);
+  assert.strictEqual(readonlyPerms.charges, 'read');
+
+  const paymentsPerms = resolvePermissionsForScope('payments', config);
+  assert.ok(paymentsPerms);
+  assert.strictEqual(paymentsPerms.payment_intents, 'write');
+});
+
+test('stripe-api-key resolvePermissionsForScope: config override takes precedence', () => {
+  const config = {
+    scope_permissions: {
+      full: { charges: 'read' },
+    },
+  };
+  const perms = resolvePermissionsForScope('full', config);
+  assert.strictEqual(perms.charges, 'read');
+  assert.strictEqual(perms.balance, undefined);
+});
+
+test('stripe-api-key resolvePermissionsForScope: returns null for unknown scope without config', () => {
+  const result = resolvePermissionsForScope('custom-scope', {});
+  assert.strictEqual(result, null);
+});
+
+// -- resolveMasterKey tests --
+
+test('stripe-api-key resolveMasterKey: resolves from env', () => {
+  const result = resolveMasterKey({ env: 'MASTER_KEY_VAR' }, { MASTER_KEY_VAR: 'sk_test_master123' }, '/tmp');
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.value, 'sk_test_master123');
+});
+
+test('stripe-api-key resolveMasterKey: returns error for missing env var', () => {
+  const result = resolveMasterKey({ env: 'MISSING_VAR' }, {}, '/tmp');
+  assert.strictEqual(result.ok, false);
+  assert.ok(/MISSING_VAR/.test(result.error));
+});
+
+test('stripe-api-key resolveMasterKey: returns error when no source specified', () => {
+  const result = resolveMasterKey({}, {}, '/tmp');
+  assert.strictEqual(result.ok, false);
+  assert.ok(/no valid source/.test(result.error));
+});
+
+// -- DEFAULT constants --
+
+test('stripe-api-key DEFAULT_API_BASE is Stripe production URL', () => {
+  assert.strictEqual(DEFAULT_API_BASE, 'https://api.stripe.com');
+});
+
+test('stripe-api-key DEFAULT_EXPIRY_BUFFER_S is 300', () => {
+  assert.strictEqual(DEFAULT_EXPIRY_BUFFER_S, 300);
+});
+
+test('stripe-api-key DEFAULT_SCOPE_PERMISSIONS has full, payments, readonly', () => {
+  assert.ok(DEFAULT_SCOPE_PERMISSIONS.full);
+  assert.ok(DEFAULT_SCOPE_PERMISSIONS.payments);
+  assert.ok(DEFAULT_SCOPE_PERMISSIONS.readonly);
+});
+
+// -- createRestrictedKey with mock server --
+
+test('stripe-api-key createRestrictedKey: success path creates key', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_key_id_123',
+        object: 'api_key',
+        secret: 'rk_test_secret_key_value_456',
+      }));
+    } else {
+      res.writeHead(404);
+      res.end('{}');
+    }
+  });
+
+  try {
+    const result = await createRestrictedKey(
+      'sk_test_master_key_abcdef',
+      { charges: 'write' },
+      mock.baseUrl
+    );
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.key_id, 'rk_test_key_id_123');
+    assert.strictEqual(result.key_secret, 'rk_test_secret_key_value_456');
+
+    // Verify the request was sent correctly
+    assert.strictEqual(mock.requests.length, 1);
+    assert.strictEqual(mock.requests[0].method, 'POST');
+    assert.strictEqual(mock.requests[0].url, '/v1/api_keys');
+    assert.ok(mock.requests[0].headers['authorization'].includes('Bearer sk_test_master_key_abcdef'));
+    assert.ok(mock.requests[0].body.includes('permissions[charges][write]=true'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key createRestrictedKey: API error returns structured error', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Invalid API Key provided', type: 'authentication_error' },
+    }));
+  });
+
+  try {
+    const result = await createRestrictedKey('sk_test_bad', { charges: 'read' }, mock.baseUrl);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.transient, false);
+    assert.ok(/Invalid API Key/.test(result.error));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key createRestrictedKey: 429 rate limit is transient', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Rate limit exceeded', type: 'rate_limit_error' },
+    }));
+  });
+
+  try {
+    const result = await createRestrictedKey('sk_test_key_xyz', { charges: 'read' }, mock.baseUrl);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.transient, true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key createRestrictedKey: 500 server error is transient', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Internal server error' },
+    }));
+  });
+
+  try {
+    const result = await createRestrictedKey('sk_test_key_xyz', { charges: 'read' }, mock.baseUrl);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.transient, true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key createRestrictedKey: missing id/secret in response returns error', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ object: 'api_key' }));
+  });
+
+  try {
+    const result = await createRestrictedKey('sk_test_key_xyz', { charges: 'read' }, mock.baseUrl);
+    assert.strictEqual(result.ok, false);
+    assert.ok(/missing id or secret/.test(result.error));
+  } finally {
+    await mock.close();
+  }
+});
+
+// -- deleteRestrictedKey with mock server --
+
+test('stripe-api-key deleteRestrictedKey: success path deletes key', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'DELETE' && req.url === '/v1/api_keys/rk_test_key_id_123') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: 'rk_test_key_id_123', deleted: true }));
+    } else {
+      res.writeHead(404);
+      res.end('{}');
+    }
+  });
+
+  try {
+    const result = await deleteRestrictedKey('sk_test_master_key_abcdef', 'rk_test_key_id_123', mock.baseUrl);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(mock.requests.length, 1);
+    assert.strictEqual(mock.requests[0].method, 'DELETE');
+    assert.ok(mock.requests[0].url.includes('rk_test_key_id_123'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key deleteRestrictedKey: API error returns structured error', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'No such API key', type: 'invalid_request_error' },
+    }));
+  });
+
+  try {
+    const result = await deleteRestrictedKey('sk_test_master', 'rk_test_missing', mock.baseUrl);
+    assert.strictEqual(result.ok, false);
+    assert.ok(/No such API key/.test(result.error));
+  } finally {
+    await mock.close();
+  }
+});
+
+// -- resolveSession dynamic: end-to-end with mock server --
+
+test('stripe-api-key resolveSession dynamic: full success path with mock server', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_dynamic_id_789',
+        object: 'api_key',
+        secret: 'rk_test_dynamic_secret_value_abc',
+      }));
+    }
+  });
+
+  try {
+    const dynamicProfile = {
+      auth: {
+        provider_config: {
+          key_strategy: 'dynamic',
+          account_mode: 'test',
+          api_base: mock.baseUrl,
+          master_key_source: { env: 'STRIPE_DYNAMIC_MASTER' },
+          default_expiry_buffer_s: 600,
+        },
+      },
+      trust: { level: 'supervised' },
+    };
+    const request = {
+      profile: dynamicProfile,
+      instanceId: 'dyn-1',
+      scope: 'readonly',
+      task_timeout_s: 120,
+    };
+    const ctx = {
+      env: { STRIPE_DYNAMIC_MASTER: 'sk_test_master_key_for_dynamic_test' },
+      cwd: '/tmp',
+    };
+    const result = await stripeApiKeyProvider.resolveSession(request, ctx);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.session.provider, 'stripe-api-key');
+    assert.strictEqual(result.session.subject.principal, 'stripe:test');
+    assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_dynamic_secret_value_abc');
+    assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+    assert.strictEqual(result.session.credentials.api_key.kind, 'bearer');
+    assert.strictEqual(result.session.provider_assertions.key_strategy, 'dynamic');
+    assert.strictEqual(result.session.provider_assertions.stripe_key_id, 'rk_test_dynamic_id_789');
+    assert.strictEqual(result.session.provider_assertions.api_base, mock.baseUrl);
+    assert.strictEqual(result.session.instance.id, 'dyn-1');
+    assert.ok(result.session.refresh.expires_at);
+    // Verify expiry is approximately (120 + 600) seconds from now
+    const expiresMs = new Date(result.session.refresh.expires_at).getTime();
+    const expectedMs = Date.now() + ((120 + 600) * 1000);
+    assert.ok(Math.abs(expiresMs - expectedMs) < 5000, 'expires_at should be ~720s from now');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key resolveSession dynamic: master key format mismatch returns error', async () => {
+  const dynamicProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'live',
+        master_key_source: { env: 'STRIPE_MASTER' },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile: dynamicProfile, scope: 'full' };
+  const ctx = {
+    env: { STRIPE_MASTER: 'sk_test_wrong_mode_key_abcdef' },
+    cwd: '/tmp',
+  };
+  const result = await stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/mode mismatch/.test(result.error) || /Master key format invalid/.test(result.error));
+});
+
+test('stripe-api-key resolveSession dynamic: unknown scope without mapping returns error', async () => {
+  const dynamicProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER' },
+      },
+    },
+    trust: { level: 'supervised' },
+  };
+  const request = { profile: dynamicProfile, scope: 'custom-unmapped' };
+  const ctx = {
+    env: { STRIPE_MASTER: 'sk_test_master_key_abcdef_xyz12' },
+    cwd: '/tmp',
+  };
+  const result = await stripeApiKeyProvider.resolveSession(request, ctx);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/No permission mapping/.test(result.error));
+});
+
+test('stripe-api-key resolveSession dynamic: API failure propagates error', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: { message: 'Insufficient permissions to create restricted key' },
+    }));
+  });
+
+  try {
+    const dynamicProfile = {
+      auth: {
+        provider_config: {
+          key_strategy: 'dynamic',
+          account_mode: 'test',
+          api_base: mock.baseUrl,
+          master_key_source: { env: 'STRIPE_MASTER' },
+        },
+      },
+      trust: { level: 'supervised' },
+    };
+    const request = { profile: dynamicProfile, scope: 'full' };
+    const ctx = {
+      env: { STRIPE_MASTER: 'sk_test_master_key_with_no_perms' },
+      cwd: '/tmp',
+    };
+    const result = await stripeApiKeyProvider.resolveSession(request, ctx);
+    assert.strictEqual(result.ok, false);
+    assert.ok(/Insufficient permissions/.test(result.error));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key resolveSession dynamic: default scope is "full" when none provided', async () => {
+  const mock = await createMockStripeServer((req, res, body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      // Verify that 'full' scope permissions were sent
+      assert.ok(body.includes('permissions[charges][write]=true'), 'should have full scope write permissions');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_default_scope_id',
+        object: 'api_key',
+        secret: 'rk_test_default_scope_secret_val',
+      }));
+    }
+  });
+
+  try {
+    const dynamicProfile = {
+      auth: {
+        provider_config: {
+          key_strategy: 'dynamic',
+          account_mode: 'test',
+          api_base: mock.baseUrl,
+          master_key_source: { env: 'STRIPE_MASTER' },
+        },
+      },
+      trust: { level: 'supervised' },
+    };
+    const request = { profile: dynamicProfile };
+    const ctx = {
+      env: { STRIPE_MASTER: 'sk_test_master_key_for_default_sc' },
+      cwd: '/tmp',
+    };
+    const result = await stripeApiKeyProvider.resolveSession(request, ctx);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.session.credentials.api_key.scope, 'full');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('v0.2 exec stripe-api-key dynamic cleanup revokes minted key after execution', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_exec_cleanup_id',
+        object: 'api_key',
+        secret: 'rk_test_exec_cleanup_secret_value_12345',
+      }));
+      return;
+    }
+
+    if (req.method === 'DELETE' && req.url === '/v1/api_keys/rk_test_exec_cleanup_id') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_exec_cleanup_id',
+        deleted: true,
+      }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Unexpected request' } }));
+  });
+
+  try {
+    const manifest = {
+      version: '0.2',
+      identity_profiles: [{
+        id: 'stripe-dynamic',
+        provider: 'stripe-api-key',
+        subject: { kind: 'service', principal: 'stripe:test' },
+        auth: {
+          provider_config: {
+            key_strategy: 'dynamic',
+            account_mode: 'test',
+            api_base: mock.baseUrl,
+            master_key_source: { env: 'STRIPE_MASTER_KEY' },
+          },
+        },
+        trust: { level: 'supervised' },
+      }],
+      workflows: [{
+        id: 'w',
+        name: 'W',
+        tasks: [{
+          id: 't',
+          name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-c', 'printf ok'],
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'none' },
+          identity: { ref: 'stripe-dynamic', scope: 'readonly' },
+        }],
+      }],
+    };
+
+    const result = await executeTask(manifest, {
+      taskId: 't',
+      env: {
+        ...process.env,
+        STRIPE_MASTER_KEY: 'sk_test_master_key_cleanup_value_12345',
+      },
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'POST').length, 1);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'DELETE').length, 1);
+    assert.ok(mock.requests.some(request => request.url === '/v1/api_keys/rk_test_exec_cleanup_id'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('v0.2 exec stripe-api-key dynamic handoff cleanup revokes prepared child key during dry-run', async () => {
+  let createCount = 0;
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      createCount += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: `rk_test_handoff_cleanup_${createCount}`,
+        object: 'api_key',
+        secret: `rk_test_handoff_cleanup_secret_value_${createCount}`,
+      }));
+      return;
+    }
+
+    if (req.method === 'DELETE' && req.url.startsWith('/v1/api_keys/rk_test_handoff_cleanup_')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: req.url.split('/').pop(),
+        deleted: true,
+      }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Unexpected request' } }));
+  });
+
+  try {
+    const manifest = {
+      version: '0.2',
+      identity_profiles: [{
+        id: 'stripe-dynamic-handoff',
+        provider: 'stripe-api-key',
+        subject: { kind: 'service', principal: 'stripe:test' },
+        auth: {
+          provider_config: {
+            key_strategy: 'dynamic',
+            account_mode: 'test',
+            api_base: mock.baseUrl,
+            master_key_source: { env: 'STRIPE_MASTER_KEY' },
+            scope_hierarchy: {
+              full: ['readonly'],
+              readonly: [],
+            },
+          },
+        },
+        presentation: { handoff: 'downscope' },
+        trust: { level: 'supervised' },
+      }],
+      workflows: [{
+        id: 'w',
+        name: 'W',
+        tasks: [{
+          id: 't',
+          name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-c', 'printf ok'],
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { audit: 'none' },
+          identity: { ref: 'stripe-dynamic-handoff', scope: 'readonly' },
+        }],
+      }],
+    };
+
+    const result = await executeTask(manifest, {
+      taskId: 't',
+      dryRun: true,
+      env: {
+        ...process.env,
+        STRIPE_MASTER_KEY: 'sk_test_master_key_handoff_cleanup_12345',
+      },
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.handoff?.prepared, true);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'POST').length, 2);
+    assert.strictEqual(mock.requests.filter(request => request.method === 'DELETE').length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+// -- cleanup dynamic: tests with mock server --
+
+test('stripe-api-key cleanup: dynamic session revokes key via API', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    if (req.method === 'DELETE' && req.url === '/v1/api_keys/rk_test_cleanup_id') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: 'rk_test_cleanup_id', deleted: true }));
+    }
+  });
+
+  try {
+    const session = {
+      provider_assertions: {
+        key_strategy: 'dynamic',
+        stripe_key_id: 'rk_test_cleanup_id',
+        api_base: mock.baseUrl,
+      },
+    };
+    const ctx = {
+      session,
+      env: { STRIPE_MASTER: 'sk_test_cleanup_master_key_1234' },
+      cwd: '/tmp',
+      provider_config: {
+        master_key_source: { env: 'STRIPE_MASTER' },
+      },
+    };
+    const result = await stripeApiKeyProvider.cleanup({}, ctx);
+    assert.strictEqual(result.cleaned, true);
+    assert.strictEqual(result.warnings, undefined);
+    assert.strictEqual(mock.requests.length, 1);
+    assert.strictEqual(mock.requests[0].method, 'DELETE');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key cleanup: dynamic session with API failure returns warning', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Internal error' } }));
+  });
+
+  try {
+    const session = {
+      provider_assertions: {
+        key_strategy: 'dynamic',
+        stripe_key_id: 'rk_test_fail_cleanup_id',
+        api_base: mock.baseUrl,
+      },
+    };
+    const ctx = {
+      session,
+      env: { STRIPE_MASTER: 'sk_test_cleanup_master_key_fail' },
+      cwd: '/tmp',
+      provider_config: {
+        master_key_source: { env: 'STRIPE_MASTER' },
+      },
+    };
+    const result = await stripeApiKeyProvider.cleanup({}, ctx);
+    assert.strictEqual(result.cleaned, true);
+    assert.ok(Array.isArray(result.warnings));
+    assert.ok(result.warnings.length > 0);
+    assert.ok(result.warnings[0].includes('Internal error'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key cleanup: precreated session is no-op', () => {
+  const session = {
+    provider_assertions: {
+      key_strategy: 'precreated',
+    },
+  };
+  const result = stripeApiKeyProvider.cleanup({}, { session });
+  assert.strictEqual(result.cleaned, true);
+  assert.strictEqual(result.warnings, undefined);
+});
+
+test('stripe-api-key cleanup: missing session is no-op', () => {
+  const result = stripeApiKeyProvider.cleanup({}, {});
+  assert.strictEqual(result.cleaned, true);
+});
+
+test('stripe-api-key cleanup: dynamic session without stripe_key_id warns', () => {
+  const session = {
+    provider_assertions: {
+      key_strategy: 'dynamic',
+    },
+  };
+  const result = stripeApiKeyProvider.cleanup({}, { session });
+  assert.strictEqual(result.cleaned, true);
+  assert.ok(Array.isArray(result.warnings));
+  assert.ok(result.warnings[0].includes('no stripe_key_id'));
+});
+
+test('stripe-api-key cleanup: dynamic session without master key source warns', async () => {
+  const session = {
+    provider_assertions: {
+      key_strategy: 'dynamic',
+      stripe_key_id: 'rk_test_no_master',
+      api_base: 'http://127.0.0.1:1',
+    },
+  };
+  const result = stripeApiKeyProvider.cleanup({}, {
+    session,
+    env: {},
+    cwd: '/tmp',
+    provider_config: { master_key_source: { env: 'NONEXISTENT_VAR' } },
+  });
+  // The result might be sync or async depending on the path
+  const resolved = (result instanceof Promise) ? await result : result;
+  assert.strictEqual(resolved.cleaned, true);
+  assert.ok(Array.isArray(resolved.warnings));
+});
+
+// -- prepareHandoff dynamic: tests with mock server --
+
+test('stripe-api-key prepareHandoff dynamic: mints narrower key for child scope', async () => {
+  const mock = await createMockStripeServer((req, res, body) => {
+    if (req.method === 'POST' && req.url === '/v1/api_keys') {
+      // Verify readonly permissions were sent (not full)
+      assert.ok(body.includes('permissions[charges][read]=true'));
+      assert.ok(!body.includes('[write]=true'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'rk_test_child_handoff_id',
+        object: 'api_key',
+        secret: 'rk_test_child_handoff_secret_val',
+      }));
+    }
+  });
+
+  try {
+    const parentSession = {
+      provider: 'stripe-api-key',
+      instance: { id: 'dyn-parent', source: 'operator' },
+      trust: { declared_level: 'supervised', effective_level: 'supervised' },
+      credentials: {
+        api_key: { kind: 'bearer', value: 'rk_test_parent_dyn_key_value12', scope: 'full' },
+      },
+      delegation_chain: [
+        { kind: 'service', principal: 'stripe:test', grant: 'scope:full', validated: true },
+      ],
+    };
+    const parentProfile = {
+      auth: {
+        provider_config: {
+          key_strategy: 'dynamic',
+          account_mode: 'test',
+          api_base: mock.baseUrl,
+          master_key_source: { env: 'STRIPE_MASTER' },
+          scope_hierarchy: {
+            full: ['readonly'],
+            readonly: [],
+          },
+        },
+      },
+    };
+    const handoff = {
+      target_scope: 'readonly',
+      parent_profile: parentProfile,
+    };
+    const ctx = {
+      env: { STRIPE_MASTER: 'sk_test_handoff_master_key_1234' },
+      cwd: '/tmp',
+    };
+    const result = await stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+    assert.strictEqual(result.prepared, true);
+    assert.strictEqual(result.session.credentials.api_key.scope, 'readonly');
+    assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_child_handoff_secret_val');
+    assert.strictEqual(result.session.provider_assertions.key_strategy, 'dynamic');
+    assert.strictEqual(result.session.provider_assertions.stripe_key_id, 'rk_test_child_handoff_id');
+    assert.strictEqual(result.session.provider_assertions.parent_scope, 'full');
+    assert.ok(result.session.refresh.expires_at);
+    assert.strictEqual(result.session.handoff.mode, 'downscope');
+    assert.strictEqual(result.session.handoff.prepared, true);
+    assert.strictEqual(result.session.delegation_chain.length, 2);
+    assert.ok(result.session.delegation_chain[1].grant.includes('downscope:full->readonly'));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('stripe-api-key prepareHandoff dynamic: unreachable scope still fails', async () => {
+  const parentSession = {
+    credentials: {
+      api_key: { kind: 'bearer', value: 'rk_test_readonly_only_key_123', scope: 'readonly' },
+    },
+    delegation_chain: [],
+  };
+  const parentProfile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER' },
+        scope_hierarchy: {
+          full: ['readonly'],
+          readonly: [],
+        },
+      },
+    },
+  };
+  const handoff = { target_scope: 'full', parent_profile: parentProfile };
+  const ctx = { env: { STRIPE_MASTER: 'sk_test_handoff_unreachable_key' }, cwd: '/tmp' };
+  const result = await stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+  assert.strictEqual(result.prepared, false);
+  assert.ok(/not reachable/.test(result.error));
+});
+
+test('stripe-api-key prepareHandoff dynamic: API failure during minting returns error', async () => {
+  const mock = await createMockStripeServer((req, res, _body) => {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Service unavailable' } }));
+  });
+
+  try {
+    const parentSession = {
+      credentials: {
+        api_key: { kind: 'bearer', value: 'rk_test_parent_api_fail_key12', scope: 'full' },
+      },
+      delegation_chain: [],
+    };
+    const parentProfile = {
+      auth: {
+        provider_config: {
+          key_strategy: 'dynamic',
+          account_mode: 'test',
+          api_base: mock.baseUrl,
+          master_key_source: { env: 'STRIPE_MASTER' },
+          scope_hierarchy: { full: ['readonly'], readonly: [] },
+        },
+      },
+    };
+    const handoff = { target_scope: 'readonly', parent_profile: parentProfile };
+    const ctx = { env: { STRIPE_MASTER: 'sk_test_handoff_api_fail_master' }, cwd: '/tmp' };
+    const result = await stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
+    assert.strictEqual(result.prepared, false);
+    assert.ok(/Service unavailable/.test(result.error));
+  } finally {
+    await mock.close();
+  }
+});
+
+// -- validateProfile: dynamic strategy additional validation --
+
+test('stripe-api-key validateProfile: dynamic with valid api_base passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        api_base: 'https://api.stripe.com',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: dynamic with http api_base passes (for testing)', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        api_base: 'http://localhost:12111',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: dynamic with invalid api_base fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        api_base: 'not-a-url',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /api_base/.test(e)));
+});
+
+test('stripe-api-key validateProfile: dynamic with ftp api_base fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        api_base: 'ftp://stripe.com/v1',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /protocol/.test(e)));
+});
+
+test('stripe-api-key validateProfile: dynamic with valid default_expiry_buffer_s passes', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        default_expiry_buffer_s: 600,
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('stripe-api-key validateProfile: dynamic with zero default_expiry_buffer_s fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        default_expiry_buffer_s: 0,
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /default_expiry_buffer_s/.test(e)));
+});
+
+test('stripe-api-key validateProfile: dynamic with negative default_expiry_buffer_s fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        default_expiry_buffer_s: -100,
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /default_expiry_buffer_s/.test(e)));
+});
+
+test('stripe-api-key validateProfile: dynamic with non-number default_expiry_buffer_s fails', () => {
+  const profile = {
+    auth: {
+      provider_config: {
+        key_strategy: 'dynamic',
+        account_mode: 'test',
+        master_key_source: { env: 'STRIPE_MASTER_KEY' },
+        default_expiry_buffer_s: 'five',
+      },
+    },
+  };
+  const result = stripeApiKeyProvider.validateProfile(profile, {});
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(e => /default_expiry_buffer_s/.test(e)));
+});
+
+// -- materialize: dynamic session sets cleanup_required --
+
+test('stripe-api-key materialize: dynamic session sets cleanup_required true', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'rk_test_dynamic_mat_key_value',
+        scope: 'readonly',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'dynamic',
+      account_mode: 'test',
+      scope: 'readonly',
+      stripe_key_id: 'rk_test_mat_key_id',
+    },
+  };
+  const result = stripeApiKeyProvider.materialize(session, {}, {});
+  assert.strictEqual(result.materialized, true);
+  assert.strictEqual(result.cleanup_required, true);
+  assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'rk_test_dynamic_mat_key_value');
+});
+
+// -- describeSession: dynamic session masks key and preserves stripe_key_id --
+
+test('stripe-api-key describeSession: dynamic session masks key but keeps metadata', () => {
+  const session = {
+    provider: 'stripe-api-key',
+    credentials: {
+      api_key: {
+        kind: 'bearer',
+        value: 'rk_test_dynamic_desc_key_value_xyz',
+        scope: 'readonly',
+      },
+    },
+    provider_assertions: {
+      key_strategy: 'dynamic',
+      account_mode: 'test',
+      scope: 'readonly',
+      stripe_key_id: 'rk_test_desc_key_id',
+      api_base: 'https://api.stripe.com',
+    },
+  };
+  const described = stripeApiKeyProvider.describeSession(session, {});
+  assert.strictEqual(described.credentials.api_key.value, 'rk_test_..._xyz');
+  assert.strictEqual(described.provider_assertions.stripe_key_id, 'rk_test_desc_key_id');
+  assert.strictEqual(described.provider_assertions.key_strategy, 'dynamic');
+});
+
+// ---------------------------------------------------------------------------
+// task.verify -- validation tests
+// ---------------------------------------------------------------------------
+
+test('validate: valid verify block passes validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'test -f /tmp/output.txt', timeout_seconds: 15, on_failure: 'warn' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.errors.length, 0);
+});
+
+test('validate: verify with only shell passes (defaults for timeout and on_failure)', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'echo ok' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+});
+
+test('validate: verify missing shell fails validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { timeout_seconds: 10 }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('verify.shell')));
+});
+
+test('validate: verify empty shell fails validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: '  ' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('verify.shell')));
+});
+
+test('validate: verify invalid on_failure fails validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'echo ok', on_failure: 'retry' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('verify.on_failure') && e.message.includes('error, warn')));
+});
+
+test('validate: verify invalid timeout_seconds fails validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'echo ok', timeout_seconds: 0 }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.errors.some(e => e.path.includes('verify.timeout_seconds')));
+});
+
+test('validate: workflow-level verify passes validation', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      verify: { shell: 'test -d /tmp/workspace' },
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const result = validateManifest(manifest);
+  assert.strictEqual(result.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// task.verify -- compiler/shared resolveVerify tests
+// ---------------------------------------------------------------------------
+
+test('resolveVerify: returns null when neither workflow nor task has verify', () => {
+  const result = resolveVerify({}, {});
+  assert.strictEqual(result, null);
+});
+
+test('resolveVerify: task verify overrides workflow verify', () => {
+  const workflow = { verify: { shell: 'wf-check', timeout_seconds: 10, on_failure: 'warn' } };
+  const task = { verify: { shell: 'task-check' } };
+  const result = resolveVerify(workflow, task);
+  assert.strictEqual(result.shell, 'task-check');
+  assert.strictEqual(result.timeout_seconds, 30); // default since task didn't set it
+  assert.strictEqual(result.on_failure, 'error'); // default since task didn't set it
+});
+
+test('resolveVerify: falls back to workflow verify when task has none', () => {
+  const workflow = { verify: { shell: 'wf-check', timeout_seconds: 60, on_failure: 'warn' } };
+  const task = {};
+  const result = resolveVerify(workflow, task);
+  assert.strictEqual(result.shell, 'wf-check');
+  assert.strictEqual(result.timeout_seconds, 60);
+  assert.strictEqual(result.on_failure, 'warn');
+});
+
+test('resolveVerify: applies defaults for timeout_seconds and on_failure', () => {
+  const result = resolveVerify({}, { verify: { shell: 'echo ok' } });
+  assert.strictEqual(result.shell, 'echo ok');
+  assert.strictEqual(result.timeout_seconds, 30);
+  assert.strictEqual(result.on_failure, 'error');
+});
+
+// ---------------------------------------------------------------------------
+// task.verify -- compilation: verify fields flow to scheduler spec
+// ---------------------------------------------------------------------------
+
+test('compilation: verify fields appear in compiled scheduler job', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'test -f /tmp/result.json', timeout_seconds: 45, on_failure: 'warn' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.verify_shell, 'test -f /tmp/result.json');
+  assert.strictEqual(job.verify_timeout_s, 45);
+  assert.strictEqual(job.verify_on_failure, 'warn');
+});
+
+test('compilation: verify fields are null when not declared', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.verify_shell, null);
+  assert.strictEqual(job.verify_timeout_s, null);
+  assert.strictEqual(job.verify_on_failure, null);
+});
+
+test('compilation: workflow-level verify flows through to scheduler job', () => {
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'w', name: 'W',
+      verify: { shell: 'wf-check', timeout_seconds: 20 },
+      tasks: [{
+        id: 't', name: 'T',
+        prompt: 'do stuff',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  const job = compiled.jobs[0];
+  assert.strictEqual(job.verify_shell, 'wf-check');
+  assert.strictEqual(job.verify_timeout_s, 20);
+  assert.strictEqual(job.verify_on_failure, 'error');
+});
+
+// ---------------------------------------------------------------------------
+// task.verify -- scheduler fields include verify
+// ---------------------------------------------------------------------------
+
+test('SCHEDULER_FIELDS_V02 includes verify fields', () => {
+  assert.ok(SCHEDULER_FIELDS_V02.includes('verify_shell'), 'verify_shell missing from V02');
+  assert.ok(SCHEDULER_FIELDS_V02.includes('verify_timeout_s'), 'verify_timeout_s missing from V02');
+  assert.ok(SCHEDULER_FIELDS_V02.includes('verify_on_failure'), 'verify_on_failure missing from V02');
+});
+
+// ---------------------------------------------------------------------------
+// task.verify -- execution tests
+// ---------------------------------------------------------------------------
+
+test('exec verify: succeeds when verify command exits 0', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'true' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+  assert.strictEqual(result.verify.exit_code, 0);
+});
+
+test('exec verify: on_failure=error throws verify_failed', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'exit 1', on_failure: 'error' }
+      }]
+    }]
+  };
+  assert.throws(
+    () => executeTask(manifest, { taskId: 't' }),
+    (err) => {
+      assert.strictEqual(err.code, 'verify_failed');
+      assert.ok(err.verify);
+      assert.strictEqual(err.verify.passed, false);
+      assert.strictEqual(err.verify.exit_code, 1);
+      return true;
+    }
+  );
+});
+
+test('exec verify: on_failure=warn adds warning but returns ok', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'exit 1', on_failure: 'warn' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.warnings.some(w => w.includes('Verify command failed')));
+});
+
+test('exec verify: not run when shell command fails', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'sh', args: ['-c', 'exit 2'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'echo should-not-run', on_failure: 'error' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.verify, null);
+});
+
+test('exec verify: null when no verify block declared', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' }
+      }]
+    }]
+  };
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.verify, null);
+});
+
+test('exec verify: v0.1 uses task cwd and shell env', () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'agentcli-verify-v1-'));
+  const workDir = join(tmpRoot, 'workspace');
+  mkdirSync(workDir);
+
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'sh',
+          args: ['-c', 'printf ok > marker.txt'],
+          cwd: workDir,
+          env: {
+            VERIFY_TOKEN: 'from-shell-env',
+          },
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'test "$VERIFY_TOKEN" = "from-shell-env" && test -f marker.txt' }
+      }]
+    }]
+  };
+
+  const result = executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+});
+
+test('exec verify: respects strict sandbox enforcement on supported darwin runners', () => {
+  const support = resolveSandboxSupport();
+  if (process.platform !== 'darwin' || !support) {
+    return;
+  }
+
+  const workdir = mkdtempSync(join(tmpdir(), 'agentcli-verify-sandbox-'));
+  const outsideRoot = process.env.HOME && !process.env.HOME.startsWith(tmpdir())
+    ? process.env.HOME
+    : process.cwd();
+  const deniedPath = join(outsideRoot, `agentcli-verify-denied-${Date.now()}.txt`);
+
+  try {
+    rmSync(deniedPath, { force: true });
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: {
+            program: 'sh',
+            args: ['-lc', 'printf ok > allowed.txt'],
+            cwd: workdir,
+            env: { TARGET: deniedPath },
+          },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { sandbox: 'strict', network: 'none', audit: 'none' },
+          verify: { shell: 'printf blocked > "$TARGET"' },
+        }]
+      }]
+    };
+
+    assert.throws(
+      () => executeTask(manifest, { taskId: 't' }),
+      (err) => {
+        assert.strictEqual(err.code, 'verify_failed');
+        return true;
+      }
+    );
+    assert.ok(!existsSync(deniedPath));
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(deniedPath, { force: true });
+  }
+});
+
+test('exec verify: v0.2 path verify succeeds', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'none-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/verify' }
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { ref: 'none-profile' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['v2-hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'true', timeout_seconds: 5 }
+      }]
+    }]
+  };
+  const result = await executeTask(manifest, { taskId: 't' });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+});
+
+test('exec verify: v0.2 uses task cwd and materialized env', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'agentcli-verify-v2-'));
+  const workDir = join(tmpRoot, 'workspace');
+  mkdirSync(workDir);
+
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'verify-env-profile',
+      provider: 'env-bearer',
+      subject: { kind: 'service', principal: 'agent://test/verify-env' },
+      auth: {
+        mode: 'service',
+        provider_config: {
+          token_env: 'SOURCE_VERIFY_TOKEN',
+        },
+      },
+      presentation: {
+        bindings: [{
+          source: 'credentials.access_token.value',
+          target: {
+            kind: 'env',
+            name: 'VERIFY_TOKEN',
+          },
+        }],
+      },
+      trust: { level: 'supervised' },
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'sh',
+          args: ['-c', 'printf ok > marker.txt'],
+          cwd: workDir,
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        identity: { ref: 'verify-env-profile' },
+        verify: { shell: 'test "$VERIFY_TOKEN" = "token-from-identity" && test -f marker.txt' }
+      }]
+    }]
+  };
+
+  const result = await executeTask(manifest, {
+    taskId: 't',
+    env: {
+      ...process.env,
+      SOURCE_VERIFY_TOKEN: 'token-from-identity',
+    },
+  });
+
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.verify);
+  assert.strictEqual(result.verify.passed, true);
+});
+
+test('exec verify: v0.2 path verify failure with on_failure=error throws', async () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'none-profile',
+      provider: 'none',
+      subject: { kind: 'service', principal: 'agent://test/verify' }
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      identity: { ref: 'none-profile' },
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'echo', args: ['v2-hello'] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'exit 1', on_failure: 'error' }
+      }]
+    }]
+  };
+  await assert.rejects(
+    () => executeTask(manifest, { taskId: 't' }),
+    (err) => {
+      assert.strictEqual(err.code, 'verify_failed');
+      return true;
+    }
+  );
 });

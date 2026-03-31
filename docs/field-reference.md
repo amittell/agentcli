@@ -42,6 +42,7 @@ constraints). When in doubt, the source code is authoritative.
 | `authorization` | object | No | Authorization reference (v0.2). See [Authorization Reference Fields](#authorization-reference-fields). |
 | `evidence` | object | No | Evidence reference (v0.2). See [Evidence Reference Fields](#evidence-reference-fields). |
 | `child_credential_policy` | string | No | Child credential flow policy for triggered children. See [Child Credential Policy Fields](#child-credential-policy-fields). |
+| `verify` | object | No | Post-success verification command. See [Task Verify Fields](#task-verify-fields). |
 
 ---
 
@@ -74,6 +75,7 @@ constraints). When in doubt, the source code is authoritative.
 | `authorization` | object | No | Authorization reference (v0.2). See [Authorization Reference Fields](#authorization-reference-fields). |
 | `evidence` | object | No | Evidence reference (v0.2). See [Evidence Reference Fields](#evidence-reference-fields). |
 | `child_credential_policy` | string | No | Child credential flow policy for triggered children. See [Child Credential Policy Fields](#child-credential-policy-fields). |
+| `verify` | object | No | Post-success verification command. See [Task Verify Fields](#task-verify-fields). |
 | `on_failure` | object | No | Failure handler shorthand. See [On-Failure Fields](#on-failure-fields). |
 | `delete_after_run` | boolean | No | Remove the compiled job after first successful execution. |
 
@@ -272,6 +274,22 @@ When `ref` is present, the referenced profile is loaded first, then inline field
 |-------|------|----------|--------|-------------|
 | `child_credential_policy` | string | No | `none`, `inherit`, `downscope`, `independent` | Controls how a child task receives or derives credentials relative to its parent. Workflow-level values act as defaults for tasks. |
 
+`child_credential_policy: "downscope"` is validated as a capability warning when a backend lacks `credential_handoff`: the scheduler can still persist the job, but child narrowing will not be enforceable at dispatch. This is intentionally softer than `identity.presentation.handoff != "none"`, which is a hard compatibility requirement because the active runtime/backend must advertise explicit handoff semantics up front.
+
+---
+
+## Task Verify Fields
+
+Runs a shell command after the main task succeeds. Workflow-level `verify` acts as the default for tasks; a task-level `verify` replaces the workflow block and omitted optional fields fall back to built-in defaults.
+
+In the v0.2 execution pipeline, `verify` runs after evidence generation. Evidence and attestation therefore describe the main command result; the `verify` outcome is recorded separately and can still flip the final task status according to `on_failure`. If operators need end-to-end proof that includes the verification step, model that requirement in the evidence payload rather than assuming `verify` is part of the attested result.
+
+| Field | Type | Required | Values | Description |
+|-------|------|----------|--------|-------------|
+| `shell` | string | Yes | -- | Shell command to run after a successful task execution. |
+| `timeout_seconds` | integer | No | `>= 1` | Timeout for the verify command. Default: `30`. |
+| `on_failure` | string | No | `error`, `warn` | Whether a verify failure should fail the task or be surfaced as a warning. Default: `error`. |
+
 ### Identity Subject Fields
 
 | Field | Type | Required | Values | Description |
@@ -331,6 +349,8 @@ When `ref` is present, the referenced profile is loaded first, then inline field
 | `handoff` | string | No | `none`, `downscope`, `transaction-token` | Credential handoff mode at task boundaries. |
 | `cleanup` | string | No | `always`, `on-success`, `on-failure`, `never` | When credential cleanup runs. |
 | `default_redaction` | boolean | No | -- | Whether credential values are redacted by default in audit output. |
+
+`identity.presentation.handoff` is stricter than `child_credential_policy`: any non-`none` handoff mode requires explicit `credential_handoff` support from the active runtime/backend during capability negotiation, because the handoff boundary itself must be modeled first-class.
 
 ### Identity Presentation Bindings
 

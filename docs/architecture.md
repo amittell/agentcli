@@ -68,6 +68,7 @@ Each provider file auto-registers with its registry on import (side-effect regis
 - **Phase 4.5: Authorization** (optional) -- invoke external policy engine (OPA, Cedar, Topaz) when an authorization block is configured. Decisions: `permit`, `deny`, `require-escalation`. Skipped entirely when no authorization block resolves for the task.
 - **Phase 5: Execution** -- run the tool, capture stdout/stderr/exit code/duration, compute hashes.
 - **Phase 6: Evidence Generation** -- build canonical evidence payload, attest execution, verify evidence if required.
+- **Phase 6.5: Post-exec Verify** (optional) -- run `workflow.verify` / `task.verify` after a successful command. This is an operator-local postcondition check recorded separately from evidence; verify failures can still fail the task or downgrade to warnings according to `verify.on_failure`.
 - **Phase 7: Audit** -- write structured append-only audit record with declared/resolved identity, authorization proof summary, delegation chain, trust level, authorization decision, and runtime instance attribution.
 - **Phase 8: Cleanup** -- delete temporary files, destroy ephemeral materialization and derived handoff credentials.
 
@@ -84,6 +85,46 @@ The architecture composes with emerging standards rather than inventing new prot
 - **IETF AIMS** (`draft-klrc-aiagent-auth-00`) -- the six-layer model maps to the AIMS reference layers (Identifier, Credentials, Attestation, Provisioning, Authentication, Authorization, Monitoring). Manifest authorization proof and credential presentation extend beyond AIMS scope.
 - **SPIFFE/WIMSE** -- identity profiles use URI-formatted principals (`agent://`, `spiffe://`) for interoperability with workload identity infrastructure.
 - **OAuth 2.0** -- auth modes map to standard grant types: `service` (Client Credentials), `delegated` (Authorization Code), `on-behalf-of` (JWT Authorization Grant, RFC 7523), `exchange` (Token Exchange, RFC 8693).
+
+### Scheduler/Child Trust Boundary
+
+The six-layer identity model enables a meaningful trust boundary between
+the scheduler and its child tasks, but only when the child is configured
+to be narrower than the parent.
+
+The credential flow traces through four control surfaces:
+
+1. **Operator provisions** -- credentials enter the system via env vars,
+   Vault, managed identity, or files. The operator controls
+   `SCHEDULER_PROVIDER_PATH` and the scheduler's execution environment.
+2. **Scheduler resolves** -- at dispatch time, the scheduler calls the
+   identity provider to resolve a credential session. Trust evaluation
+   and authorization gates run before any credential is materialized.
+3. **Provider narrows** -- when `child_credential_policy` is `downscope`,
+   the provider mints a per-task restricted key via the credential
+   issuer's API, scoped to exactly the permissions the child declared.
+   Scope hierarchy validation ensures the child cannot escalate.
+   The key is revoked in cleanup.
+4. **Child receives scoped creds** -- the child task runs with only the
+   narrowed credentials. For shell tasks, these are injected as env vars.
+   For agent tasks, auth-profile forwarding directs the gateway to use
+   the appropriate profile.
+
+**Trust boundary definition:** the operator controls the scheduler env
+and provider directory. Everything downstream narrows only. A child
+MUST NOT receive broader credentials than its parent. If the provider
+directory or scheduler env is compromised, the trust model is broken --
+these are root-of-trust assumptions, not runtime invariants.
+
+**Credential strategies:** the current implementation supports both
+precreated keys (operator creates restricted keys ahead of time, provider
+resolves by scope name) and dynamic key minting (provider mints a
+per-task restricted key via the credential issuer's API and revokes it on
+cleanup). Both use the same manifest syntax; the provider's
+`key_strategy` configuration determines which path runs.
+
+For the full trust architecture with concrete guarantees and
+non-guarantees, see `openclaw-scheduler/docs/trust-architecture.md`.
 
 ## Near-Term Roadmap
 
