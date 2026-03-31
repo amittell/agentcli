@@ -37,8 +37,8 @@
   "files": [
     "bin",
     "docs",
+    "!docs/superpowers",
     "examples",
-    "skills",
     "src",
     "AGENTS.md",
     "CONTEXT.md",

@@ -7061,7 +7061,7 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'primary.failure');
-  const failureSpec = calls.find(spec => spec.name === 'Apply Proof Failure: Handle Failure');
+  const failureSpec = calls.find(spec => spec.name === 'Handle Failure');
   assert.ok(failureSpec);
   assert.strictEqual('authorization_proof' in failureSpec, false);
   assert.strictEqual('authorization_proof_verification' in failureSpec, false);

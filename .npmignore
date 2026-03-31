@@ -1,0 +1,15 @@
+# Test files
+test/
+*.test.js
+
+# Internal design specs
+docs/superpowers/
+
+# Skills (plugin system, not part of the published package)
+skills/
+
+# Dev tooling
+.github/
+.claude/
+.eslintrc*
+eslint.config.*

@@ -213,6 +213,12 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
   const jobs = [];
   const explain = [];
   const targetErrors = [];
+  // Single-workflow manifests skip the workflow name prefix on compiled job
+  // names. This keeps names clean for the common case and makes --adopt-by
+  // name work with existing scheduler jobs. Multi-workflow manifests include
+  // the prefix to avoid name collisions between workflows.
+  const useNamePrefix = expanded.workflows.length > 1;
+
   for (const [workflowIndex, workflow] of expanded.workflows.entries()) {
     const taskIdToJobId = new Map();
     for (const task of workflow.tasks) {
@@ -221,7 +227,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
     for (const [taskIndex, task] of workflow.tasks.entries()) {
       const taskPath = `$.workflows[${workflowIndex}].tasks[${taskIndex}]`;
-      const plan = normalizedTaskPlan(workflow, task, taskIdToJobId);
+      const plan = normalizedTaskPlan(workflow, task, taskIdToJobId, { namePrefix: useNamePrefix });
       const isTriggered = plan.invocation.mode === 'trigger';
       const outputPolicy = schedulerOutputPolicy(plan);
       const identityProfile = plan.identity?.ref

@@ -1,0 +1,103 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "betting-pipeline",
+      "name": "Betting Pipeline",
+      "tasks": [
+        {
+          "id": "nightly-scores",
+          "name": "Nightly Score Capture",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "scores"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "30 0 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "auto-settle",
+          "name": "Auto-Settle Bets",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "settle"]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "nightly-scores", "on": "success" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "clv-update",
+          "name": "CLV Update",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "clv"]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "auto-settle", "on": "success" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "daily-card",
+          "name": "Daily Betting Card",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "card", "--sport", "all"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 13 * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "early-lines",
+          "name": "Early Lines Detection (6 AM)",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "early"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "10 6 * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "line-capture",
+          "name": "Line Capture (4x daily)",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "lines"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 8,12,16,20 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "morning-edges",
+          "name": "Morning NCAAB/NBA Edge Scan",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "edges"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 9 * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "weekly-ratings",
+          "name": "Weekly Power Ratings Refresh",
+          "shell": {
+            "program": "python3",
+            "args": ["/Users/alexm/.openclaw/scripts/pipeline/pipeline.py", "ratings"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 8 * * 1", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" }
+        }
+      ]
+    }
+  ]
+}

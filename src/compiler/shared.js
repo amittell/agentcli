@@ -519,7 +519,7 @@ export function resolveVerify(workflow, task) {
   };
 }
 
-export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
+export function normalizedTaskPlan(workflow, task, taskIdToCompiledId, { namePrefix = true } = {}) {
   const modelPolicy = resolveModelPolicy(workflow, task);
   const identity = resolveIdentity(workflow, task);
   const contract = resolveContract(workflow, task);
@@ -535,7 +535,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId) {
       workflow_id: workflow.id,
       task_id: task.id,
     },
-    name: `${workflow.name}: ${task.name}`,
+    name: namePrefix ? `${workflow.name}: ${task.name}` : task.name,
     enabled: task.enabled ?? true,
     invocation: taskInvocationForTask(task),
     execution: {

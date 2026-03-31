@@ -97,6 +97,44 @@ Add:
 
 This is the best path if your users interact through agents.
 
+## Manifest Structure: One Concern Per Manifest
+
+The recommended pattern is one manifest per operational concern:
+
+```
+manifests/
+  betting-pipeline.json     # scores, settle, CLV, card, lines, edges, ratings
+  fitness.json              # withings, peloton, tonal, apple health, reminders
+  infra-health.json         # gateway check, telegram check, stuck run detector
+  backups.json              # workspace backup, minio snapshot + rollup
+```
+
+Each manifest is applied independently. Changes to the betting pipeline don't touch fitness jobs. You can version, review, and roll back each concern separately.
+
+This is the same principle as terraform modules or kubernetes manifests per service: small, focused units of configuration that compose through convention, not through a single monolithic file.
+
+### Why not multi-workflow manifests?
+
+Multi-workflow manifests (multiple `workflows` entries in one file) are supported but not recommended. The problems:
+
+- **Blast radius**: `agentcli apply mega-manifest.json` touches every job on the host. A typo in the betting section can disable fitness jobs.
+- **Review friction**: PRs that touch the mega-manifest require reviewers to understand all workflows, not just the one that changed.
+- **Rollback granularity**: you cannot roll back one workflow without rolling back all of them.
+
+### Sharing configuration across manifests
+
+If multiple manifests need the same identity profiles or delivery targets, prefer convention over coupling:
+
+- Use the same profile id across manifests (e.g., `"stripe-service"` in both `betting-pipeline.json` and `stripe-ops.json`). The profiles are resolved at compile time from the manifest that declares them.
+- Use delivery aliases (`"@owner_dm"`) that the scheduler resolves at runtime, so manifests don't hardcode chat IDs.
+- If you need shared profiles across many manifests, extract them into a base file and merge at apply time with a simple script or CI step.
+
+### Name handling for adoption
+
+Single-workflow manifests compile task names without a workflow prefix (e.g., `"Nightly Score Capture"` not `"Betting Pipeline: Nightly Score Capture"`). This makes `--adopt-by name` work seamlessly with existing scheduler jobs.
+
+Multi-workflow manifests include the prefix to avoid name collisions between workflows.
+
 ## Adoption Risks
 
 The main current risks are:

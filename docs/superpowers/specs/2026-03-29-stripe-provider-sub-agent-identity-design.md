@@ -402,7 +402,7 @@ Use option 2 when available (avoids redundant Vault/API calls). Fall back to opt
 
 ```bash
 # In scheduler startup script or systemd unit:
-source ~/git/kebabrack-lab/scripts/vault-env.sh
+# (source your Vault auth helper if needed, e.g. vault login or env setup)
 export STRIPE_KEY_FULL=$(vault kv get -field=api_key secret/apps/stripe/full)
 export STRIPE_KEY_PAYMENTS=$(vault kv get -field=api_key secret/apps/stripe/payments)
 export STRIPE_KEY_READONLY=$(vault kv get -field=api_key secret/apps/stripe/readonly)

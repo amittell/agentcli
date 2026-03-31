@@ -14,6 +14,8 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
   const workflows = [];
   const explain = [];
 
+  const useNamePrefix = expanded.workflows.length > 1;
+
   for (const workflow of expanded.workflows) {
     const taskIdToCompiledId = new Map();
     for (const task of workflow.tasks) {
@@ -23,7 +25,7 @@ export function compileManifestToStandalone(manifest, { includeExplain = false }
     const tasks = [];
     const edges = [];
     for (const task of workflow.tasks) {
-      const plan = normalizedTaskPlan(workflow, task, taskIdToCompiledId);
+      const plan = normalizedTaskPlan(workflow, task, taskIdToCompiledId, { namePrefix: useNamePrefix });
       tasks.push(plan);
       if (plan.invocation.mode === 'trigger') {
         edges.push({
