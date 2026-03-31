@@ -191,6 +191,26 @@ The main current risks are:
 - only one production-grade runtime adapter exists today
 - some backend-specific areas, especially approvals, still need richer negotiation
 
+### Avoiding heavy single-prompt jobs
+
+A common antipattern: one isolated agent task that asks the model to do many things in sequence ("check all 6 k8s environments, review deployments, summarize findings"). The agent makes many tool calls, each taking seconds, and eventually the model provider times out.
+
+**Break heavy agent work into shell pre-checks and a final agent summary:**
+
+```
+k8s-health-prod (shell) ─┐
+k8s-health-staging (shell)├─→ morning-summary (isolated, trigger: all complete)
+deploy-check (shell)     ─┘
+```
+
+The shell tasks run fast (1-2s each), collect the raw data, and the agent's only job is to read the outputs and write a concise summary. This avoids model provider timeouts, makes each step independently retriable, and gives the operator visibility into which step fails.
+
+Rules of thumb:
+- If a task requires more than 2-3 tool calls, break it into shell pre-checks
+- Shell tasks are 10-100x faster than agent tasks and never time out on model providers
+- Use agent tasks for synthesis and judgment, not data collection
+- Sync main session tasks should complete in under 10 seconds to avoid blocking interactive DMs
+
 ## Why It Still Has Value Before Broad Adoption
 
 Even with one runtime adapter, `agentcli` already gives a useful internal standard:

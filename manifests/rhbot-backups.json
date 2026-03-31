@@ -1,0 +1,44 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "backups",
+      "name": "Backups",
+      "tasks": [
+        {
+          "id": "workspace-backup",
+          "name": "Hourly Workspace Backup",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/backup.sh"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 8-23 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "minio-snapshot",
+          "name": "MinIO Config Snapshot",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/minio-backup.sh", "snapshot"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/30 8-23 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 180000 }
+        },
+        {
+          "id": "minio-rollup",
+          "name": "MinIO Config Rollup",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/minio-backup.sh", "rollup"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 * * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 180000 }
+        }
+      ]
+    }
+  ]
+}

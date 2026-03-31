@@ -1,0 +1,87 @@
+{
+  "version": "0.2",
+  "workflows": [
+    {
+      "id": "daily-ops",
+      "name": "Daily Ops",
+      "tasks": [
+        {
+          "id": "workspace-audit",
+          "name": "Daily Workspace Audit",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/md-audit.sh"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 6 * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "k8s-health-prod",
+          "name": "K8s Health Check (prod)",
+          "shell": {
+            "program": "bash",
+            "args": [
+              "-c",
+              "echo '=== prod ===' && kubectl --context prod get pods -A --field-selector status.phase!=Running 2>/dev/null | head -20 || echo 'check failed: prod unreachable'"
+            ]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 9 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" },
+          "runtime": { "timeout_ms": 30000 }
+        },
+        {
+          "id": "k8s-health-other",
+          "name": "K8s Health Check (dev/qa/demo)",
+          "shell": {
+            "program": "bash",
+            "args": [
+              "-c",
+              "for ctx in dev qa demo; do echo \"=== $ctx ===\"; kubectl --context \"$ctx\" get pods -A --field-selector status.phase!=Running 2>/dev/null | head -10 || echo \"check failed: $ctx unreachable\"; done"
+            ]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "k8s-health-prod", "on": "complete" },
+          "reliability": { "overlap_policy": "skip" },
+          "runtime": { "timeout_ms": 60000 }
+        },
+        {
+          "id": "deploy-check",
+          "name": "Recent Deployment Check (prod)",
+          "shell": {
+            "program": "bash",
+            "args": [
+              "-c",
+              "echo '=== recent deployments (prod) ===' && kubectl --context prod rollout history deployment -A 2>/dev/null | tail -20 || echo 'No recent deployments or prod unreachable'"
+            ]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "k8s-health-other", "on": "complete" },
+          "reliability": { "overlap_policy": "skip" },
+          "runtime": { "timeout_ms": 30000 }
+        },
+        {
+          "id": "morning-summary",
+          "name": "Morning Status Summary",
+          "prompt": "You are writing the daily morning status summary for the team. Read the outputs from the preceding pipeline steps (k8s-health-prod, k8s-health-other, deploy-check). Summarize the health of each environment (prod, dev, qa, demo) and any recent deployments. Flag anything that needs attention. If all environments are healthy, say so briefly. Keep the summary concise and actionable -- this is delivered to the team Telegram group.",
+          "target": { "session_target": "isolated" },
+          "trigger": { "parent": "deploy-check", "on": "success" },
+          "delivery": { "mode": "announce-always", "channel": "telegram", "to": "-1003892419349" },
+          "reliability": { "overlap_policy": "skip" },
+          "runtime": { "timeout_ms": 120000 }
+        },
+        {
+          "id": "memory-compression",
+          "name": "Memory Compression",
+          "prompt": "Perform memory compression. Read all daily log files in memory/ older than 14 days. For each: if >50 lines, compress to ~5 key bullet points preserving dates, decisions, and action items. Write compressed version back. Report count of files compressed.",
+          "target": { "session_target": "isolated" },
+          "schedule": { "cron": "0 3 * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip" },
+          "runtime": { "timeout_ms": 600000 }
+        }
+      ]
+    }
+  ]
+}

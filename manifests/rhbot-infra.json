@@ -1,0 +1,69 @@
+{
+  "version": "0.1",
+  "workflows": [
+    {
+      "id": "infra-health",
+      "name": "Infrastructure Health",
+      "tasks": [
+        {
+          "id": "529-recovery",
+          "name": "Chilisaus 529 Recovery",
+          "shell": {
+            "program": "node",
+            "args": ["/Users/alexm/.openclaw/scheduler/dispatch/529-recovery.mjs"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/10 * * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 60000 }
+        },
+        {
+          "id": "deploy-drift",
+          "name": "Deploy Drift Check",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/requesthub/scripts/check-deploy-drift.sh"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/5 * * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 90000 }
+        },
+        {
+          "id": "gateway-liveness",
+          "name": "rh-bot Gateway Liveness Check",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/rh-bot-gateway-health-check.sh"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/4 * * * *", "tz": "America/New_York" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 120000 }
+        },
+        {
+          "id": "stuck-run-detector",
+          "name": "Stuck Run Detector",
+          "shell": {
+            "program": "bash",
+            "args": ["/Users/alexm/.openclaw/scripts/stuck-detector.sh"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/10 * * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 30000 }
+        },
+        {
+          "id": "long-task-checkin",
+          "name": "Long Task Check-in",
+          "shell": {
+            "program": "node",
+            "args": ["/Users/alexm/.openclaw/workspace/scripts/check-long-tasks.mjs"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "*/5 * * * *", "tz": "America/New_York" },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "484946046" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 30000 }
+        }
+      ]
+    }
+  ]
+}
