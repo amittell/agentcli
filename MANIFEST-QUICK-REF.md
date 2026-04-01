@@ -93,6 +93,18 @@ Copy-paste patterns for common agentcli manifests.
 - **announce**: Deliver on error only.
 - **none**: Silent.
 
+## Examples with identity and credentials (v0.2)
+
+For tasks that need API keys or scoped credentials:
+
+- **[stripe-ops.json](examples/stripe-ops.json)** -- Stripe CLI wrapping: charge listing, refunds, balance checks with scoped API keys (full, payments, readonly) and scope-hierarchy downscoping for child tasks.
+- **[stripe-projects.json](examples/stripe-projects.json)** -- Stripe Projects: credential sync, status checks, and database migrations with two identity profiles at different trust levels.
+- **[identity-v2.json](examples/identity-v2.json)** -- Minimal v0.2 identity profile with env-bearer provider.
+- **[trust-enforcement.json](examples/trust-enforcement.json)** -- Trust level enforcement with contract boundaries.
+- **[authorization-proof.json](examples/authorization-proof.json)** -- JWT-based authorization proof verification.
+
+These use v0.2 features: `identity_profiles`, `trust`, `contract`, `child_credential_policy`, and `presentation` bindings.
+
 ## Commands
 
 ```bash
