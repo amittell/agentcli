@@ -231,6 +231,7 @@ For the full guide: [Identity Setup](docs/guide-identity.md) | [Wrapping CLI Too
 | `gcp-workload-identity` | Acquires a token from the GCP metadata server. Works on Compute Engine, Cloud Run, and GKE. |
 | `spiffe-jwt-svid` | Acquires a JWT-SVID from the SPIFFE Workload API or a projected volume file. Works in SPIFFE-enabled Kubernetes clusters. |
 | `entra-agent-id` | Acquires a token via Microsoft Entra Agent ID using JWT bearer client assertion. Supports Agent Registry, Conditional Access, and IMDS fallback. |
+| `stripe-api-key` | Resolves Stripe API keys with scope-aware permissions. Supports precreated restricted keys by scope name and dynamic key minting via the Stripe API. |
 
 Use `agentcli identity providers` to list registered providers and `agentcli identity schema <provider>` to inspect the current provider metadata surface, including capabilities.
 

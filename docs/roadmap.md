@@ -33,7 +33,7 @@
 - Enterprise identity providers: `azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`
 - Comprehensive v0.2 profile validation with cross-reference checks for dangling refs
 - Converter produces proper identity profile refs (not inline blocks)
-- 365 total tests including 12 end-to-end integration tests
+- 591 total tests including 12 end-to-end integration tests
 
 ## v0.3
 
