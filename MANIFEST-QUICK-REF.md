@@ -93,17 +93,43 @@ Copy-paste patterns for common agentcli manifests.
 - **announce**: Deliver on error only.
 - **none**: Silent.
 
-## Examples with identity and credentials (v0.2)
+## Examples
 
-For tasks that need API keys or scoped credentials:
+### v0.1 -- no auth, good starting points
 
-- **[stripe-ops.json](examples/stripe-ops.json)** -- Stripe CLI wrapping: charge listing, refunds, balance checks with scoped API keys (full, payments, readonly) and scope-hierarchy downscoping for child tasks.
-- **[stripe-projects.json](examples/stripe-projects.json)** -- Stripe Projects: credential sync, status checks, and database migrations with two identity profiles at different trust levels.
-- **[identity-v2.json](examples/identity-v2.json)** -- Minimal v0.2 identity profile with env-bearer provider.
-- **[trust-enforcement.json](examples/trust-enforcement.json)** -- Trust level enforcement with contract boundaries.
-- **[authorization-proof.json](examples/authorization-proof.json)** -- JWT-based authorization proof verification.
+| Manifest | Tasks | Description |
+|----------|-------|-------------|
+| [hello-world.json](examples/hello-world.json) | 2 | Minimal: scheduled task + triggered follow-up |
+| [shell-workflow.json](examples/shell-workflow.json) | 2 | Shell command with agent escalation on failure |
+| [public-bot-health.json](examples/public-bot-health.json) | 2 | Health check with delivery |
+| [public-report-publish.json](examples/public-report-publish.json) | 3 | Approval-gated publish flow |
+| [public-shell-failure-triage.json](examples/public-shell-failure-triage.json) | 1 | Failure triage with on_failure handler |
+| [identity-contract.json](examples/identity-contract.json) | 2 | Contract enforcement without identity profiles |
 
-These use v0.2 features: `identity_profiles`, `trust`, `contract`, `child_credential_policy`, and `presentation` bindings.
+### v0.2 -- with identity, credentials, and trust
+
+| Manifest | Tasks | Description |
+|----------|-------|-------------|
+| [stripe-ops.json](examples/stripe-ops.json) | 3 | Stripe CLI: scoped API keys with downscope hierarchy |
+| [stripe-projects.json](examples/stripe-projects.json) | 3 | Stripe Projects: two identity profiles, different trust levels |
+| [full-stack-deploy.json](examples/full-stack-deploy.json) | 5 | Deploy pipeline: Stripe + Prisma + Fly.io with three identities |
+| [kubectl-ops.json](examples/kubectl-ops.json) | 5 | Kubernetes: RBAC-scoped kubeconfig with strict trust |
+| [terraform-ops.json](examples/terraform-ops.json) | 4 | Terraform: plan/apply with approval gate |
+| [gh-ops.json](examples/gh-ops.json) | 4 | GitHub CLI: PR, issue, and release workflows |
+| [docker-ops.json](examples/docker-ops.json) | 5 | Docker: build, push, deploy with registry credentials |
+| [aws-ops.json](examples/aws-ops.json) | 5 | AWS: STS assume-role with S3/Lambda/CloudWatch |
+| [gcloud-ops.json](examples/gcloud-ops.json) | 4 | GCP: workload identity with GKE/Cloud Run |
+| [ssh-remote.json](examples/ssh-remote.json) | 5 | SSH: remote execution with key-based identity |
+| [psql-ops.json](examples/psql-ops.json) | 4 | PostgreSQL: queries, migrations with strict trust and approval |
+| [npm-ops.json](examples/npm-ops.json) | 5 | npm: publish, audit, update workflows |
+| [git-ops.json](examples/git-ops.json) | 5 | Git: commit, push, tag with signing identity |
+| [curl-api.json](examples/curl-api.json) | 3 | Generic API calls with bearer auth |
+| [flyctl-ops.json](examples/flyctl-ops.json) | 1 | Fly.io deploy with env-bearer |
+| [cloud-workload.json](examples/cloud-workload.json) | 1 | Cloud workload identity patterns |
+| [oidc-service-auth.json](examples/oidc-service-auth.json) | 1 | OIDC client credentials flow |
+| [identity-v2.json](examples/identity-v2.json) | 2 | Minimal v0.2 identity with env-bearer |
+| [trust-enforcement.json](examples/trust-enforcement.json) | 3 | Trust level enforcement with contract boundaries |
+| [authorization-proof.json](examples/authorization-proof.json) | 1 | JWT-based authorization proof verification |
 
 ## Commands
 
