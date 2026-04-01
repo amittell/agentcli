@@ -5,6 +5,7 @@ dist/
 
 .remember/
 demo/
+docs/superpowers/
 pbcopy
 .projects/cache
 .projects/vault
