@@ -145,9 +145,9 @@ Each task declares a `session_target` that controls how it executes:
 | `isolated` | Creates a fresh agent session per run. Waits for response. | Agent tasks that need response capture and delivery |
 | `main` | Runs in the persistent main agent session (conversation context preserved). | Tasks that benefit from ongoing context (email checks, pending reviews) |
 
-**Main session dispatch modes:**
+**Main session guidance:**
 
-Main session tasks default to sync (wait for response). For long-running tasks that would block interactive chat, set `execution_intent: "fire-and-forget"`:
+Main session tasks wait for a response. `agentcli` does not currently expose a separate manifest flag for non-blocking "fire-and-forget" dispatch, so reserve `session_target: "main"` for short tasks that need the persistent conversation context. For longer-running agent work, prefer `session_target: "isolated"`:
 
 ```json
 {
@@ -163,8 +163,7 @@ Main session tasks default to sync (wait for response). For long-running tasks t
       "id": "deep-email-scan",
       "name": "Deep Email Analysis",
       "prompt": "Scan inbox for important messages and summarize.",
-      "target": { "session_target": "main" },
-      "execution": { "intent": "fire-and-forget" },
+      "target": { "session_target": "isolated" },
       "delivery": { "mode": "announce-always", "channel": "telegram", "to": "484946046" },
       "schedule": { "cron": "0 9 * * *" }
     }
@@ -172,8 +171,8 @@ Main session tasks default to sync (wait for response). For long-running tasks t
 }
 ```
 
-- **Sync (default):** The scheduler waits for the agent's response, captures it in the run summary, and delivers it through the scheduler's delivery pipeline. Your DMs queue behind the task -- fine for quick tasks (< 10s).
-- **Fire-and-forget:** The scheduler injects a system event and returns immediately. The prompt includes a reply-to instruction so the agent sends results to the delivery channel via the message tool when done. Your DMs are never blocked.
+- **`main`:** Best for quick tasks that benefit from the existing conversation context.
+- **`isolated`:** Best for longer-running analysis, summaries, and other work that should not depend on the persistent main session.
 
 ### Delivery modes
 

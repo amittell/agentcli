@@ -52,7 +52,7 @@
           "contract": {
             "required_trust_level": "restricted",
             "network": "restricted",
-            "audit": "full"
+            "audit": "always"
           },
           "delivery": { "mode": "announce", "channel": "telegram", "to": "@ops_channel" },
           "reliability": { "overlap_policy": "skip" }
@@ -69,7 +69,7 @@
           "identity": { "ref": "ansible-readonly" },
           "contract": {
             "required_trust_level": "restricted",
-            "audit": "full"
+            "audit": "always"
           },
           "reliability": { "overlap_policy": "skip", "timeout_ms": 120000 }
         },
@@ -85,7 +85,7 @@
           "identity": { "ref": "ansible-controller" },
           "contract": {
             "required_trust_level": "supervised",
-            "audit": "full"
+            "audit": "always"
           },
           "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
           "reliability": { "overlap_policy": "skip", "timeout_ms": 300000 }
@@ -103,7 +103,7 @@
           "contract": {
             "required_trust_level": "supervised",
             "trust_enforcement": "strict",
-            "audit": "full"
+            "audit": "always"
           },
           "approval": {
             "policy": "manual",

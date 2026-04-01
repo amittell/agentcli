@@ -108,7 +108,19 @@ export const RPC_METHODS = [
   { method: 'agentcli.validate', summary: 'Validate a manifest object.' },
   { method: 'agentcli.compile', summary: 'Compile a manifest object to a named target.' },
   { method: 'agentcli.apply', summary: 'Apply a manifest to an OpenClaw Scheduler runtime.' },
-  { method: 'agentcli.inspect', summary: 'Inspect a scheduler database when available.' }
+  { method: 'agentcli.inspect', summary: 'Inspect a scheduler database when available.' },
+  { method: 'agentcli.convert', summary: 'Convert a v0.1 manifest object to v0.2.' },
+  { method: 'agentcli.identity.providers', summary: 'List registered identity providers.' },
+  { method: 'agentcli.identity.schema', summary: 'Return metadata for a named identity provider.' },
+  { method: 'agentcli.identity.resolve', summary: 'Resolve the effective identity for a task.' },
+  { method: 'agentcli.identity.validateDelegation', summary: 'Validate a task identity delegation chain.' },
+  { method: 'agentcli.authorizationProof.methods', summary: 'List registered authorization proof verifier methods.' },
+  { method: 'agentcli.authorizationProof.schema', summary: 'Return metadata for a named authorization proof verifier.' },
+  { method: 'agentcli.authorization.providers', summary: 'List registered authorization providers.' },
+  { method: 'agentcli.authorization.schema', summary: 'Return metadata for a named authorization provider.' },
+  { method: 'agentcli.authorization.evaluate', summary: 'Evaluate authorization for a task.' },
+  { method: 'agentcli.evidence.providers', summary: 'List registered evidence providers.' },
+  { method: 'agentcli.evidence.schema', summary: 'Return metadata for a named evidence provider.' }
 ];
 
 export const RPC_NOTIFICATIONS = [

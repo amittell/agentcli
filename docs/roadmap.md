@@ -16,7 +16,7 @@
 - Stable manifest versioning rules (v0.1 and v0.2 coexist, version field accepts both)
 - Richer trigger-condition schema
 - Local execution adapter for shell-only workflows
-- Stronger sanitization policies beyond `basic`
+- Basic sanitization for inspect output and agent-facing text
 - Identity profiles and provider system (`none`, `env-bearer`, `oidc-client-credentials`, `oidc-token-exchange`)
 - Trust levels (`untrusted`, `restricted`, `supervised`, `autonomous`) and escalation (`fail`, `human-approval`, `log-and-proceed`)
 - Authorization proof verification (`jwt`, `certificate`, `detached-signature` verifiers)

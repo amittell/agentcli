@@ -747,6 +747,22 @@ test('npm global install exposes the agentcli alias on PATH', (t) => {
   assert.equal(version.ok, true);
   assert.equal(version.package_version, pkg.version);
   assert.equal(version.manifest_version, MANIFEST_VERSION);
+
+  const skillPathResult = spawnSync('agentcli', ['skill-path', '--json'], {
+    cwd: sandbox,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    shell: process.platform === 'win32',
+    env: {
+      ...process.env,
+      PATH: `${join(prefix, 'bin')}${delimiter}${process.env.PATH || ''}`,
+    },
+  });
+  assert.equal(skillPathResult.status, 0, skillPathResult.stderr || skillPathResult.stdout);
+
+  const skillPathPayload = JSON.parse(skillPathResult.stdout);
+  assert.equal(skillPathPayload.ok, true);
+  assert.equal(existsSync(skillPathPayload.skill_path), true);
 });
 
 test('cli schema returns json', async () => {
@@ -844,6 +860,9 @@ test('cli describe rpc exposes methods and startup notifications', async () => {
   assert.equal(output.ok, true);
   assert.ok(Array.isArray(output.description.methods));
   assert.ok(Array.isArray(output.description.notifications));
+  assert.ok(output.description.methods.some(m => m.method === 'agentcli.convert'));
+  assert.ok(output.description.methods.some(m => m.method === 'agentcli.identity.resolve'));
+  assert.ok(output.description.methods.some(m => m.method === 'agentcli.evidence.schema'));
   assert.equal(output.description.notifications[0].method, 'agentcli.ready');
 });
 
@@ -3319,6 +3338,8 @@ test('json-rpc describe rpc target returns methods and notifications', async () 
   assert.ok(Array.isArray(response.result.description.methods));
   assert.ok(Array.isArray(response.result.description.notifications));
   assert.ok(response.result.description.methods.some(m => m.method === 'agentcli.ping'));
+  assert.ok(response.result.description.methods.some(m => m.method === 'agentcli.identity.validateDelegation'));
+  assert.ok(response.result.description.methods.some(m => m.method === 'agentcli.authorization.evaluate'));
 });
 
 test('json-rpc describe with invalid target returns -32602', async () => {
@@ -3659,6 +3680,7 @@ test('cli skill-path returns bundled skill path', async () => {
   const output = JSON.parse(await runCli(['skill-path']));
   assert.equal(output.ok, true);
   assert.ok(output.skill_path.endsWith('SKILL.md'));
+  assert.equal(existsSync(output.skill_path), true);
   assert.ok(output.home_skill_path);
 });
 

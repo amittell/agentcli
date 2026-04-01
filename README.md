@@ -23,7 +23,7 @@ If you want to run the same workflows on a durable scheduler, use the second pat
 
 ```bash
 # Install
-npm install -g agentcli
+npm install -g @amittell/agentcli
 
 # Create a local home directory with a starter manifest
 agentcli init
@@ -47,7 +47,7 @@ agentcli audit --limit 10
 agentcli verify <execution-id>
 ```
 
-`npm install -g agentcli` installs the `agentcli` command on your PATH so you can run `agentcli ...` from any directory. If you install it into a project instead, use `npx agentcli ...`.
+`npm install -g @amittell/agentcli` installs the `agentcli` command on your PATH so you can run `agentcli ...` from any directory. If you install the scoped package into a project instead, run the local binary with `npx agentcli ...`.
 
 ### `agentcli` with `openclaw-scheduler`
 
@@ -554,7 +554,7 @@ See [docs/execution-identity.md](docs/execution-identity.md) for the full archit
 
 ```bash
 # From npm (after publication)
-npm install -g agentcli
+npm install -g @amittell/agentcli
 agentcli init
 agentcli paths
 

@@ -6,6 +6,10 @@ export default [
     ignores: [
       'node_modules/**',
       'dist/**',
+      '.remember/**',
+      '.projects/**',
+      'demo/**',
+      'pbcopy',
     ],
   },
   js.configs.recommended,

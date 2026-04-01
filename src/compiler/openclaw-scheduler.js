@@ -74,6 +74,9 @@ function isV2IdentityDeclaration(identity) {
 
 function sanitizeIdentityDeclaration(identity) {
   if (!identity) return null;
+  const presentation = identity.presentation;
+  const hasPresentation = presentation && typeof presentation === 'object'
+    && Object.values(presentation).some(v => v != null);
   return {
     ...identity,
     auth: identity.auth
@@ -83,6 +86,7 @@ function sanitizeIdentityDeclaration(identity) {
           inputs: null,
         }
       : null,
+    presentation: hasPresentation ? presentation : null,
   };
 }
 
