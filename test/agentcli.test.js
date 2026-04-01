@@ -8854,6 +8854,75 @@ test('exec delegates prompt task to mock scheduler runner', () => {
   }
 });
 
+test('exec delegated task surfaces scheduler capability warnings', () => {
+  const manifest = {
+    version: '0.2',
+    identity_profiles: [{
+      id: 'delegated-profile',
+      provider: 'env-bearer',
+      auth: {
+        mode: 'service',
+        provider_config: {
+          token_env: 'DELEGATED_TOKEN',
+        },
+      },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 'prompt-task',
+        name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'main', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: 'delegated-profile' },
+      }]
+    }]
+  };
+
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-delegation-warning-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'case "$*" in',
+    '  *capabilities*)',
+    '    echo \'{"features":{"runtime_identity_resolution":false,"credential_handoff":false},"scheduler_version":"0.0.0-test"}\'',
+    '    ;;',
+    '  *"jobs add"*|*jobs\\ add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *jobs*add*)',
+    '    echo \'{"ok":true}\'',
+    '    ;;',
+    '  *)',
+    '    echo \'{}\'',
+    '    ;;',
+    'esac',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      schedulerBin: fakeBin,
+      signer: 'none',
+      env: {
+        ...process.env,
+        DELEGATED_TOKEN: 'test-token',
+      },
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.delegated, true);
+    assert.ok(Array.isArray(result.warnings));
+    assert.ok(Array.isArray(result.capability_warnings));
+    assert.strictEqual(result.capability_warnings.length, 1);
+    assert.strictEqual(result.capability_warnings[0].feature, 'runtime_identity_resolution');
+    assert.ok(result.warnings[0].includes('runtime_identity_resolution'));
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('exec delegated task uses the selected workflow when task ids collide', () => {
   const manifest = {
     version: '0.1',

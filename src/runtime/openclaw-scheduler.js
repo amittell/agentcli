@@ -112,7 +112,10 @@ export const schedulerAdapter = {
     const runtimeCaps = querySchedulerCapabilities(runner);
     const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     const handoffVersion = effectiveResult.handoff_version || '1';
-    const { errors: capabilityErrors } = validateManifestCapabilities({ jobs: [jobSpec] }, effectiveResult);
+    const {
+      errors: capabilityErrors,
+      warnings: capabilityWarnings,
+    } = validateManifestCapabilities({ jobs: [jobSpec] }, effectiveResult);
     if (capabilityErrors.length > 0) {
       throw Object.assign(
         new Error(capabilityErrors.map(error => error.message).join('; ')),
@@ -133,6 +136,12 @@ export const schedulerAdapter = {
       payload_kind: jobSpec.payload_kind,
       status: 'dispatched',
       handoff_version: handoffVersion,
+      ...(capabilityWarnings.length > 0
+        ? {
+            warnings: capabilityWarnings.map(warning => warning.message),
+            capability_warnings: capabilityWarnings,
+          }
+        : {}),
       note: 'Task delegated to openclaw-scheduler. The scheduler will execute it on its next tick.',
     };
   },
