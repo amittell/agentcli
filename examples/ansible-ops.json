@@ -1,0 +1,132 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "ansible-controller",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/ansible",
+        "display_name": "Ansible Controller"
+      },
+      "auth": {
+        "mode": "service",
+        "provider_config": {
+          "token_env": "ANSIBLE_VAULT_PASSWORD"
+        }
+      },
+      "trust": { "level": "supervised" }
+    },
+    {
+      "id": "ansible-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/ansible-readonly",
+        "display_name": "Ansible Read-Only"
+      },
+      "auth": {
+        "mode": "service",
+        "provider_config": {
+          "token_env": "ANSIBLE_VAULT_PASSWORD"
+        }
+      },
+      "trust": { "level": "restricted" }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "ansible-ops",
+      "name": "Ansible Operations",
+      "tasks": [
+        {
+          "id": "inventory-check",
+          "name": "Inventory Health Check",
+          "shell": {
+            "program": "ansible",
+            "args": ["all", "-i", "inventory/production", "-m", "ping", "--one-line"]
+          },
+          "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 8 * * *", "tz": "America/New_York" },
+          "identity": { "ref": "ansible-readonly" },
+          "contract": {
+            "required_trust_level": "restricted",
+            "network": "restricted",
+            "audit": "full"
+          },
+          "delivery": { "mode": "announce", "channel": "telegram", "to": "@ops_channel" },
+          "reliability": { "overlap_policy": "skip" }
+        },
+        {
+          "id": "fact-gathering",
+          "name": "Gather Host Facts",
+          "shell": {
+            "program": "ansible",
+            "args": ["all", "-i", "inventory/production", "-m", "setup", "--tree", "/tmp/ansible-facts"]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "inventory-check", "on": "success" },
+          "identity": { "ref": "ansible-readonly" },
+          "contract": {
+            "required_trust_level": "restricted",
+            "audit": "full"
+          },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 120000 }
+        },
+        {
+          "id": "playbook-dry-run",
+          "name": "Playbook Dry Run (check mode)",
+          "shell": {
+            "program": "ansible-playbook",
+            "args": ["-i", "inventory/production", "site.yml", "--check", "--diff"]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "fact-gathering", "on": "success" },
+          "identity": { "ref": "ansible-controller" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "audit": "full"
+          },
+          "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 300000 }
+        },
+        {
+          "id": "playbook-apply",
+          "name": "Apply Playbook",
+          "shell": {
+            "program": "ansible-playbook",
+            "args": ["-i", "inventory/production", "site.yml", "--diff"]
+          },
+          "target": { "session_target": "shell" },
+          "trigger": { "parent": "playbook-dry-run", "on": "success" },
+          "identity": { "ref": "ansible-controller" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict",
+            "audit": "full"
+          },
+          "approval": {
+            "policy": "manual",
+            "timeout_s": 3600
+          },
+          "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
+          "reliability": { "overlap_policy": "skip", "timeout_ms": 600000 },
+          "verify": {
+            "shell": "ansible all -i inventory/production -m ping --one-line | grep -v SUCCESS && exit 1 || exit 0",
+            "timeout_seconds": 60,
+            "on_failure": "error"
+          }
+        },
+        {
+          "id": "drift-report",
+          "name": "Configuration Drift Report",
+          "prompt": "Review the playbook dry run output from the preceding check-mode run. Summarize what would change, flag any unexpected drift, and recommend whether to proceed with the apply. Keep it concise for the ops team.",
+          "target": { "session_target": "isolated" },
+          "trigger": { "parent": "playbook-dry-run", "on": "success" },
+          "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
+          "reliability": { "overlap_policy": "skip" }
+        }
+      ]
+    }
+  ]
+}

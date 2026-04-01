@@ -113,6 +113,7 @@ Copy-paste patterns for common agentcli manifests.
 | [stripe-ops.json](examples/stripe-ops.json) | 3 | Stripe CLI: scoped API keys with downscope hierarchy |
 | [stripe-projects.json](examples/stripe-projects.json) | 3 | Stripe Projects: two identity profiles, different trust levels |
 | [full-stack-deploy.json](examples/full-stack-deploy.json) | 5 | Deploy pipeline: Stripe + Prisma + Fly.io with three identities |
+| [ansible-ops.json](examples/ansible-ops.json) | 5 | Ansible: inventory check, fact gathering, dry run, approval-gated apply, agent drift report |
 | [kubectl-ops.json](examples/kubectl-ops.json) | 5 | Kubernetes: RBAC-scoped kubeconfig with strict trust |
 | [terraform-ops.json](examples/terraform-ops.json) | 4 | Terraform: plan/apply with approval gate |
 | [gh-ops.json](examples/gh-ops.json) | 4 | GitHub CLI: PR, issue, and release workflows |
