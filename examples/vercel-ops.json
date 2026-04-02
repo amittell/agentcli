@@ -1,0 +1,261 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "vercel-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/vercel-readonly",
+        "display_name": "Vercel Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "VERCEL_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "VERCEL_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "vercel-deploy-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/vercel-deploy",
+        "display_name": "Vercel Deploy Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "VERCEL_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "VERCEL_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "vercel-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "resolved_identity",
+          "contract",
+          "command",
+          "result"
+        ],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "vercel-ops",
+      "name": "Vercel Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "list-deployments",
+          "name": "List Recent Deployments",
+          "shell": {
+            "program": "vercel",
+            "args": ["list", "--json"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 */4 * * *" }
+        },
+        {
+          "id": "check-domains",
+          "name": "Check Domain Configuration",
+          "shell": {
+            "program": "vercel",
+            "args": ["domains", "list", "--json"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "preview-deploy",
+          "name": "Deploy to Preview",
+          "shell": {
+            "program": "vercel",
+            "args": ["deploy", "--json", "--no-wait"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-deploy-credentials" },
+          "evidence": { "ref": "vercel-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 10 * * 1-5" },
+          "on_failure": {
+            "id": "triage-preview-deploy",
+            "name": "Triage Preview Deploy Failure",
+            "prompt": "A Vercel preview deployment failed. Analyze the deployment output to determine whether this is a build configuration error, dependency installation failure, framework detection issue, or environment variable problem, and recommend the next steps without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "inspect-preview",
+          "name": "Inspect Preview Deployment",
+          "shell": {
+            "program": "vercel",
+            "args": ["inspect", "--json"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "trigger": {
+            "parent": "preview-deploy",
+            "on": "success",
+            "delay_s": 30
+          }
+        },
+        {
+          "id": "promote-production",
+          "name": "Promote to Production",
+          "shell": {
+            "program": "vercel",
+            "args": ["promote", "--json", "--yes"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-deploy-credentials" },
+          "evidence": { "ref": "vercel-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "output": { "format": "json" },
+          "trigger": {
+            "parent": "inspect-preview",
+            "on": "success"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high",
+            "timeout_s": 3600
+          },
+          "on_failure": {
+            "id": "triage-production-promote",
+            "name": "Triage Production Promote Failure",
+            "prompt": "A Vercel production promotion failed. Analyze the output to determine whether this is a deployment state issue, permission error, or configuration problem, and recommend safe recovery steps.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "verify-production",
+          "name": "Verify Production Health",
+          "shell": {
+            "program": "curl",
+            "args": ["-sf", "-o", "/dev/null", "-w", "%{http_code}", "https://your-app.vercel.app"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-readonly" },
+          "evidence": { "ref": "vercel-evidence" },
+          "output": { "format": "text" },
+          "trigger": {
+            "parent": "promote-production",
+            "on": "success",
+            "delay_s": 15
+          },
+          "verify": {
+            "shell": "test \"$(curl -sf -o /dev/null -w '%{http_code}' https://your-app.vercel.app)\" = \"200\"",
+            "timeout_seconds": 30,
+            "on_failure": "error"
+          }
+        },
+        {
+          "id": "list-env-vars",
+          "name": "Audit Environment Variables",
+          "shell": {
+            "program": "vercel",
+            "args": ["env", "list", "--json"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "vercel-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 6 * * 1" }
+        }
+      ]
+    }
+  ]
+}
