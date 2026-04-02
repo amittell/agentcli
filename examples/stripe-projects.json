@@ -260,8 +260,8 @@
           "id": "teardown-vercel",
           "name": "Remove Vercel Project",
           "shell": {
-            "program": "vercel",
-            "args": ["project", "rm", "my-app", "--yes"],
+            "program": "sh",
+            "args": ["-c", "echo y | vercel project rm my-app"],
             "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
           },
           "target": { "session_target": "shell" },
