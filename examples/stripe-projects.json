@@ -19,6 +19,41 @@
       }
     },
     {
+      "id": "deploy-credentials",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/deploy",
+        "display_name": "Deploy Agent"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "VERCEL_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "VERCEL_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
       "id": "database-credentials",
       "provider": "env-bearer",
       "subject": {
@@ -34,7 +69,11 @@
         }
       },
       "trust": {
-        "level": "restricted"
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
       },
       "presentation": {
         "bindings": [
@@ -61,6 +100,64 @@
     }
   ],
   "workflows": [
+    {
+      "id": "provision",
+      "name": "Provision Stripe Project",
+      "identity": { "ref": "project-agent" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "advisory"
+      },
+      "tasks": [
+        {
+          "id": "init-project",
+          "name": "Initialize Stripe Project",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "init", "my-app", "--yes", "--accept-tos"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "schedule": { "cron": "0 0 1 1 *" }
+        },
+        {
+          "id": "add-database",
+          "name": "Add Neon Postgres",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "add", "neon/postgres", "--accept-tos", "--yes"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "init-project", "on": "success" }
+        },
+        {
+          "id": "add-hosting",
+          "name": "Add Vercel Hosting",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "add", "vercel/project", "--accept-tos", "--yes", "--config", "{\"name\":\"my-app\"}"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "add-database", "on": "success" }
+        },
+        {
+          "id": "pull-credentials",
+          "name": "Pull All Credentials",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "env", "--pull"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "add-hosting", "on": "success" }
+        }
+      ]
+    },
     {
       "id": "project-ops",
       "name": "Stripe Project Operations",
@@ -99,8 +196,8 @@
           "id": "run-migrations",
           "name": "Run Database Migrations",
           "shell": {
-            "program": "sh",
-            "args": ["-c", "npx prisma migrate deploy"]
+            "program": "npx",
+            "args": ["prisma", "migrate", "deploy"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "database-credentials" },
@@ -122,6 +219,66 @@
             "context": { "retrieval": "recent", "limit": 3 },
             "delivery": { "mode": "announce", "to": "@owner_dm" }
           }
+        }
+      ]
+    },
+    {
+      "id": "cleanup",
+      "name": "Teardown Stripe Project",
+      "identity": { "ref": "project-agent" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "supervised",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "remove-hosting",
+          "name": "Remove Vercel Service",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "remove", "my-app", "--yes"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "schedule": { "cron": "0 0 1 1 *" }
+        },
+        {
+          "id": "remove-database",
+          "name": "Remove Neon Service",
+          "shell": {
+            "program": "stripe",
+            "args": ["projects", "remove", "neon-postgres", "--yes"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "remove-hosting", "on": "success" }
+        },
+        {
+          "id": "teardown-vercel",
+          "name": "Remove Vercel Project",
+          "shell": {
+            "program": "vercel",
+            "args": ["project", "rm", "my-app", "--yes"],
+            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "deploy-credentials" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "remove-hosting", "on": "success" }
+        },
+        {
+          "id": "unlink-providers",
+          "name": "Unlink Providers",
+          "shell": {
+            "program": "sh",
+            "args": ["-c", "stripe projects unlink vercel --yes && stripe projects unlink neon --yes"]
+          },
+          "target": { "session_target": "shell" },
+          "evidence": { "ref": "ssh-evidence" },
+          "trigger": { "parent": "remove-database", "on": "success" }
         }
       ]
     }
