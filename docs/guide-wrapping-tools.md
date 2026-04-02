@@ -268,6 +268,12 @@ pipeline with three separate identities, trust enforcement, evidence, and failur
 triage at each stage. See [the full pipeline walkthrough](#full-stack-deployment-example)
 at the top of this guide.
 
+For Vercel-specific workflows, [vercel-ops.json](../examples/vercel-ops.json) wraps
+the Vercel CLI with a preview→promote pipeline, approval gates on production, and
+post-deploy health checks. If your stack uses both Stripe Projects and Vercel, you
+can run `stripe-projects.json` for credential sync and status checks alongside
+`vercel-ops.json` for the deployment pipeline.
+
 ## agentcli + AWS CLI
 
 [aws-ops.json](../examples/aws-ops.json) wraps the AWS CLI for infrastructure
@@ -602,6 +608,39 @@ monitoring agent cannot accidentally restart services.
 agentcli exec examples/ssh-remote.json check-uptime --signer none
 agentcli exec examples/ssh-remote.json check-disk --signer none
 agentcli whoami examples/ssh-remote.json deploy-update
+```
+
+### vercel ([vercel-ops.json](../examples/vercel-ops.json))
+
+**What it wraps**: Vercel CLI operations: listing deployments, checking domain
+configuration, deploying to preview, promoting to production, and auditing
+environment variables.
+
+**What agentcli adds**: `VERCEL_TOKEN` is bound through env-bearer with
+`required: true` and `redact: true`, so the token is materialized into the
+spawned vercel process but never appears in audit records. Read-only tasks
+(deployments, domains, env vars) run under a `restricted` identity that
+cannot deploy. The production promote requires `supervised` trust with
+`strict` enforcement, manual approval at `high` risk level, and generates
+SSH evidence. Preview deployments chain into inspect, then promote, then
+health verification -- the entire pipeline is declarative and auditable.
+Failure handlers on both preview and production deploys delegate to an
+agent for read-only diagnosis.
+
+**Key pattern**: Preview-to-production promotion pipeline. Rather than
+deploying directly to production, the manifest deploys a preview first,
+inspects it after a 30-second settling delay, then promotes to production
+behind an approval gate. The post-promote `verify` step runs a curl health
+check against the production URL, failing the task if the site does not
+return HTTP 200. This pattern works with any service that separates preview
+and production environments (Vercel, Netlify, Cloudflare Pages).
+
+```bash
+export VERCEL_TOKEN="..."
+agentcli exec examples/vercel-ops.json list-deployments --signer none
+agentcli exec examples/vercel-ops.json check-domains --signer none
+agentcli whoami examples/vercel-ops.json promote-production
+agentcli audit --limit 3
 ```
 
 ## Why the manifest matters

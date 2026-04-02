@@ -121,6 +121,7 @@ Copy-paste patterns for common agentcli manifests.
 | [aws-ops.json](examples/aws-ops.json) | 5 | AWS: STS assume-role with S3/Lambda/CloudWatch |
 | [gcloud-ops.json](examples/gcloud-ops.json) | 4 | GCP: workload identity with GKE/Cloud Run |
 | [ssh-remote.json](examples/ssh-remote.json) | 5 | SSH: remote execution with key-based identity |
+| [vercel-ops.json](examples/vercel-ops.json) | 7 | Vercel: deployments, domains, preview→promote pipeline with approval, health verify |
 | [psql-ops.json](examples/psql-ops.json) | 4 | PostgreSQL: queries, migrations with strict trust and approval |
 | [npm-ops.json](examples/npm-ops.json) | 5 | npm: publish, audit, update workflows |
 | [git-ops.json](examples/git-ops.json) | 5 | Git: commit, push, tag with signing identity |

@@ -450,6 +450,7 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [npm-ops.json](examples/npm-ops.json) | Node.js lifecycle: trigger-chained install/test/build pipeline, security audit, and outdated checks. |
 | [git-ops.json](examples/git-ops.json) | Git operations: status, log, diff, commit, and push with strict trust enforcement on push. |
 | [ssh-remote.json](examples/ssh-remote.json) | SSH remote ops: uptime, disk, memory monitoring, service restart with approval, and log tailing. |
+| [vercel-ops.json](examples/vercel-ops.json) | Vercel CLI: deployment listing, domain checks, preview→promote pipeline with approval gate, health verification, and env var audit. |
 
 ### Putting it together: a v0.2 manifest
 
