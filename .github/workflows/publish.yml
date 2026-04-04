@@ -29,6 +29,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          registry-url: 'https://registry.npmjs.org'
       - run: npm ci
       - name: Verify tag matches package.json version
         env:
