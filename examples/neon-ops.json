@@ -1,0 +1,243 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "neon-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/neon-readonly",
+        "display_name": "Neon Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "NEON_API_KEY"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "NEON_API_KEY" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "neon-admin",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/neon-admin",
+        "display_name": "Neon Admin Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "NEON_API_KEY"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "NEON_API_KEY" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "neon-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "resolved_identity",
+          "contract",
+          "command",
+          "result"
+        ],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "neon-ops",
+      "name": "Neon Database Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "list-projects",
+          "name": "List Neon Projects",
+          "shell": {
+            "program": "neonctl",
+            "args": ["projects", "list", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "list-branches",
+          "name": "List Branches",
+          "shell": {
+            "program": "neonctl",
+            "args": ["branches", "list", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "get-connection-string",
+          "name": "Get Connection String",
+          "shell": {
+            "program": "neonctl",
+            "args": ["connection-string", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 1000
+          },
+          "schedule": { "cron": "0 6 * * *" }
+        },
+        {
+          "id": "check-operations",
+          "name": "Check Recent Operations",
+          "shell": {
+            "program": "neonctl",
+            "args": ["operations", "list", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "schedule": { "cron": "*/15 * * * *" },
+          "on_failure": {
+            "id": "triage-neon-failure",
+            "name": "Triage Neon API Failure",
+            "prompt": "The Neon API call failed. Determine whether this is an authentication issue, rate limit, project quota, or API error, and recommend the next step without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "create-branch",
+          "name": "Create Development Branch",
+          "shell": {
+            "program": "neonctl",
+            "args": ["branches", "create", "--name", "dev", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-admin" },
+          "evidence": { "ref": "neon-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 0 1 1 *" },
+          "on_failure": {
+            "id": "triage-branch-create",
+            "name": "Triage Branch Create Failure",
+            "prompt": "Branch creation failed. Determine whether this is a naming conflict, project quota limit, or API error, and recommend the next step without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "get-branch-connection-string",
+          "name": "Get Branch Connection String",
+          "shell": {
+            "program": "neonctl",
+            "args": ["connection-string", "dev", "--output", "json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-readonly" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 1000
+          },
+          "trigger": {
+            "parent": "create-branch",
+            "on": "success"
+          }
+        },
+        {
+          "id": "delete-branch",
+          "name": "Delete Development Branch",
+          "shell": {
+            "program": "neonctl",
+            "args": ["branches", "delete", "dev"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "neon-admin" },
+          "evidence": { "ref": "neon-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "0 0 1 1 *" }
+        }
+      ]
+    }
+  ]
+}

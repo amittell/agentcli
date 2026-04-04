@@ -514,6 +514,64 @@ agentcli exec examples/curl-api.json health-check --signer none
 agentcli whoami examples/curl-api.json fetch-data
 ```
 
+### neonctl ([neon-ops.json](../examples/neon-ops.json))
+
+**What it wraps**: Neon serverless Postgres platform operations: project listing,
+branch management, connection string retrieval, and operations monitoring.
+
+**What agentcli adds**: Neon branches are cheap database copies -- powerful for
+development workflows but destructive if misused. agentcli separates read-only
+monitoring (project listing, branch listing, connection strings, operations log)
+from write operations (branch creation, branch deletion) using two identity
+profiles. The `neon-admin` profile requires `supervised` trust with `strict`
+enforcement and manual approval for both create and delete. Branch creation
+triggers an automatic connection string retrieval for the new branch, making the
+credential available to downstream automation without a second manual step.
+
+**Key pattern**: Branch lifecycle pipeline. `create-branch` fires
+`get-branch-connection-string` on success, giving downstream tasks the connection
+string for the new branch without manual intervention. The delete operation is
+separate and approval-gated at `high` risk because deleting a branch destroys
+its data. Operations monitoring runs every 15 minutes with failure triage for
+authentication and quota issues.
+
+```bash
+export NEON_API_KEY="..."
+agentcli exec examples/neon-ops.json list-projects --signer none
+agentcli exec examples/neon-ops.json list-branches --signer none
+agentcli whoami examples/neon-ops.json create-branch
+agentcli audit --limit 3
+```
+
+### supabase ([supabase-ops.json](../examples/supabase-ops.json))
+
+**What it wraps**: Supabase CLI operations: project listing, migration status,
+edge function management, secrets auditing, database migration pushes, and
+edge function deployment.
+
+**What agentcli adds**: Supabase combines a Postgres database, edge functions,
+authentication, and storage into a single platform. agentcli separates the
+read-only inspection tasks (project listing, migration status, function
+inventory, secrets audit) from the write operations (database push, function
+deploy) using two identity profiles. The deploy pipeline chains database
+migrations into edge function deployment into a health check, so a failed
+migration never triggers a function deploy. Both write operations generate
+SSH evidence and require manual approval.
+
+**Key pattern**: Deploy pipeline with health verification. `db-push` fires
+`functions-deploy` on success, which fires `verify-health` after a 15-second
+settling delay. The health check runs `supabase inspect db bloat` to verify
+the database is in a good state after migrations. Failure handlers on both
+deploy steps diagnose schema conflicts, build errors, and permission issues.
+
+```bash
+export SUPABASE_ACCESS_TOKEN="..."
+agentcli exec examples/supabase-ops.json list-projects --signer none
+agentcli exec examples/supabase-ops.json db-status --signer none
+agentcli whoami examples/supabase-ops.json db-push
+agentcli audit --limit 3
+```
+
 ### psql ([psql-ops.json](../examples/psql-ops.json))
 
 **What it wraps**: PostgreSQL database monitoring and migrations.

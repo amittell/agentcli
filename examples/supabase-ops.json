@@ -1,0 +1,256 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "supabase-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/supabase-readonly",
+        "display_name": "Supabase Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SUPABASE_ACCESS_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SUPABASE_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "supabase-deploy",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/supabase-deploy",
+        "display_name": "Supabase Deploy Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SUPABASE_ACCESS_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SUPABASE_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "supabase-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": [
+          "execution_id",
+          "declared_identity",
+          "resolved_identity",
+          "contract",
+          "command",
+          "result"
+        ],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "supabase-ops",
+      "name": "Supabase Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "list-projects",
+          "name": "List Supabase Projects",
+          "shell": {
+            "program": "supabase",
+            "args": ["projects", "list"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "db-status",
+          "name": "Check Migration Status",
+          "shell": {
+            "program": "supabase",
+            "args": ["migration", "list", "--db-url", "$DATABASE_URL"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "functions-list",
+          "name": "List Edge Functions",
+          "shell": {
+            "program": "supabase",
+            "args": ["functions", "list"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 8 * * 1" }
+        },
+        {
+          "id": "secrets-list",
+          "name": "List Project Secrets",
+          "shell": {
+            "program": "supabase",
+            "args": ["secrets", "list"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-readonly" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 6 * * 1" }
+        },
+        {
+          "id": "db-push",
+          "name": "Push Database Migrations",
+          "shell": {
+            "program": "supabase",
+            "args": ["db", "push", "--db-url", "$DATABASE_URL"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-deploy" },
+          "evidence": { "ref": "supabase-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict",
+            "audit": "always"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high",
+            "timeout_s": 3600
+          },
+          "schedule": { "cron": "0 3 * * 0" },
+          "on_failure": {
+            "id": "triage-db-push",
+            "name": "Triage Database Push Failure",
+            "prompt": "A Supabase database migration push failed. Determine whether this is a connection issue, schema conflict, migration ordering problem, or permissions error, and recommend the next step without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "functions-deploy",
+          "name": "Deploy Edge Functions",
+          "shell": {
+            "program": "supabase",
+            "args": ["functions", "deploy"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-deploy" },
+          "evidence": { "ref": "supabase-evidence" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict",
+            "audit": "always"
+          },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "trigger": {
+            "parent": "db-push",
+            "on": "success"
+          },
+          "on_failure": {
+            "id": "triage-functions-deploy",
+            "name": "Triage Edge Function Deploy Failure",
+            "prompt": "A Supabase edge function deployment failed. Determine whether this is a build error, dependency issue, function size limit, or configuration problem, and recommend the next step without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 5 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "verify-health",
+          "name": "Verify Project Health",
+          "shell": {
+            "program": "supabase",
+            "args": ["inspect", "db", "bloat", "--db-url", "$DATABASE_URL"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "supabase-readonly" },
+          "evidence": { "ref": "supabase-evidence" },
+          "output": {
+            "format": "text",
+            "preview_bytes": 4000
+          },
+          "trigger": {
+            "parent": "functions-deploy",
+            "on": "success",
+            "delay_s": 15
+          }
+        }
+      ]
+    }
+  ]
+}
