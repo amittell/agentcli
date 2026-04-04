@@ -70,6 +70,10 @@
     "url": "https://github.com/amittell/agentcli/issues"
   },
   "homepage": "https://github.com/amittell/agentcli#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.2",
