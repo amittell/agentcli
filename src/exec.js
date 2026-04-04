@@ -714,7 +714,12 @@ function executeV1(common, { dryRun }) {
     const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
       new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
-      { code: 'verify_failed', verify: verifyResult }
+      {
+        code: 'verify_failed',
+        verify: verifyResult,
+        execution_id: executionId,
+        source: { workflow_id: workflow.id, task_id: task.id },
+      }
     );
   }
 
@@ -1466,7 +1471,12 @@ async function executeV2(common, {
     const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
       new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
-      { code: 'verify_failed', verify: verifyResult }
+      {
+        code: 'verify_failed',
+        verify: verifyResult,
+        execution_id: executionId,
+        source: { workflow_id: workflow.id, task_id: task.id },
+      }
     );
   }
 

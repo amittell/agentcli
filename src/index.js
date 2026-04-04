@@ -22,6 +22,7 @@ export { expandManifestShorthands } from './shorthand.js';
 export { applyFieldMask, parseFieldMask } from './fields.js';
 export { loadJsonInput, writeJsonOutput, resolveSafeOutputPath } from './io.js';
 export { executeTask } from './exec.js';
+export { runWorkflow } from './run.js';
 export {
   registerRuntimeAdapter,
   getRuntimeAdapter,

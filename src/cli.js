@@ -14,6 +14,7 @@ import {
   validateManifestCapabilities,
 } from './capabilities.js';
 import { executeTask } from './exec.js';
+import { runWorkflow } from './run.js';
 import { readAuditLog } from './audit.js';
 import { resolveProviderForMethod } from './signing/index.js';
 import './signing/ssh.js';
@@ -46,6 +47,10 @@ Commands:
        [--instance-id id] [--require-evidence] [--require-authorization]
        [--identity-debug] [--presentation-debug]
        [--db path] [--scheduler-prefix path|--scheduler-bin path]
+  run <path-or-json|-> [--workflow id] [--root task-id|--all-roots] [--dry-run] [--timeout ms]
+       [--signer ssh|none] [--signing-key path] [--evidence-provider name]
+       [--instance-id id] [--require-evidence] [--require-authorization]
+       [--identity-debug] [--presentation-debug]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   verify <execution-id> [--allowed-signers path]
@@ -376,6 +381,40 @@ export async function runCli(
         schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
         schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,
         dbPath: flags.db || defaultDbPath,
+        cwd,
+        env: derivedEnv,
+      });
+      return formatOutput(payload, { mode: outputMode, pretty });
+    }
+    case 'run': {
+      if (!positionals[1]) {
+        throw Object.assign(
+          new Error('Usage: agentcli run <manifest> [--workflow id] [--root task-id|--all-roots] [--dry-run] [--timeout ms]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
+      const rawTimeout = flags.timeout;
+      if (rawTimeout != null && (typeof rawTimeout !== 'string' || !/^[1-9][0-9]*$/.test(rawTimeout))) {
+        throw Object.assign(
+          new Error(`Invalid --timeout value: ${rawTimeout}. Must be a positive integer (milliseconds).`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const payload = await runWorkflow(manifest, {
+        workflowId: flags.workflow || undefined,
+        rootTaskId: flags.root || undefined,
+        allRoots: Boolean(flags['all-roots']),
+        dryRun: Boolean(flags['dry-run']),
+        timeoutMs: rawTimeout ? Number(rawTimeout) : undefined,
+        signer: flags.signer || undefined,
+        signingKey: flags['signing-key'] || undefined,
+        evidenceProvider: flags['evidence-provider'] || undefined,
+        instanceId: flags['instance-id'] || undefined,
+        requireEvidence: flags['require-evidence'] ? true : undefined,
+        requireAuthorization: flags['require-authorization'] ? true : undefined,
+        identityDebug: flags['identity-debug'] ? true : undefined,
+        presentationDebug: flags['presentation-debug'] ? true : undefined,
         cwd,
         env: derivedEnv,
       });

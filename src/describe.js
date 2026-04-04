@@ -51,6 +51,10 @@ export const COMMAND_DESCRIPTIONS = [
     summary: 'Execute a shell-target task from a manifest with identity verification, contract enforcement, signing provider attestation, and audit logging. Use --signer to select a signing provider (ssh, none).'
   },
   {
+    command: 'run',
+    summary: 'Execute a shell-only workflow DAG locally from one or more scheduled roots. Trigger edges, conditions, and on_failure handlers are evaluated in-process.'
+  },
+  {
     command: 'identity',
     summary: 'Inspect identity providers, schemas, effective task identity, and delegation validation state.'
   },

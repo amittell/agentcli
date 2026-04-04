@@ -37,6 +37,9 @@ agentcli compile examples/hello-world.json --target standalone --explain
 # Run a task locally
 agentcli exec examples/trust-enforcement.json collect-data --dry-run --signer none
 
+# Run a shell-only workflow DAG locally
+agentcli run examples/trust-enforcement.json --root collect-data --signer none
+
 # Inspect identity resolution
 agentcli identity resolve examples/identity-v2.json echo-identity
 
@@ -106,6 +109,13 @@ For example, [flyctl-ops.json](examples/flyctl-ops.json) wraps a simple `flyctl 
 agentcli validate examples/flyctl-ops.json
 agentcli exec examples/flyctl-ops.json check-app-status --dry-run --identity-debug
 agentcli compile examples/flyctl-ops.json --target openclaw-scheduler --explain
+```
+
+For shell-only manifests with trigger chains, use `agentcli run` to execute the local DAG from one or more scheduled roots:
+
+```bash
+agentcli run examples/trust-enforcement.json --root collect-data --signer none
+agentcli run examples/trust-enforcement.json --all-roots --dry-run --signer none
 ```
 
 [stripe-ops.json](examples/stripe-ops.json) wraps the Stripe CLI with three operations: list recent charges, check balance, and list failed payment intents. It binds `STRIPE_API_KEY` through an identity profile with strict trust enforcement, parses JSON output, generates SSH evidence, and escalates API failures into an agent-based triage step.
@@ -295,7 +305,15 @@ Use `agentcli evidence providers` to list registered providers and `agentcli evi
 | Command | Description |
 |---|---|
 | `exec <path> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path] [--db path] [--scheduler-prefix path\|--scheduler-bin path]` | Execute shell tasks locally with identity resolution, contract enforcement, and attestation, or delegate non-shell tasks to the scheduler when configured. |
+| `run <path> [--workflow id] [--root task-id\|--all-roots] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path]` | Execute a shell-only workflow DAG locally. Trigger edges, `contains:` / `regex:` conditions, and `on_failure` handlers are evaluated in-process. |
 | `apply <path> [--db path] [--scheduler-prefix path\|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id\|name] [--check-capabilities]` | Apply a manifest to the scheduler runtime, or inspect runtime capability negotiation without writing jobs. |
+
+`agentcli run` is intentionally narrow:
+
+- It only executes tasks with `target.session_target: "shell"`.
+- It runs one workflow DAG locally from a selected scheduled root, or from every root when `--all-roots` is set.
+- It does not add queueing, retries, approvals, or durable state.
+- Manifests that include `main` or `isolated` tasks still need a runtime adapter such as `openclaw-scheduler`.
 
 ### Identity and Authorization
 
