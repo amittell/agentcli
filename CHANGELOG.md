@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-04-04)
+
+- `agentcli run` command for local shell-only workflow DAG execution with trigger edges, contains:/regex: conditions, and on_failure handlers evaluated in-process
+- `agentcli signing providers` command lists registered signing providers and their attestation methods
+- delegation capability warnings surfaced in scheduler dispatch responses (previously silently swallowed)
+- neon-ops.json example: neonctl with readonly/admin identity split, branch lifecycle pipeline, operations monitoring
+- supabase-ops.json example: Supabase CLI with readonly/deploy split, db-push -> functions-deploy -> health-verify pipeline
+- vercel-ops.json example: Vercel CLI with preview -> promote pipeline, approval gates, health verification
+- stripe-projects.json expanded with full project lifecycle (init, add services, pull credentials, status check, migrations)
+- publish-on-tag CI workflow for automated npm releases
+- fix: vercel project rm uses pipe instead of unsupported --yes flag
+
+## 0.2.0
 
 - signing provider abstraction (`src/signing/`) with pluggable provider interface (resolve, sign, verify)
 - `--signer` flag for `exec` command to select signing provider (`ssh`, `none`); `AGENTCLI_SIGNER` env var
