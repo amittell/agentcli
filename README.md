@@ -276,6 +276,12 @@ Use `agentcli authorization providers` to list registered providers and `agentcl
 
 Use `agentcli evidence providers` to list registered providers and `agentcli evidence schema <provider>` to inspect provider metadata.
 
+## Signing Providers
+
+`agentcli exec` and `agentcli run` use signing providers for execution attestations.
+
+Use `agentcli signing providers` to list the registered signing providers and the attestation methods they expose.
+
 ## CLI Reference
 
 ### General
@@ -340,6 +346,7 @@ Use `agentcli evidence providers` to list registered providers and `agentcli evi
 | `inspect <jobs\|runs\|queue\|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]` | Inspect scheduler runtime state with field masks and sanitization. |
 | `audit [--limit n]` | Display recent audit records from the append-only log. |
 | `verify <execution-id> [--allowed-signers path]` | Verify execution evidence for a completed run. |
+| `signing providers` | List registered signing providers and their attestation methods. |
 
 ### Registry
 

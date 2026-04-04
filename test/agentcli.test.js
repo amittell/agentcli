@@ -4744,6 +4744,20 @@ test('resolveProviderForMethod returns null for unknown method', () => {
   assert.equal(resolveProviderForMethod(null), null);
 });
 
+test('cli signing providers lists ssh and none', async () => {
+  const output = JSON.parse(await runCli(['signing', 'providers']));
+  assert.equal(output.ok, true);
+  assert.ok(output.providers.some(provider => provider.name === 'ssh' && provider.methods.includes('ssh-signature')));
+  assert.ok(output.providers.some(provider => provider.name === 'none'));
+});
+
+test('cli signing rejects unknown subcommand', async () => {
+  await assert.rejects(
+    runCli(['signing', 'wat']),
+    /Unknown signing subcommand/
+  );
+});
+
 test('ssh provider resolve returns null when no key available', () => {
   const provider = getProvider('ssh');
   const config = provider.resolve({ homeDir: '/nonexistent-home-dir', env: {} });

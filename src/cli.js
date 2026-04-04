@@ -54,6 +54,7 @@ Commands:
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   verify <execution-id> [--allowed-signers path]
+  signing providers
   registry list
   registry add <path> [--name name]
   registry show <name>
@@ -513,6 +514,23 @@ export async function runCli(
         key_fingerprint: record.attestation.key_fingerprint || null,
         ...(verifyResult.reason ? { reason: verifyResult.reason } : {}),
       }, { mode: outputMode, pretty });
+    }
+    case 'signing': {
+      const subcommand = positionals[1];
+      if (subcommand === 'providers') {
+        const { listProviders, getProvider } = await import('./signing/index.js');
+        return formatOutput({
+          ok: true,
+          providers: listProviders().map(name => {
+            const provider = getProvider(name);
+            return {
+              name,
+              methods: provider?.methods || [],
+            };
+          }),
+        }, { mode: outputMode, pretty });
+      }
+      return cliError('Unknown signing subcommand. Available: providers');
     }
     case 'registry': {
       const subcommand = positionals[1];

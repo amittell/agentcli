@@ -75,6 +75,10 @@ export const COMMAND_DESCRIPTIONS = [
     summary: 'Read the local execution audit log.'
   },
   {
+    command: 'signing',
+    summary: 'List available signing providers used for execution attestations.'
+  },
+  {
     command: 'verify',
     summary: 'Cryptographically verify an execution audit record. Dispatches to the signing provider that produced the attestation (e.g. ssh-signature dispatches to the ssh provider).'
   },
