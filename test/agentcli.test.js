@@ -2506,6 +2506,46 @@ test('delete_after_run true compiles to integer 1', () => {
   assert.equal(compiled.jobs[0].delete_after_run, 1);
 });
 
+test('auth_profile round-trips through openclaw-scheduler compiler', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' },
+        auth_profile: 'anthropic:me.com'
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].auth_profile, 'anthropic:me.com');
+});
+
+test('auth_profile defaults to null when not set', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T', prompt: 'do it',
+        target: { session_target: 'isolated' },
+        schedule: { cron: '0 * * * *' }
+      }]
+    }]
+  };
+  const compiled = compileManifestToScheduler(manifest);
+  assert.equal(compiled.jobs[0].auth_profile, null);
+});
+
+test('auth_profile is included in SCHEDULER_FIELDS_V1', () => {
+  assert.ok(
+    SCHEDULER_FIELDS_V1.includes('auth_profile'),
+    'SCHEDULER_FIELDS_V1 should include auth_profile'
+  );
+});
+
 test('json-rpc validate returns validation result directly', async () => {
   const valid = await handleJsonRpcRequest({
     jsonrpc: '2.0', id: 'v1',
@@ -7737,13 +7777,14 @@ test('applyManifestToScheduler falls back to static when runner lacks queryCapab
 // Versioned Scheduler Field Projection (Track 8)
 // ---------------------------------------------------------------------------
 
-test('SCHEDULER_FIELD_VERSIONS v1 matches original 40-field list', () => {
+test('SCHEDULER_FIELD_VERSIONS v1 matches original 41-field list', () => {
   const v1 = SCHEDULER_FIELD_VERSIONS['1'];
   assert.ok(Array.isArray(v1));
-  assert.strictEqual(v1.length, 40);
+  assert.strictEqual(v1.length, 41);
   assert.ok(v1.includes('id'));
   assert.ok(v1.includes('name'));
   assert.ok(v1.includes('delete_after_run'));
+  assert.ok(v1.includes('auth_profile'));
   assert.ok(!v1.includes('identity_ref'));
   assert.ok(!v1.includes('authorization_proof'));
   assert.ok(!v1.includes('evidence'));

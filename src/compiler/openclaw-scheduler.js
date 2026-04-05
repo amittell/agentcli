@@ -302,6 +302,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
         preferred_session_key: plan.session.preferred_key,
+        auth_profile: plan.auth_profile ?? null,
         identity_principal: plan.identity?.principal ?? null,
         identity_run_as: plan.identity?.run_as ?? null,
         identity_attestation: plan.identity?.attestation ?? null,

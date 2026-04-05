@@ -24,7 +24,7 @@ const KNOWN_TASK_KEYS = new Set([
   'id', 'name', 'enabled', 'prompt', 'command', 'shell', 'target',
   'model_policy', 'intent', 'output', 'budgets', 'schedule', 'trigger',
   'delivery', 'reliability', 'runtime', 'approval', 'context', 'session',
-  'identity', 'contract', 'on_failure', 'delete_after_run',
+  'identity', 'contract', 'on_failure', 'auth_profile', 'delete_after_run',
   'authorization_proof', 'authorization', 'evidence', 'child_credential_policy',
   'verify'
 ]);
@@ -607,6 +607,10 @@ function validateOptionalBlocks(errors, warnings, path, value) {
   }
   if (checkOptionalObject(errors, `${path}.evidence`, value.evidence)) {
     validateEvidenceRef(errors, `${path}.evidence`, value.evidence);
+  }
+
+  if (value.auth_profile != null) {
+    checkString(errors, `${path}.auth_profile`, value.auth_profile);
   }
 
   checkBoolean(errors, `${path}.delete_after_run`, value.delete_after_run);

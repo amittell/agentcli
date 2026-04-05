@@ -576,6 +576,7 @@ export function normalizedTaskPlan(workflow, task, taskIdToCompiledId, { namePre
     evidence: resolveEvidence(workflow, task),
     child_credential_policy: childCredentialPolicy,
     verify,
+    auth_profile: task.auth_profile ?? null,
     delete_after_run: task.delete_after_run ?? null,
     parent_compiled_id: task.trigger ? taskIdToCompiledId.get(task.trigger.parent) : null,
   };

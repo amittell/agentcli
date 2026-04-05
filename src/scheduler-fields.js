@@ -20,6 +20,7 @@ export const SCHEDULER_FIELDS_V1 = [
   'context_retrieval', 'context_retrieval_limit',
   'output_store_limit_bytes', 'output_excerpt_limit_bytes', 'output_summary_limit_bytes', 'output_offload_threshold_bytes',
   'preferred_session_key',
+  'auth_profile',
   'delete_after_run',
 ];
 

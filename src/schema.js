@@ -782,6 +782,7 @@ MANIFEST_SCHEMA.task = {
     child_credential_policy: childCredentialPolicyField,
     verify: verifyField,
     on_failure: onFailureField,
+    auth_profile: { type: 'string', nullable: true, note: 'Auth profile ID for scheduler dispatch (e.g. \'anthropic:me.com\'). Scheduler-target only — ignored by other backends.' },
     delete_after_run: nullableBoolean
   }
 };
@@ -817,4 +818,5 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   verify_shell: nullableString,
   verify_timeout_s: { type: 'integer', nullable: true, min: 1 },
   verify_on_failure: nullableString,
+  auth_profile: { type: 'string', nullable: true, note: 'Auth profile ID for scheduler dispatch (e.g. \'anthropic:me.com\'). Scheduler-target only — ignored by other backends.' },
 });
