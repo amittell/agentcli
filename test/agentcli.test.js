@@ -64,6 +64,7 @@ import {
   registerProvider as registerIdentityProvider,
   getProvider as getIdentityProvider,
 } from '../src/identity/index.js';
+import { buildActorContext, buildStepUpContext } from '../src/actor-context.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -6186,6 +6187,304 @@ test('jwt verifier rejects non-string proof', async () => {
   assert.strictEqual(result.method, 'jwt');
 });
 
+// -- JWT Issuer/Audience Validation --
+
+test('jwt verifier rejects token with wrong issuer when profile.issuer is set', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({ sub: 'test', iss: 'https://wrong.example.com' });
+  const result = verifier.verifyProof(token, {
+    issuer: 'https://expected.example.com',
+  }, {});
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.method, 'jwt');
+  assert.ok(result.reason.includes('issuer'));
+  assert.strictEqual(result.claims_validated, false);
+});
+
+test('jwt verifier accepts token with correct issuer', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({ sub: 'test', iss: 'https://expected.example.com' });
+  const result = verifier.verifyProof(token, {
+    issuer: 'https://expected.example.com',
+  }, {});
+  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.method, 'jwt');
+  assert.strictEqual(result.claims_validated, true);
+});
+
+test('jwt verifier rejects token with wrong audience when profile.audience is set', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({ sub: 'test', aud: 'https://wrong.api.com' });
+  const result = verifier.verifyProof(token, {
+    audience: 'https://expected.api.com',
+  }, {});
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.method, 'jwt');
+  assert.ok(result.reason.includes('audience'));
+  assert.strictEqual(result.claims_validated, false);
+});
+
+test('jwt verifier accepts token with array audience containing expected value', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({
+    sub: 'test',
+    aud: ['https://first.api.com', 'https://expected.api.com', 'https://third.api.com'],
+  });
+  const result = verifier.verifyProof(token, {
+    audience: 'https://expected.api.com',
+  }, {});
+  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.method, 'jwt');
+  assert.strictEqual(result.claims_validated, true);
+});
+
+// -- verify.required / signatureRequired behavior --
+
+test('jwt verifier with signatureRequired=true and no trusted key returns verified=false', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({ sub: 'test' });
+  const result = verifier.verifyProof(token, {}, { requireSignature: true });
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.signature_verified, false);
+  assert.strictEqual(result.signature_required, true);
+  assert.strictEqual(result.claims_validated, true);
+});
+
+test('jwt verifier with signatureRequired=false and no trusted key returns verified=true (claims-only)', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = unsignedJwt({ sub: 'test' });
+  const result = verifier.verifyProof(token, {}, { requireSignature: false });
+  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.signature_verified, false);
+  assert.strictEqual(result.signature_required, false);
+  assert.strictEqual(result.claims_validated, true);
+});
+
+// -- Audit-safe claim extraction --
+
+test('jwt verifier decoded_claims includes AUDIT_SAFE_CLAIMS from payload', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const payload = {
+    sub: 'test-subject',
+    iss: 'https://issuer.example.com',
+    aud: 'https://api.example.com',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    nbf: Math.floor(Date.now() / 1000) - 60,
+    org_id: 'org-123',
+    on_behalf_of_user_id: 'user-456',
+    delegation_grant_id: 'grant-789',
+    run_id: 'run-abc',
+    agent_id: 'agent-def',
+    verification_ref: 'ref-ghi',
+    verification_level: 'high',
+    verification_verified_at: '2026-01-01T00:00:00Z',
+    step_up_policy: 'mfa',
+    session_id: 'sess-001',
+    request_id: 'req-002',
+  };
+  const token = unsignedJwt(payload);
+  const result = verifier.verifyProof(token, {}, {});
+  assert.strictEqual(result.verified, true);
+  const dc = result.decoded_claims;
+  assert.strictEqual(dc.sub, 'test-subject');
+  assert.strictEqual(dc.iss, 'https://issuer.example.com');
+  assert.strictEqual(dc.aud, 'https://api.example.com');
+  assert.strictEqual(dc.exp, payload.exp);
+  assert.strictEqual(dc.nbf, payload.nbf);
+  assert.strictEqual(dc.org_id, 'org-123');
+  assert.strictEqual(dc.on_behalf_of_user_id, 'user-456');
+  assert.strictEqual(dc.delegation_grant_id, 'grant-789');
+  assert.strictEqual(dc.run_id, 'run-abc');
+  assert.strictEqual(dc.agent_id, 'agent-def');
+  assert.strictEqual(dc.verification_ref, 'ref-ghi');
+  assert.strictEqual(dc.verification_level, 'high');
+  assert.strictEqual(dc.verification_verified_at, '2026-01-01T00:00:00Z');
+  assert.strictEqual(dc.step_up_policy, 'mfa');
+  assert.strictEqual(dc.session_id, 'sess-001');
+  assert.strictEqual(dc.request_id, 'req-002');
+});
+
+test('jwt verifier decoded_claims does not include claims outside the audit-safe list', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const payload = {
+    sub: 'test-subject',
+    secret_internal_field: 'should-not-appear',
+    password: 'hunter2',
+    custom_data: { nested: true },
+  };
+  const token = unsignedJwt(payload);
+  const result = verifier.verifyProof(token, {}, {});
+  assert.strictEqual(result.verified, true);
+  const dc = result.decoded_claims;
+  assert.strictEqual(dc.sub, 'test-subject');
+  assert.strictEqual(dc.secret_internal_field, undefined);
+  assert.strictEqual(dc.password, undefined);
+  assert.strictEqual(dc.custom_data, undefined);
+});
+
+// -- JWT verifier profile validation --
+
+test('jwt verifier validateProfile rejects verify.required=true without public_key or jwks_uri', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({
+    verify: { required: true },
+    proof: { value_from: { env: 'JWT_TOKEN' } },
+  }, {});
+  assert.strictEqual(result.valid, false);
+  const fieldNames = result.errors.map(e => e.field);
+  assert.ok(fieldNames.includes('verify.required'));
+});
+
+test('jwt verifier validateProfile accepts verify.required=true with public_key', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({
+    verify: { required: true },
+    public_key: testKeyPair.publicKey,
+    proof: { value_from: { env: 'JWT_TOKEN' } },
+  }, {});
+  assert.strictEqual(result.valid, true);
+});
+
+test('jwt verifier validateProfile rejects non-string jwks_uri', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({
+    jwks_uri: 123,
+    proof: { value_from: { env: 'JWT_TOKEN' } },
+  }, {});
+  assert.strictEqual(result.valid, false);
+  const fieldNames = result.errors.map(e => e.field);
+  assert.ok(fieldNames.includes('jwks_uri'));
+});
+
+test('jwt verifier validateProfile rejects empty string jwks_uri', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const result = verifier.validateProfile({
+    jwks_uri: '   ',
+    proof: { value_from: { env: 'JWT_TOKEN' } },
+  }, {});
+  assert.strictEqual(result.valid, false);
+  const fieldNames = result.errors.map(e => e.field);
+  assert.ok(fieldNames.includes('jwks_uri'));
+});
+
+// -- Signed JWT verification through the verifier --
+
+test('jwt verifier verifies signed token when trustedKey is provided in context', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const token = signedJwt({
+    sub: 'signed-subject',
+    iss: 'https://issuer.example.com',
+    aud: 'https://api.example.com',
+    org_id: 'org-signed',
+  });
+  const result = verifier.verifyProof(token, {
+    issuer: 'https://issuer.example.com',
+    audience: 'https://api.example.com',
+  }, {
+    trustedKey: testKeyPair.publicKey,
+    trustedKeySource: 'public_key',
+    requireSignature: true,
+  });
+  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.signature_verified, true);
+  assert.strictEqual(result.signature_required, true);
+  assert.strictEqual(result.claims_validated, true);
+  assert.strictEqual(result.key_source, 'public_key');
+  assert.strictEqual(result.decoded_claims.org_id, 'org-signed');
+});
+
+test('jwt verifier rejects signed token with wrong key', async () => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const otherKeyPair = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  const token = signedJwt({ sub: 'test' });
+  const result = verifier.verifyProof(token, {}, {
+    trustedKey: otherKeyPair.publicKey,
+    requireSignature: true,
+  });
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.signature_verified, false);
+});
+
+// -- resolveJwtVerificationContext --
+
+test('resolveJwtVerificationContext returns context with trustedKey from profile.public_key', async () => {
+  const { resolveJwtVerificationContext } = await import('../src/authorization-proof/jwt.js');
+  const token = signedJwt({ sub: 'test' });
+  const ctx = await resolveJwtVerificationContext(token, {
+    public_key: testKeyPair.publicKey,
+    verify: { required: true },
+  }, {});
+  assert.strictEqual(ctx.trustedKey, testKeyPair.publicKey);
+  assert.strictEqual(ctx.trustedKeySource, 'public_key');
+  assert.strictEqual(ctx.requireSignature, true);
+  assert.strictEqual(ctx.trustedKeyError, null);
+});
+
+test('resolveJwtVerificationContext returns null trustedKey when no key source is configured', async () => {
+  const { resolveJwtVerificationContext } = await import('../src/authorization-proof/jwt.js');
+  const token = unsignedJwt({ sub: 'test' });
+  const ctx = await resolveJwtVerificationContext(token, {}, {});
+  assert.strictEqual(ctx.trustedKey, null);
+  assert.strictEqual(ctx.trustedKeySource, null);
+  assert.strictEqual(ctx.trustedKeyError, null);
+  assert.strictEqual(ctx.requireSignature, false);
+});
+
+test('resolveJwtVerificationContext inherits requireSignature from profile.verify.required', async () => {
+  const { resolveJwtVerificationContext } = await import('../src/authorization-proof/jwt.js');
+  const token = unsignedJwt({ sub: 'test' });
+  const ctx = await resolveJwtVerificationContext(token, {
+    verify: { required: true },
+  }, {});
+  assert.strictEqual(ctx.requireSignature, true);
+});
+
+test('resolveJwtVerificationContext uses ctx.trustedKey when provided', async () => {
+  const { resolveJwtVerificationContext } = await import('../src/authorization-proof/jwt.js');
+  const token = signedJwt({ sub: 'test' });
+  const ctx = await resolveJwtVerificationContext(token, {}, {
+    trustedKey: testKeyPair.publicKey,
+    trustedKeySource: 'test-override',
+    trustedKeyId: 'key-123',
+  });
+  assert.strictEqual(ctx.trustedKey, testKeyPair.publicKey);
+  assert.strictEqual(ctx.trustedKeySource, 'test-override');
+  assert.strictEqual(ctx.trustedKeyId, 'key-123');
+  assert.strictEqual(ctx.trustedKeyError, null);
+});
+
 // -- Authorization Provider Tests --
 
 test('authorization provider registry lists none', async () => {
@@ -6261,6 +6560,182 @@ test('normalizeAuthorizationRequest includes only listed fields', async () => {
   assert.ok(result.identity);
   assert.strictEqual(result.contract, undefined);
   assert.strictEqual(result.command, undefined);
+});
+
+test('normalizeAuthorizationRequest actor field included with full data', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    actor: {
+      actor: {
+        principal: 'agent://bot-1',
+        kind: 'service_account',
+        display_name: 'Bot One',
+      },
+      org_id: 'org-42',
+      on_behalf_of_user_id: 'user-99',
+      delegation_grant_id: 'grant-7',
+      run_id: 'run-123',
+      agent_id: 'agent-456',
+    },
+    includeFields: ['actor'],
+  });
+  assert.deepStrictEqual(result.actor, {
+    actor: {
+      principal: 'agent://bot-1',
+      kind: 'service_account',
+      display_name: 'Bot One',
+    },
+    org_id: 'org-42',
+    on_behalf_of_user_id: 'user-99',
+    delegation_grant_id: 'grant-7',
+    run_id: 'run-123',
+    agent_id: 'agent-456',
+  });
+});
+
+test('normalizeAuthorizationRequest actor field with null fallbacks', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    actor: null,
+    includeFields: ['actor'],
+  });
+  assert.deepStrictEqual(result.actor, {
+    actor: {
+      principal: null,
+      kind: null,
+      display_name: null,
+    },
+    org_id: null,
+    on_behalf_of_user_id: null,
+    delegation_grant_id: null,
+    run_id: null,
+    agent_id: null,
+  });
+});
+
+test('normalizeAuthorizationRequest step_up field included with full data', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    stepUp: {
+      verified: true,
+      method: 'totp',
+      issuer: 'https://auth.example.com',
+      verified_at: '2026-04-07T12:00:00Z',
+      step_up_policy: 'require-mfa',
+      verification_ref: 'ref-abc',
+      verification_level: 'high',
+      claims: { aal: 'aal2' },
+      reason: 'sensitive operation',
+    },
+    includeFields: ['step_up'],
+  });
+  assert.deepStrictEqual(result.step_up, {
+    verified: true,
+    method: 'totp',
+    issuer: 'https://auth.example.com',
+    verified_at: '2026-04-07T12:00:00Z',
+    step_up_policy: 'require-mfa',
+    verification_ref: 'ref-abc',
+    verification_level: 'high',
+    claims: { aal: 'aal2' },
+    reason: 'sensitive operation',
+  });
+});
+
+test('normalizeAuthorizationRequest step_up field with null fallbacks', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    stepUp: null,
+    includeFields: ['step_up'],
+  });
+  assert.deepStrictEqual(result.step_up, {
+    verified: null,
+    method: null,
+    issuer: null,
+    verified_at: null,
+    step_up_policy: null,
+    verification_ref: null,
+    verification_level: null,
+    claims: null,
+    reason: null,
+  });
+});
+
+test('normalizeAuthorizationRequest actor and step_up excluded when not in includeFields', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    identity: { principal: 'agent://a', trust_level: 'supervised' },
+    command: { program: 'echo', args: ['hi'] },
+    actor: {
+      actor: { principal: 'agent://bot-1', kind: 'service_account', display_name: 'Bot' },
+      org_id: 'org-1',
+    },
+    stepUp: { verified: true, method: 'totp' },
+    includeFields: ['identity', 'command'],
+  });
+  assert.strictEqual(result.actor, undefined);
+  assert.strictEqual(result.step_up, undefined);
+  assert.ok(result.identity);
+  assert.ok(result.command);
+});
+
+test('normalizeAuthorizationRequest both actor and step_up together', async () => {
+  const { normalizeAuthorizationRequest } = await import('../src/authorization/index.js');
+  const result = normalizeAuthorizationRequest({
+    source: { workflow_id: 'w1', task_id: 't1' },
+    actor: {
+      actor: {
+        principal: 'agent://bot-2',
+        kind: 'human',
+        display_name: 'Alice',
+      },
+      org_id: 'org-10',
+      on_behalf_of_user_id: 'user-5',
+      delegation_grant_id: 'grant-3',
+      run_id: 'run-77',
+      agent_id: 'agent-88',
+    },
+    stepUp: {
+      verified: false,
+      method: 'webauthn',
+      issuer: 'https://id.example.com',
+      verified_at: '2026-04-07T08:30:00Z',
+      step_up_policy: 'optional-mfa',
+      verification_ref: 'ref-xyz',
+      verification_level: 'medium',
+      claims: { amr: ['pwd', 'otp'] },
+      reason: 'elevated access',
+    },
+    includeFields: ['actor', 'step_up'],
+  });
+  assert.deepStrictEqual(result.actor, {
+    actor: {
+      principal: 'agent://bot-2',
+      kind: 'human',
+      display_name: 'Alice',
+    },
+    org_id: 'org-10',
+    on_behalf_of_user_id: 'user-5',
+    delegation_grant_id: 'grant-3',
+    run_id: 'run-77',
+    agent_id: 'agent-88',
+  });
+  assert.deepStrictEqual(result.step_up, {
+    verified: false,
+    method: 'webauthn',
+    issuer: 'https://id.example.com',
+    verified_at: '2026-04-07T08:30:00Z',
+    step_up_policy: 'optional-mfa',
+    verification_ref: 'ref-xyz',
+    verification_level: 'medium',
+    claims: { amr: ['pwd', 'otp'] },
+    reason: 'elevated access',
+  });
 });
 
 // -- Three-Stage Merge Tests --
@@ -11655,4 +12130,275 @@ test('exec verify: v0.2 path verify failure with on_failure=error throws', async
       return true;
     }
   );
+});
+
+// ---------------------------------------------------------------------------
+// buildActorContext
+// ---------------------------------------------------------------------------
+
+test('buildActorContext returns full actor context when all inputs provided', () => {
+  const result = buildActorContext({
+    identityDeclaration: {
+      subject: {
+        kind: 'service',
+        principal: 'agent://acme/deploy-bot',
+        display_name: 'Deploy Bot',
+        attributes: {
+          org_id: 'attr-org',
+          on_behalf_of_user_id: 'attr-user',
+          delegation_grant_id: 'attr-grant',
+          run_id: 'attr-run',
+          agent_id: 'attr-agent',
+          verification_ref: 'attr-vref',
+          verification_level: 'attr-vlevel',
+          verification_verified_at: 'attr-vat',
+          step_up_policy: 'attr-policy',
+        },
+      },
+    },
+    authorizationProofSummary: {
+      verified: true,
+      method: 'jwt',
+      issuer: 'https://auth.acme.co',
+      decoded_claims: {
+        org_id: 'claims-org',
+        on_behalf_of_user_id: 'claims-user',
+        delegation_grant_id: 'claims-grant',
+        run_id: 'claims-run',
+        agent_id: 'claims-agent',
+        verification_ref: 'claims-vref',
+        verification_level: 'claims-vlevel',
+        verification_verified_at: 'claims-vat',
+        step_up_policy: 'claims-policy',
+      },
+    },
+    principal: 'agent://override/principal',
+    target: { agent_id: 'target-agent' },
+  });
+
+  assert.equal(result.actor.principal, 'agent://override/principal');
+  assert.equal(result.actor.kind, 'service');
+  assert.equal(result.actor.display_name, 'Deploy Bot');
+  assert.equal(result.org_id, 'claims-org');
+  assert.equal(result.on_behalf_of_user_id, 'claims-user');
+  assert.equal(result.delegation_grant_id, 'claims-grant');
+  assert.equal(result.run_id, 'claims-run');
+  assert.equal(result.agent_id, 'target-agent');
+  assert.equal(result.verification.ref, 'claims-vref');
+  assert.equal(result.verification.level, 'claims-vlevel');
+  assert.equal(result.verification.verified_at, 'claims-vat');
+  assert.equal(result.verification.step_up_policy, 'claims-policy');
+  assert.equal(result.verification.proof_verified, true);
+  assert.equal(result.verification.proof_method, 'jwt');
+  assert.equal(result.verification.proof_issuer, 'https://auth.acme.co');
+});
+
+test('buildActorContext claims override attributes', () => {
+  const result = buildActorContext({
+    identityDeclaration: {
+      subject: {
+        kind: 'service',
+        principal: 'agent://acme/bot',
+        attributes: {
+          org_id: 'attr-org',
+          run_id: 'attr-run',
+        },
+      },
+    },
+    authorizationProofSummary: {
+      decoded_claims: {
+        org_id: 'claims-org',
+      },
+    },
+  });
+
+  assert.equal(result.org_id, 'claims-org');
+  assert.equal(result.run_id, 'attr-run');
+});
+
+test('buildActorContext target.agent_id overrides claims.agent_id', () => {
+  const result = buildActorContext({
+    authorizationProofSummary: {
+      decoded_claims: { agent_id: 'claims-agent' },
+    },
+    target: { agent_id: 'target-agent' },
+  });
+
+  assert.equal(result.agent_id, 'target-agent');
+});
+
+test('buildActorContext returns null fields when called with no arguments', () => {
+  const result = buildActorContext();
+
+  assert.equal(result.actor.principal, null);
+  assert.equal(result.actor.kind, null);
+  assert.equal(result.actor.display_name, null);
+  assert.equal(result.org_id, null);
+  assert.equal(result.on_behalf_of_user_id, null);
+  assert.equal(result.delegation_grant_id, null);
+  assert.equal(result.run_id, null);
+  assert.equal(result.agent_id, null);
+  assert.equal(result.verification.ref, null);
+  assert.equal(result.verification.level, null);
+  assert.equal(result.verification.verified_at, null);
+  assert.equal(result.verification.step_up_policy, null);
+  assert.equal(result.verification.proof_verified, null);
+  assert.equal(result.verification.proof_method, null);
+  assert.equal(result.verification.proof_issuer, null);
+});
+
+test('buildActorContext returns null fields when called with empty object', () => {
+  const result = buildActorContext({});
+
+  assert.equal(result.actor.principal, null);
+  assert.equal(result.actor.kind, null);
+  assert.equal(result.org_id, null);
+  assert.equal(result.agent_id, null);
+});
+
+test('buildActorContext works with only identityDeclaration', () => {
+  const result = buildActorContext({
+    identityDeclaration: {
+      subject: {
+        kind: 'user',
+        principal: 'user://acme/alice',
+        display_name: 'Alice',
+        attributes: {
+          org_id: 'acme',
+          run_id: 'run-42',
+          agent_id: 'agent-7',
+          verification_ref: 'vref-1',
+          verification_level: 'high',
+          verification_verified_at: '2026-01-01T00:00:00Z',
+          step_up_policy: 'mfa-required',
+        },
+      },
+    },
+  });
+
+  assert.equal(result.actor.principal, 'user://acme/alice');
+  assert.equal(result.actor.kind, 'user');
+  assert.equal(result.actor.display_name, 'Alice');
+  assert.equal(result.org_id, 'acme');
+  assert.equal(result.run_id, 'run-42');
+  assert.equal(result.agent_id, 'agent-7');
+  assert.equal(result.on_behalf_of_user_id, null);
+  assert.equal(result.delegation_grant_id, null);
+  assert.equal(result.verification.ref, 'vref-1');
+  assert.equal(result.verification.level, 'high');
+  assert.equal(result.verification.verified_at, '2026-01-01T00:00:00Z');
+  assert.equal(result.verification.step_up_policy, 'mfa-required');
+  assert.equal(result.verification.proof_verified, null);
+  assert.equal(result.verification.proof_method, null);
+  assert.equal(result.verification.proof_issuer, null);
+});
+
+test('buildActorContext principal resolution priority: explicit > resolvedIdentity > declaredIdentity > identityDeclaration', () => {
+  const declaration = {
+    subject: { kind: 'service', principal: 'agent://declaration/bot' },
+  };
+  const declared = {
+    subject: { kind: 'service', principal: 'agent://declared/bot' },
+  };
+  const resolved = {
+    subject: { kind: 'service', principal: 'agent://resolved/bot' },
+  };
+
+  const withAll = buildActorContext({
+    identityDeclaration: declaration,
+    declaredIdentity: declared,
+    resolvedIdentity: resolved,
+    principal: 'agent://explicit/bot',
+  });
+  assert.equal(withAll.actor.principal, 'agent://explicit/bot');
+
+  const withoutExplicit = buildActorContext({
+    identityDeclaration: declaration,
+    declaredIdentity: declared,
+    resolvedIdentity: resolved,
+  });
+  assert.equal(withoutExplicit.actor.principal, 'agent://resolved/bot');
+
+  const withoutResolved = buildActorContext({
+    identityDeclaration: declaration,
+    declaredIdentity: declared,
+  });
+  assert.equal(withoutResolved.actor.principal, 'agent://declared/bot');
+
+  const withOnlyDeclaration = buildActorContext({
+    identityDeclaration: declaration,
+  });
+  assert.equal(withOnlyDeclaration.actor.principal, 'agent://declaration/bot');
+});
+
+// ---------------------------------------------------------------------------
+// buildStepUpContext
+// ---------------------------------------------------------------------------
+
+test('buildStepUpContext returns full step-up context from authorization proof summary', () => {
+  const result = buildStepUpContext({
+    verified: true,
+    method: 'jwt',
+    issuer: 'https://auth.acme.co',
+    verified_at: '2026-01-15T12:00:00Z',
+    reason: 'step-up required for admin action',
+    decoded_claims: {
+      step_up_policy: 'mfa-required',
+      verification_ref: 'vref-abc',
+      verification_level: 'high',
+      verification_verified_at: '2026-01-15T11:55:00Z',
+    },
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(result.method, 'jwt');
+  assert.equal(result.issuer, 'https://auth.acme.co');
+  assert.equal(result.verified_at, '2026-01-15T12:00:00Z');
+  assert.equal(result.step_up_policy, 'mfa-required');
+  assert.equal(result.verification_ref, 'vref-abc');
+  assert.equal(result.verification_level, 'high');
+  assert.equal(result.reason, 'step-up required for admin action');
+  assert.deepEqual(result.claims, {
+    step_up_policy: 'mfa-required',
+    verification_ref: 'vref-abc',
+    verification_level: 'high',
+    verification_verified_at: '2026-01-15T11:55:00Z',
+  });
+});
+
+test('buildStepUpContext returns null when called with null', () => {
+  const result = buildStepUpContext(null);
+  assert.equal(result, null);
+});
+
+test('buildStepUpContext returns null fields when called with empty object', () => {
+  const result = buildStepUpContext({});
+  assert.equal(result.verified, null);
+  assert.equal(result.method, null);
+  assert.equal(result.issuer, null);
+  assert.equal(result.verified_at, null);
+  assert.equal(result.step_up_policy, null);
+  assert.equal(result.verification_ref, null);
+  assert.equal(result.verification_level, null);
+  assert.equal(result.claims, null);
+  assert.equal(result.reason, null);
+});
+
+test('buildStepUpContext extracts step_up_policy, verification_ref, verification_level from decoded_claims', () => {
+  const result = buildStepUpContext({
+    decoded_claims: {
+      step_up_policy: 'biometric',
+      verification_ref: 'ref-xyz',
+      verification_level: 'substantial',
+    },
+  });
+
+  assert.equal(result.step_up_policy, 'biometric');
+  assert.equal(result.verification_ref, 'ref-xyz');
+  assert.equal(result.verification_level, 'substantial');
+  assert.deepEqual(result.claims, {
+    step_up_policy: 'biometric',
+    verification_ref: 'ref-xyz',
+    verification_level: 'substantial',
+  });
 });
