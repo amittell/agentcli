@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (2026-04-04)
+## 0.2.2 (2026-04-08)
 
 - identity step-up verification for sensitive commands via signed JWT authorization proofs
 - actor context module (`buildActorContext`, `buildStepUpContext`) for canonical actor chain metadata
@@ -9,6 +9,11 @@
 - evidence payload and attestation now include `actor_context`
 - `stripe-identity-step-up.json` example with matching OPA policy and testing guide
 - pre-execution failure audit records now include `declared_identity` and `actor_context`
+- `auth_profile` field on tasks for scheduler dispatch
+- `sfdc-ops.json` example: Salesforce CLI with org status, SOQL queries, metadata, deployment validation, and deploy with approval
+- `servicenow-ops.json` example: ServiceNow CLI with incidents, P1 monitoring, change requests, problems, CMDB, and incident creation
+
+## 0.2.1 (2026-04-04)
 - `agentcli run` command for local shell-only workflow DAG execution with trigger edges, contains:/regex: conditions, and on_failure handlers evaluated in-process
 - `agentcli signing providers` command lists registered signing providers and their attestation methods
 - delegation capability warnings surfaced in scheduler dispatch responses (previously silently swallowed)
