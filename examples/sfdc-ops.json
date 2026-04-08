@@ -1,0 +1,223 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "sf-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/sf-readonly",
+        "display_name": "Salesforce Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SF_ACCESS_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SF_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "sf-deploy",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/sf-deploy",
+        "display_name": "Salesforce Deploy Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SF_ACCESS_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SF_ACCESS_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "sf-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "sfdc-ops",
+      "name": "Salesforce Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "org-status",
+          "name": "Check Org Limits and Status",
+          "shell": {
+            "program": "sf",
+            "args": ["org", "display", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-readonly" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 8 * * *" }
+        },
+        {
+          "id": "query-accounts",
+          "name": "Query Recent Accounts",
+          "shell": {
+            "program": "sf",
+            "args": ["data", "query", "--query", "SELECT Id, Name, CreatedDate FROM Account ORDER BY CreatedDate DESC LIMIT 20", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-readonly" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 */4 * * *" }
+        },
+        {
+          "id": "query-open-cases",
+          "name": "Query Open Cases",
+          "shell": {
+            "program": "sf",
+            "args": ["data", "query", "--query", "SELECT Id, CaseNumber, Subject, Status, Priority FROM Case WHERE IsClosed = false ORDER BY Priority, CreatedDate DESC LIMIT 50", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-readonly" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 9 * * 1-5" }
+        },
+        {
+          "id": "list-metadata",
+          "name": "List Custom Object Metadata",
+          "shell": {
+            "program": "sf",
+            "args": ["org", "list", "metadata-types", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-readonly" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "0 6 * * 1" }
+        },
+        {
+          "id": "deploy-validate",
+          "name": "Validate Deployment (Check Only)",
+          "shell": {
+            "program": "sf",
+            "args": ["project", "deploy", "validate", "--source-dir", "force-app", "--test-level", "RunLocalTests", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-deploy" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "schedule": { "cron": "0 10 * * 1-5" },
+          "on_failure": {
+            "id": "triage-deploy-failure",
+            "name": "Triage Deployment Validation Failure",
+            "prompt": "The Salesforce deployment validation failed. Review the error output, determine whether it is a test failure, metadata conflict, dependency issue, or org limit problem, and recommend the next step without making changes.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "deploy-start",
+          "name": "Deploy to Org",
+          "shell": {
+            "program": "sf",
+            "args": ["project", "deploy", "start", "--source-dir", "force-app", "--test-level", "RunLocalTests", "--json"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "sf-deploy" },
+          "evidence": { "ref": "sf-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 14 * * 3" }
+        }
+      ]
+    }
+  ]
+}
