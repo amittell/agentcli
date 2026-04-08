@@ -1,0 +1,220 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "snow-readonly",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/snow-readonly",
+        "display_name": "ServiceNow Read-Only Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SN_AUTH_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SN_AUTH_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "snow-write",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/snow-write",
+        "display_name": "ServiceNow Write Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "SN_AUTH_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "SN_AUTH_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "snow-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "servicenow-ops",
+      "name": "ServiceNow Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "list-open-incidents",
+          "name": "List Open Incidents",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "list", "--table", "incident", "--query", "active=true^ORDERBYDESCsys_created_on", "--fields", "number,short_description,priority,state,assigned_to", "--limit", "25", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-readonly" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "list-p1-incidents",
+          "name": "List Priority 1 Incidents",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "list", "--table", "incident", "--query", "active=true^priority=1", "--fields", "number,short_description,state,assigned_to,sys_created_on", "--limit", "10", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-readonly" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "schedule": { "cron": "*/5 * * * *" },
+          "on_failure": {
+            "id": "triage-p1-check-failure",
+            "name": "Triage P1 Incident Check Failure",
+            "prompt": "The ServiceNow P1 incident check failed. Determine whether this is an authentication issue, API rate limit, instance availability problem, or query error, and recommend the next step.",
+            "target": { "session_target": "isolated", "agent_id": "main" },
+            "intent": { "mode": "plan", "read_only": true },
+            "context": { "retrieval": "recent", "limit": 3 },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "list-open-changes",
+          "name": "List Open Change Requests",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "list", "--table", "change_request", "--query", "active=true^type=normal^ORDERBYstart_date", "--fields", "number,short_description,type,state,start_date,end_date,assigned_to", "--limit", "20", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-readonly" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 8 * * 1-5" }
+        },
+        {
+          "id": "list-open-problems",
+          "name": "List Open Problems",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "list", "--table", "problem", "--query", "active=true^ORDERBYDESCpriority", "--fields", "number,short_description,priority,state,assigned_to", "--limit", "20", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-readonly" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000
+          },
+          "schedule": { "cron": "0 9 * * 1-5" }
+        },
+        {
+          "id": "check-cmdb-servers",
+          "name": "List CMDB Server Records",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "list", "--table", "cmdb_ci_server", "--query", "operational_status=1", "--fields", "name,ip_address,os,classification,sys_class_name", "--limit", "50", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-readonly" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 8000,
+            "offload": "auto"
+          },
+          "schedule": { "cron": "0 6 * * 1" }
+        },
+        {
+          "id": "create-incident",
+          "name": "Create Incident",
+          "shell": {
+            "program": "snc",
+            "args": ["record", "create", "--table", "incident", "--data", "{\"short_description\":\"Automated incident from agentcli\",\"urgency\":\"2\",\"impact\":\"2\",\"category\":\"software\"}", "--output", "json", "--profile", "prod"]
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "snow-write" },
+          "evidence": { "ref": "snow-evidence" },
+          "output": {
+            "format": "json",
+            "preview_bytes": 4000
+          },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 10 * * 1-5" }
+        }
+      ]
+    }
+  ]
+}
