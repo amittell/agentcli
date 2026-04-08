@@ -80,6 +80,11 @@ Copy-paste patterns for common agentcli manifests.
 | `delivery.to` | optional | Channel-specific target (chat ID) |
 | `reliability.overlap_policy` | optional | `skip`, `queue`, `allow` |
 | `verify.shell` | optional | Post-completion verification command |
+| `verify.required` | optional | When `true`, requires `public_key` or `jwks_uri` for jwt proofs |
+| `authorization.request.include` | optional | Array of include fields for OPA request (`actor`, `step_up`) |
+| `subject.attributes` | optional | Actor metadata object (`org_id`, `on_behalf_of_user_id`, `delegation_grant_id`, `run_id`, `agent_id`, `verification_ref`, `verification_level`) |
+| `authorization_proof_profiles[].jwks_uri` | optional | JWKS endpoint URI for JWT key discovery and caching |
+| `authorization_proof_profiles[].public_key` | optional | Inline public key for JWT verification |
 
 ## Session targets
 
@@ -134,6 +139,7 @@ Copy-paste patterns for common agentcli manifests.
 | [identity-v2.json](examples/identity-v2.json) | 2 | Minimal v0.2 identity with env-bearer |
 | [trust-enforcement.json](examples/trust-enforcement.json) | 3 | Trust level enforcement with contract boundaries |
 | [authorization-proof.json](examples/authorization-proof.json) | 1 | JWT-based authorization proof verification |
+| [stripe-identity-step-up.json](examples/stripe-identity-step-up.json) | - | Identity step-up verification with OPA policy and testing guide |
 
 ## Commands
 

@@ -816,7 +816,7 @@ Each authorization proof profile MUST contain:
 
 Proposed enums for `method`:
 
-- `jwt` -- the proof is a signed JWT; verification checks the signature against the declared `issuer`'s JWKS or a configured public key
+- `jwt` -- the proof is a signed JWT; verification checks the signature against the declared `issuer`'s JWKS or a configured public key. When `verify.required` is `true`, the profile MUST provide `jwks_uri` or `public_key`.
 - `detached-signature` -- the proof is a detached signature over the manifest payload (or a specified subset); verification checks the signature against a configured public key or allowed_signers file
 - `certificate` -- the proof is a certificate chain; verification checks the chain against a configured trust anchor
 - `none` -- no proof is attached; this is valid only when `verify.required` is `false` and exists for development or opt-out scenarios
@@ -834,7 +834,7 @@ Each authorization proof profile MAY contain:
 
 The valid claim names depend on the `method`:
 
-- for `jwt`: standard JWT claims (`sub`, `aud`, `iss`, `exp`) plus any custom claims the issuer includes; the verifier SHOULD validate all declared claims against the decoded token
+- for `jwt`: standard JWT claims (`sub`, `aud`, `iss`, `exp`) plus any custom claims the issuer includes; the verifier SHOULD validate all declared claims against the decoded token and MAY surface audit-safe decoded claims such as `org_id`, `delegation_grant_id`, `verification_ref`, or `step_up_policy`
 - for `detached-signature`: claims are not applicable; if present, they are ignored
 - for `certificate`: `subject` (DN or SAN), `issuer` (CA DN); the verifier SHOULD validate declared claims against the certificate fields
 
@@ -1017,6 +1017,7 @@ Proposed bind targets:
 - `declared_identity` -- the identity declaration after three-stage merge (subject, trust level, provider name); does not include resolved credentials
 - `resolved_identity` -- the audit-safe session description (subject, instance, delegation chain, credential summary, provider assertions); does not include raw credentials
 - `authorization_proof` -- the authorization proof verification summary (method, issuer, verified status, manifest digest)
+- `actor_context` -- the canonical actor chain context (principal, org, delegation, run, agent, and verification metadata)
 - `contract` -- the contract block (sandbox, network, allowed_paths, trust_enforcement, required_trust_level, audit)
 - `command` -- the resolved command (program, args, cwd); does not include environment variables or stdin
 - `result` -- the execution result (exit_code, duration_ms, stdout_bytes, stderr_bytes, structured_present, output_hash)
@@ -1947,7 +1948,7 @@ Rules:
 - trust level and authorization decisions MUST be included when trust enforcement is active
 - handoff mode MUST be recorded when used or requested
 - manifest authorization proof summary SHOULD be included when present
-- raw authorization proof values (JWTs, signatures, certificate chains) MUST NOT appear in audit records; only method, issuer, and verification status are safe for audit
+- raw authorization proof values (JWTs, signatures, certificate chains) MUST NOT appear in audit records; audit-safe verification summaries, actor context, and a safe subset of decoded JWT claims are allowed
 
 ### Audit Compaction
 
@@ -2386,7 +2387,7 @@ Each provider file auto-registers with its registry on import (e.g., `import './
 
 #### JWT Verifier Signature Verification
 
-The JWT authorization proof verifier performs structural validation, temporal checks (exp/nbf), and claims matching without external dependencies. Cryptographic signature verification (RS256, ES256) is supported when a `ctx.trustedKey` (PEM public key) is provided, using Node's built-in `crypto.createVerify`. When no trusted key is available, verification proceeds with `signature_verified: false` and a descriptive reason, allowing structural/claims validation to still provide value.
+The JWT authorization proof verifier performs structural validation, temporal checks (exp/nbf), issuer and audience matching, and declared-claim checks without external dependencies. Cryptographic signature verification (RS256, ES256) is supported through either a configured `public_key` or a fetched `jwks_uri`, using Node's built-in `crypto.createVerify`. When `verify.required` is `true`, execution is rejected unless signature verification succeeds.
 
 #### Certificate Verifier Uses `crypto.X509Certificate`
 
@@ -2410,11 +2411,11 @@ When Phase 2 (identity resolution) fails, the runtime writes an audit record wit
 
 #### Authorization Proof Failure Audit Records
 
-When Phase 1 (authorization proof verification) fails with `verify.required: true`, the runtime writes an audit record with `declared_identity: null` and the proof verification summary before throwing. This captures pre-execution authorization failures in the audit trail.
+When Phase 1 (authorization proof verification) fails with `verify.required: true`, the runtime writes an audit record with the merged declared identity, actor context, and proof verification summary before throwing. This captures pre-execution authorization failures in the audit trail.
 
 #### OPA Authorization Provider
 
-The OPA provider (`src/authorization/opa.js`) communicates via OPA's REST API (`POST /v1/data/<package>/<rule>`), normalizing OPA's flexible response formats (boolean, object with `.allow`, or string) into the standard decision set. Error handling respects the `on_error` policy: `deny` fails closed, `warn` records and continues.
+The OPA provider (`src/authorization/opa.js`) communicates via OPA's REST API (`POST /v1/data/<package>/<rule>`), normalizing OPA's flexible response formats (boolean, object with `.allow`, or string) into the standard decision set. Error handling respects the `on_error` policy: `deny` fails closed, `warn` records and continues. When requested via `authorization.request.include`, policy input can now include `actor` and `step_up` sections derived from the merged identity declaration and verified authorization proof summary.
 
 #### Token Exchange Provider with Downscope Handoff
 

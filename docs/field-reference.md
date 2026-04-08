@@ -300,7 +300,7 @@ In the v0.2 execution pipeline, `verify` runs after evidence generation. Evidenc
 | `run_as` | string (token) | No | -- | Runtime account (e.g., UNIX user). Restricted token. |
 | `issuer` | string | No | -- | Trust domain or token issuer. |
 | `delegation_mode` | string | No | `none`, `on-behalf-of`, `impersonation` | How authority is exercised. |
-| `attributes` | object | No | -- | Audit-safe metadata. Free-form key-value pairs. |
+| `attributes` | object | No | -- | Audit-safe metadata. Free-form key-value pairs. Common actor-context keys include `org_id`, `on_behalf_of_user_id`, `delegation_grant_id`, `run_id`, `agent_id`, `verification_ref`, `verification_level`, and `verification_verified_at`. |
 
 ### Identity Auth Fields
 
@@ -399,8 +399,8 @@ Each element in the `bindings` array is an object with these fields:
 | `method` | string | Yes | `none`, `jwt`, `detached-signature`, `certificate` | Proof method. |
 | `issuer` | string | No | -- | Token issuer. |
 | `audience` | string | No | -- | Token audience. |
-| `jwks_uri` | string | No | -- | URI for JSON Web Key Set (for `jwt` method). |
-| `public_key` | string | No | -- | Public key material (for `detached-signature` or `certificate`). |
+| `jwks_uri` | string | No | -- | URI for JSON Web Key Set (for `jwt` method). Used to resolve signing keys by `kid` when verifying a JWT proof. |
+| `public_key` | string | No | -- | Public key material. For `jwt`, provide a PEM public key when you do not want to fetch JWKS. Also used by `detached-signature` and `certificate` verification flows. |
 | `proof` | object | No | -- | Proof value container. See below. |
 | `claims` | object | No | -- | Expected claims. Free-form key-value pairs. |
 | `verify` | object | No | -- | Verification requirements. See below. |
@@ -416,6 +416,8 @@ Each element in the `bindings` array is an object with these fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `required` | boolean | No | Whether verification must succeed before execution proceeds. |
+
+For `jwt`, `verify.required: true` requires either `public_key` or `jwks_uri`.
 
 ---
 
@@ -455,6 +457,18 @@ Each element in the `bindings` array is an object with these fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `include` | array of strings | No | Fields to include in the authorization request. |
+
+Current include values are:
+
+- `identity`
+- `contract`
+- `command`
+- `resource`
+- `trust`
+- `actor`
+- `step_up`
+
+`actor` contains the canonical actor context derived from `identity.subject.attributes`, task target metadata such as `agent_id`, and safe runtime identity details. `step_up` contains the safe verification summary and decoded audit-safe JWT claims from `authorization_proof`.
 
 ### decision
 

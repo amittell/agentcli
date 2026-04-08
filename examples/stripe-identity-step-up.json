@@ -1,0 +1,138 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "ops-bot",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://acme/ops-bot",
+        "display_name": "Operations Bot",
+        "delegation_mode": "none",
+        "attributes": {
+          "org_id": "org_demo",
+          "on_behalf_of_user_id": "user_demo",
+          "delegation_grant_id": "grant_demo",
+          "run_id": "run_demo"
+        }
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "scopes": ["identity:read"],
+        "provider_config": {
+          "token_env": "BOT_ACCESS_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "fail"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "API_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "authorization_proof_profiles": [
+    {
+      "id": "stripe-identity-step-up",
+      "method": "jwt",
+      "issuer": "https://auth.example.com",
+      "audience": "agentcli",
+      "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
+      "proof": {
+        "value_from": { "env": "ACTOR_STEP_UP_JWT" }
+      },
+      "claims": {
+        "step_up_policy": "stripe_identity_sensitive_ops"
+      },
+      "verify": { "required": true }
+    }
+  ],
+  "authorization_profiles": [
+    {
+      "id": "stripe-identity-policy",
+      "provider": "opa",
+      "provider_config": {
+        "endpoint": "http://127.0.0.1:8181/v1/data/agentcli/authz/allow"
+      },
+      "request": {
+        "include": ["actor", "step_up", "identity", "command", "trust"]
+      },
+      "decision": {
+        "allow_values": ["permit"],
+        "deny_values": ["deny"],
+        "escalate_values": ["require-escalation"]
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "none-evidence",
+      "provider": "none",
+      "payload": {
+        "bind": ["execution_id", "actor_context", "authorization_proof", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "stripe-identity-step-up",
+      "name": "Stripe Identity Step-Up",
+      "identity": { "ref": "ops-bot" },
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always",
+        "required_trust_level": "restricted",
+        "trust_enforcement": "strict"
+      },
+      "tasks": [
+        {
+          "id": "list-safe-state",
+          "name": "List Safe State",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $API_TOKEN\" https://api.example.com/health"]
+          },
+          "target": {
+            "session_target": "shell",
+            "agent_id": "support-bot"
+          },
+          "evidence": { "ref": "none-evidence" },
+          "schedule": { "cron": "0 * * * *" }
+        },
+        {
+          "id": "view-sensitive-customer",
+          "name": "View Sensitive Customer",
+          "shell": {
+            "program": "sh",
+            "args": ["-lc", "curl -H \"Authorization: Bearer $API_TOKEN\" https://api.example.com/customers/customer_123"]
+          },
+          "target": {
+            "session_target": "shell",
+            "agent_id": "support-bot"
+          },
+          "authorization_proof": { "ref": "stripe-identity-step-up" },
+          "authorization": { "ref": "stripe-identity-policy" },
+          "evidence": { "ref": "none-evidence" },
+          "schedule": { "cron": "15 * * * *" }
+        }
+      ]
+    }
+  ]
+}

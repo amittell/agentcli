@@ -10,8 +10,24 @@
  * verification is skipped.
  */
 
-import { createVerify } from 'node:crypto';
+import { createPublicKey, createVerify } from 'node:crypto';
 import { registerVerifier } from './index.js';
+
+const DEFAULT_JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const AUDIT_SAFE_CLAIMS = [
+  'org_id',
+  'on_behalf_of_user_id',
+  'delegation_grant_id',
+  'run_id',
+  'agent_id',
+  'verification_ref',
+  'verification_level',
+  'verification_verified_at',
+  'step_up_policy',
+  'session_id',
+  'request_id',
+];
+const jwksCache = new Map();
 
 // -- JWT Helpers --
 
@@ -62,6 +78,236 @@ function decodeJwtParts(token) {
   return { header, payload, signatureRaw, parts };
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function normalizeAudience(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null) return [];
+  return [value];
+}
+
+function audienceIncludes(actualValue, expectedValue) {
+  return normalizeAudience(actualValue).includes(expectedValue);
+}
+
+function normalizeVerificationKey(publicKey) {
+  if (!publicKey) {
+    throw new Error('public key is required');
+  }
+
+  if (typeof publicKey === 'string' || Buffer.isBuffer(publicKey)) {
+    return createPublicKey(publicKey);
+  }
+
+  if (typeof publicKey === 'object' && publicKey !== null) {
+    if ('kty' in publicKey) {
+      return createPublicKey({ key: publicKey, format: 'jwk' });
+    }
+    return createPublicKey(publicKey);
+  }
+
+  throw new Error('unsupported public key format');
+}
+
+function inferKeyTypeFromAlg(alg) {
+  if (typeof alg !== 'string') return null;
+  if (alg.startsWith('RS')) return 'RSA';
+  if (alg.startsWith('ES')) return 'EC';
+  return null;
+}
+
+function parseMaxAgeMs(cacheControl) {
+  if (!isNonEmptyString(cacheControl)) return null;
+  const match = cacheControl.match(/max-age=(\d+)/i);
+  if (!match) return null;
+  const seconds = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return seconds * 1000;
+}
+
+async function fetchJsonWebKeySet(jwksUri, ctx = {}) {
+  const now = Date.now();
+  const cached = jwksCache.get(jwksUri);
+  if (cached && cached.expiresAt > now) {
+    return cached.body;
+  }
+
+  if (typeof fetch !== 'function') {
+    throw new Error('global fetch is not available for JWKS resolution');
+  }
+
+  let response;
+  try {
+    response = await fetch(jwksUri, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    throw new Error(`failed to fetch JWKS: ${err.message}`, { cause: err });
+  }
+
+  if (!response.ok) {
+    throw new Error(`failed to fetch JWKS: HTTP ${response.status} ${response.statusText}`);
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch (err) {
+    throw new Error(`failed to parse JWKS response: ${err.message}`, { cause: err });
+  }
+
+  if (!body || !Array.isArray(body.keys)) {
+    throw new Error('JWKS response must contain a keys array');
+  }
+
+  const cacheTtlMs =
+    parseMaxAgeMs(response.headers.get('cache-control'))
+    ?? ctx.jwksCacheTtlMs
+    ?? DEFAULT_JWKS_CACHE_TTL_MS;
+  jwksCache.set(jwksUri, {
+    body,
+    expiresAt: now + cacheTtlMs,
+  });
+
+  return body;
+}
+
+function selectJwkForHeader(keys, header) {
+  if (!Array.isArray(keys) || keys.length === 0) {
+    return { ok: false, error: 'JWKS did not contain any keys' };
+  }
+
+  let candidates = keys.filter(key =>
+    key &&
+    (!key.use || key.use === 'sig') &&
+    (!Array.isArray(key.key_ops) || key.key_ops.includes('verify'))
+  );
+
+  const expectedKeyType = inferKeyTypeFromAlg(header?.alg);
+  if (expectedKeyType) {
+    const typed = candidates.filter(key => !key.kty || key.kty === expectedKeyType);
+    if (typed.length > 0) {
+      candidates = typed;
+    }
+  }
+
+  if (isNonEmptyString(header?.alg)) {
+    const algMatched = candidates.filter(key => !key.alg || key.alg === header.alg);
+    if (algMatched.length > 0) {
+      candidates = algMatched;
+    }
+  }
+
+  if (isNonEmptyString(header?.kid)) {
+    candidates = candidates.filter(key => key.kid === header.kid);
+    if (candidates.length === 0) {
+      return { ok: false, error: `JWKS did not contain a key for kid "${header.kid}"` };
+    }
+  }
+
+  if (candidates.length === 1) {
+    return { ok: true, key: candidates[0] };
+  }
+
+  if (candidates.length === 0) {
+    return { ok: false, error: 'no JWKS keys matched the JWT header' };
+  }
+
+  return {
+    ok: false,
+    error: 'multiple JWKS keys matched the JWT header; include a kid to disambiguate',
+  };
+}
+
+async function resolveJwtTrustedKey(proof, profile, ctx = {}) {
+  if (ctx.trustedKey) {
+    return {
+      trustedKey: ctx.trustedKey,
+      trustedKeySource: ctx.trustedKeySource || 'context',
+      trustedKeyId: ctx.trustedKeyId || null,
+      trustedKeyError: null,
+    };
+  }
+
+  if (isNonEmptyString(profile?.public_key)) {
+    return {
+      trustedKey: profile.public_key,
+      trustedKeySource: 'public_key',
+      trustedKeyId: null,
+      trustedKeyError: null,
+    };
+  }
+
+  if (!isNonEmptyString(profile?.jwks_uri)) {
+    return {
+      trustedKey: null,
+      trustedKeySource: null,
+      trustedKeyId: null,
+      trustedKeyError: null,
+    };
+  }
+
+  let decoded;
+  try {
+    decoded = decodeJwtParts(proof.trim());
+  } catch (err) {
+    return {
+      trustedKey: null,
+      trustedKeySource: null,
+      trustedKeyId: null,
+      trustedKeyError: `failed to decode JWT for JWKS lookup: ${err.message}`,
+    };
+  }
+
+  let jwks;
+  try {
+    jwks = await fetchJsonWebKeySet(profile.jwks_uri, ctx);
+  } catch (err) {
+    return {
+      trustedKey: null,
+      trustedKeySource: 'jwks_uri',
+      trustedKeyId: null,
+      trustedKeyError: err.message,
+    };
+  }
+
+  const selected = selectJwkForHeader(jwks.keys, decoded.header);
+  if (!selected.ok) {
+    return {
+      trustedKey: null,
+      trustedKeySource: 'jwks_uri',
+      trustedKeyId: decoded.header?.kid || null,
+      trustedKeyError: selected.error,
+    };
+  }
+
+  return {
+    trustedKey: selected.key,
+    trustedKeySource: 'jwks_uri',
+    trustedKeyId: selected.key.kid || decoded.header?.kid || null,
+    trustedKeyError: null,
+  };
+}
+
+export async function resolveJwtVerificationContext(proof, profile, ctx = {}) {
+  const context = {
+    ...ctx,
+    requireSignature: ctx.requireSignature ?? profile?.verify?.required === true,
+  };
+  const resolved = await resolveJwtTrustedKey(proof, profile, context);
+  return {
+    ...context,
+    trustedKey: resolved.trustedKey,
+    trustedKeySource: resolved.trustedKeySource,
+    trustedKeyId: resolved.trustedKeyId,
+    trustedKeyError: resolved.trustedKeyError,
+  };
+}
+
 /**
  * Verify a JWT signature using Node.js built-in crypto.
  *
@@ -75,12 +321,19 @@ function verifyJwtSignature(decoded, publicKey) {
   const { header, signatureRaw, parts } = decoded;
   const alg = header.alg;
   const signingInput = `${parts[0]}.${parts[1]}`;
+  let verificationKey;
+
+  try {
+    verificationKey = normalizeVerificationKey(publicKey);
+  } catch (err) {
+    return { verified: false, reason: `invalid verification key: ${err.message}` };
+  }
 
   if (alg === 'RS256') {
     try {
       const verifier = createVerify('RSA-SHA256');
       verifier.update(signingInput);
-      const valid = verifier.verify(publicKey, signatureRaw);
+      const valid = verifier.verify(verificationKey, signatureRaw);
       return valid
         ? { verified: true }
         : { verified: false, reason: 'RS256 signature verification failed' };
@@ -94,7 +347,7 @@ function verifyJwtSignature(decoded, publicKey) {
       const verifier = createVerify('SHA256');
       verifier.update(signingInput);
       const valid = verifier.verify(
-        { key: publicKey, dsaEncoding: 'ieee-p1363' },
+        { key: verificationKey, dsaEncoding: 'ieee-p1363' },
         signatureRaw
       );
       return valid
@@ -213,6 +466,35 @@ const jwtVerifier = {
       }
     }
 
+    if (profile.jwks_uri !== undefined && profile.jwks_uri !== null) {
+      if (typeof profile.jwks_uri !== 'string' || profile.jwks_uri.trim() === '') {
+        errors.push({
+          field: 'jwks_uri',
+          message: 'jwks_uri must be a non-empty string when present',
+        });
+      }
+    }
+
+    if (profile.public_key !== undefined && profile.public_key !== null) {
+      if (typeof profile.public_key !== 'string' || profile.public_key.trim() === '') {
+        errors.push({
+          field: 'public_key',
+          message: 'public_key must be a non-empty string when present',
+        });
+      }
+    }
+
+    if (
+      profile.verify?.required === true &&
+      !isNonEmptyString(profile.public_key) &&
+      !isNonEmptyString(profile.jwks_uri)
+    ) {
+      errors.push({
+        field: 'verify.required',
+        message: 'verify.required for jwt proofs requires public_key or jwks_uri',
+      });
+    }
+
     return errors.length === 0
       ? { valid: true }
       : { valid: false, errors };
@@ -232,6 +514,7 @@ const jwtVerifier = {
    */
   verifyProof(proof, profile, ctx) {
     const context = ctx || {};
+    const signatureRequired = Boolean(context.requireSignature);
 
     // Validate proof is a non-empty string
     if (!proof || typeof proof !== 'string') {
@@ -269,6 +552,28 @@ const jwtVerifier = {
         claims_validated: false,
         signature_verified: false,
       };
+    }
+
+    if (profile.issuer !== undefined && profile.issuer !== null && payload.iss !== profile.issuer) {
+      return {
+        verified: false,
+        method: 'jwt',
+        reason: `JWT issuer expected "${profile.issuer}", got "${payload.iss ?? '(missing)'}"`,
+        claims_validated: false,
+        signature_verified: false,
+      };
+    }
+
+    if (profile.audience !== undefined && profile.audience !== null) {
+      if (!audienceIncludes(payload.aud, profile.audience)) {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: `JWT audience does not include expected "${profile.audience}"`,
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
     }
 
     // Check expiry (exp claim)
@@ -333,12 +638,14 @@ const jwtVerifier = {
 
     // Attempt signature verification
     let signatureVerified = false;
-    let signatureReason = 'no trusted key available for signature verification';
+    let signatureReason = context.trustedKeyError || 'no trusted key available for signature verification';
 
     if (context.trustedKey) {
       const sigResult = verifyJwtSignature(decoded, context.trustedKey);
       signatureVerified = sigResult.verified;
       signatureReason = sigResult.verified ? undefined : sigResult.reason;
+    } else if (signatureRequired) {
+      signatureReason = signatureReason || 'signature required but no trusted key available';
     }
 
     // Build audit-safe subset of decoded claims
@@ -348,6 +655,11 @@ const jwtVerifier = {
     if (payload.iss !== undefined) decodedClaims.iss = payload.iss;
     if (payload.exp !== undefined) decodedClaims.exp = payload.exp;
     if (payload.nbf !== undefined) decodedClaims.nbf = payload.nbf;
+    for (const claim of AUDIT_SAFE_CLAIMS) {
+      if (payload[claim] !== undefined && decodedClaims[claim] === undefined) {
+        decodedClaims[claim] = payload[claim];
+      }
+    }
     // Include custom claims declared in the profile
     if (profile.claims && typeof profile.claims === 'object') {
       for (const key of Object.keys(profile.claims)) {
@@ -363,21 +675,32 @@ const jwtVerifier = {
     // If a trusted key was provided, signature must also verify.
     // If no trusted key, claims-only validation counts as verified (signature_verified remains false).
     // If a trusted key was provided, signature must also pass.
-    const verified = context.trustedKey ? signatureVerified : true;
+    const verified = signatureRequired
+      ? signatureVerified
+      : context.trustedKey
+        ? signatureVerified
+        : true;
 
     const result = {
       verified,
       method: 'jwt',
       issuer: payload.iss || profile.issuer || null,
+      audience: payload.aud || profile.audience || null,
       claims_validated: true,
       signature_verified: signatureVerified,
+      signature_required: signatureRequired,
       decoded_claims: decodedClaims,
+      key_id: context.trustedKeyId || header.kid || null,
+      key_source: context.trustedKeySource || null,
       manifest_digest: context.manifestDigest || null,
       verified_at: new Date().toISOString(),
     };
 
     if (!signatureVerified) {
       result.signature_verification_reason = signatureReason;
+    }
+    if (!verified) {
+      result.reason = signatureReason || 'JWT verification failed';
     }
 
     return result;
@@ -396,12 +719,18 @@ const jwtVerifier = {
     return {
       method: 'jwt',
       issuer: result.issuer,
+      audience: result.audience || null,
       verified: result.verified,
       verified_at: result.verified_at || null,
       manifest_digest: result.manifest_digest || null,
       verifier: 'jwt',
       claims_validated: result.claims_validated,
       signature_verified: result.signature_verified,
+      signature_required: result.signature_required,
+      decoded_claims: result.decoded_claims || null,
+      key_id: result.key_id || null,
+      key_source: result.key_source || null,
+      reason: result.reason || result.signature_verification_reason || null,
     };
   },
 };

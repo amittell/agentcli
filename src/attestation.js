@@ -8,7 +8,14 @@ import { createHash } from 'node:crypto';
 
 const ATTESTATION_VERSION = 1;
 
-export function buildAttestationPayload({ executionId, timestamp, source, commandHash, principal }) {
+export function buildAttestationPayload({
+  executionId,
+  timestamp,
+  source,
+  commandHash,
+  principal,
+  actorContext = null,
+}) {
   const payload = {
     v: ATTESTATION_VERSION,
     command_hash: commandHash,
@@ -16,6 +23,7 @@ export function buildAttestationPayload({ executionId, timestamp, source, comman
     principal: principal || null,
     source,
     timestamp,
+    ...(actorContext ? { actor_context: actorContext } : {}),
   };
   return JSON.stringify(payload);
 }

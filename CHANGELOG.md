@@ -2,6 +2,13 @@
 
 ## 0.2.1 (2026-04-04)
 
+- identity step-up verification for sensitive commands via signed JWT authorization proofs
+- actor context module (`buildActorContext`, `buildStepUpContext`) for canonical actor chain metadata
+- JWT verifier expanded: JWKS URI fetch with caching, key selection by `kid`/`alg`, issuer and audience validation, `verify.required` enforcement, audit-safe claim extraction
+- OPA authorization request now supports `actor` and `step_up` include fields
+- evidence payload and attestation now include `actor_context`
+- `stripe-identity-step-up.json` example with matching OPA policy and testing guide
+- pre-execution failure audit records now include `declared_identity` and `actor_context`
 - `agentcli run` command for local shell-only workflow DAG execution with trigger edges, contains:/regex: conditions, and on_failure handlers evaluated in-process
 - `agentcli signing providers` command lists registered signing providers and their attestation methods
 - delegation capability warnings surfaced in scheduler dispatch responses (previously silently swallowed)

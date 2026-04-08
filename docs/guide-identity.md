@@ -1704,6 +1704,32 @@ Validate the delegation chain:
 agentcli identity validate-delegation manifest.json my-task
 ```
 
+## Stripe Identity Step-Up For Sensitive Commands
+
+Use Stripe Identity as an additional verification signal, not as the task's primary runtime credential.
+
+Recommended pattern:
+
+1. Put the normal CLI or service credential in an `identity_profile`.
+2. Put org, delegation, run, and non-secret verification references in `identity.subject.attributes`.
+3. Require a short-lived signed JWT in `authorization_proof` for sensitive tasks.
+4. Use `jwks_uri` or `public_key` so `verify.required: true` enforces signature-backed verification.
+5. If you use OPA, request the `actor` and `step_up` sections so policy can see the actor chain and verification summary without reading raw tokens.
+
+The dedicated example manifest is:
+
+- [`stripe-identity-step-up.json`](../examples/stripe-identity-step-up.json)
+- [`stripe-identity-step-up.rego`](../examples/stripe-identity-step-up.rego)
+- [`guide-testing-stripe-identity-step-up.md`](guide-testing-stripe-identity-step-up.md)
+
+That example shows:
+
+- normal runtime auth via `identity_profiles`
+- a sensitive task gated by `authorization_proof`
+- OPA authorization using the `actor` and `step_up` request sections
+- actor metadata flowing from `identity.subject.attributes`
+- evidence payload binding with `actor_context` and `authorization_proof`
+
 ## Example Manifests
 
 The `examples/` directory contains complete, runnable manifests for common use cases:
@@ -1713,7 +1739,8 @@ The `examples/` directory contains complete, runnable manifests for common use c
 | `identity-v2.json` | Basic v0.2 identity with `none` and `env-bearer` providers |
 | `oidc-service-auth.json` | OIDC client credentials with token materialization |
 | `trust-enforcement.json` | Graduated trust levels with strict and advisory enforcement |
-| `authorization-proof.json` | JWT-based manifest authorization proof |
+| `authorization-proof.json` | JWT-based manifest authorization proof with signature-backed verification |
+| `stripe-identity-step-up.json` | Step-up proof for sensitive commands plus actor-context audit metadata |
 | `cloud-workload.json` | Azure managed identity for cloud workloads |
 
 Run any example locally:

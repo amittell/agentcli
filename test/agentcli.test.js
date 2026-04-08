@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync, createSign } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -74,6 +75,22 @@ function encodeBase64UrlJson(value) {
 
 function unsignedJwt(payload) {
   return `${encodeBase64UrlJson({ alg: 'none', typ: 'JWT' })}.${encodeBase64UrlJson(payload)}.`;
+}
+
+const testKeyPair = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+});
+
+function signedJwt(payload) {
+  const header = encodeBase64UrlJson({ alg: 'RS256', typ: 'JWT' });
+  const body = encodeBase64UrlJson(payload);
+  const signingInput = `${header}.${body}`;
+  const signer = createSign('RSA-SHA256');
+  signer.update(signingInput);
+  const signature = signer.sign(testKeyPair.privateKey).toString('base64url');
+  return `${header}.${body}.${signature}`;
 }
 
 const exampleManifest = readExample('hello-world.json');
@@ -5391,6 +5408,7 @@ const proofEnabledManifest = {
       method: 'jwt',
       proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
       claims: { subject: 'agentcli-proof' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }
   ],
@@ -5445,6 +5463,7 @@ const applyProofManifest = {
       method: 'jwt',
       proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
       claims: { subject: 'agentcli-proof' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }
   ],
@@ -5473,6 +5492,7 @@ const applyProofOverrideManifest = {
       method: 'jwt',
       proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
       claims: { subject: 'wrong-subject' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }
   ],
@@ -5504,6 +5524,7 @@ const applyOnFailureProofManifest = {
       method: 'jwt',
       proof: { value_from: { env: 'TEST_AGENTCLI_JWT' } },
       claims: { subject: 'agentcli-proof' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }
   ],
@@ -6516,7 +6537,7 @@ test('v0.2 exec with resolved identity includes session description', async () =
 test('v0.2 exec resolves authorization proof, authorization, and evidence', async () => {
   const result = await executeTask(proofEnabledManifest, {
     taskId: 'proof-task',
-    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
   });
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof.verified, true);
@@ -6874,7 +6895,7 @@ test('applyManifestToScheduler returns authorization proof verification summarie
 
   const result = await applyManifestToScheduler(applyProofManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
   });
 
   assert.strictEqual(result.ok, true);
@@ -6907,8 +6928,9 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs', a
     authorization_proof_profiles: [{
       id: 'jwt-proof',
       method: 'jwt',
-      proof: { value_from: { command: `printf '%s' '${unsignedJwt({ sub: 'agentcli-proof' })}'` } },
+      proof: { value_from: { command: `printf '%s' '${signedJwt({ sub: 'agentcli-proof' })}'` } },
       claims: { subject: 'agentcli-proof' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }],
     workflows: [{
@@ -6937,7 +6959,7 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs', a
 test('applyManifestToScheduler resolves command-sourced authorization proofs relative to cwd', async () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-apply-proof-cwd-'));
   const scriptPath = join(workdir, 'emit.js');
-  const token = unsignedJwt({ sub: 'agentcli-proof' });
+  const token = signedJwt({ sub: 'agentcli-proof' });
   writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
 
   const calls = [];
@@ -6963,6 +6985,7 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs rel
         method: 'jwt',
         proof: { value_from: { command: `"${process.execPath}" emit.js` } },
         claims: { subject: 'agentcli-proof' },
+        public_key: testKeyPair.publicKey,
         verify: { required: true }
       }],
       workflows: [{
@@ -7013,8 +7036,9 @@ test('applyManifestToScheduler verifies literal authorization proofs without per
     authorization_proof_profiles: [{
       id: 'jwt-proof',
       method: 'jwt',
-      proof: { value_from: { literal: unsignedJwt({ sub: 'agentcli-proof' }) } },
+      proof: { value_from: { literal: signedJwt({ sub: 'agentcli-proof' }) } },
       claims: { subject: 'agentcli-proof' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }],
     workflows: [{
@@ -7103,7 +7127,7 @@ test('applyManifestToScheduler proof fallback uses resolved task proof declarati
 
   const result = await applyManifestToScheduler(applyProofOverrideManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
   });
 
   assert.strictEqual(result.ok, true);
@@ -7131,7 +7155,7 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
 
   const result = await applyManifestToScheduler(applyOnFailureProofManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: unsignedJwt({ sub: 'agentcli-proof' }) }
+    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
   });
 
   assert.strictEqual(result.ok, true);
@@ -8648,7 +8672,7 @@ test('file-bearer resolves command-sourced token file paths relative to ctx.cwd'
 test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', async () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-proof-cwd-'));
   const scriptPath = join(workdir, 'emit.js');
-  const token = unsignedJwt({ sub: 'agentcli-proof' });
+  const token = signedJwt({ sub: 'agentcli-proof' });
   writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
 
   try {
@@ -8659,6 +8683,7 @@ test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', 
         method: 'jwt',
         proof: { value_from: { command: `"${process.execPath}" emit.js` } },
         claims: { subject: 'agentcli-proof' },
+        public_key: testKeyPair.publicKey,
         verify: { required: true }
       }],
       workflows: [{

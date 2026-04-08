@@ -17,6 +17,7 @@
       "id": "ci-jwt",
       "method": "jwt",
       "issuer": "https://ci.example.com",
+      "jwks_uri": "https://ci.example.com/.well-known/jwks.json",
       "proof": {
         "value_from": { "env": "CI_DEPLOY_TOKEN" }
       },

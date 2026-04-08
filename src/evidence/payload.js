@@ -19,6 +19,7 @@
  * @param {object} params.resolvedIdentity    - Resolved identity session description.
  * @param {object} params.authorizationProof  - Verification summary (method, issuer, verified, manifest_digest).
  * @param {object} params.authorization       - Phase 4.5 authorization decision.
+ * @param {object} params.actorContext        - Canonical actor context (org, delegation, verification metadata).
  * @param {object} params.contract            - The contract block.
  * @param {object} params.command             - Command block (program, args, cwd).
  * @param {object} params.result              - Execution result block.
@@ -34,6 +35,7 @@ export function buildEvidencePayload({
   resolvedIdentity,
   authorizationProof,
   authorization,
+  actorContext,
   contract,
   command,
   result,
@@ -45,6 +47,7 @@ export function buildEvidencePayload({
     declared_identity: declaredIdentity,
     resolved_identity: resolvedIdentity,
     authorization_proof: authorizationProof,
+    actor_context: actorContext,
     contract: contract,
     command: command,
     result: result,

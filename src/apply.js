@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
 import { resolveCommandValue } from './command.js';
@@ -20,6 +21,32 @@ import {
 } from './scheduler-fields.js';
 export { shellCommandInvocation } from './command.js';
 export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELD_VERSIONS };
+
+function sortKeysDeep(value) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => sortKeysDeep(item));
+  }
+
+  if (typeof value === 'object') {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortKeysDeep(value[key]);
+    }
+    return sorted;
+  }
+
+  return value;
+}
+
+function computeManifestDigest(manifest) {
+  return createHash('sha256')
+    .update(JSON.stringify(sortKeysDeep(manifest)))
+    .digest('hex');
+}
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -267,10 +294,12 @@ export async function applyManifestToScheduler(
     // Target cannot verify proofs at runtime; verify locally during apply
     const { readFileSync } = await import('node:fs');
     const { resolveVerifier } = await import('./authorization-proof/index.js');
+    const { resolveJwtVerificationContext } = await import('./authorization-proof/jwt.js');
     await import('./authorization-proof/none.js');
     await import('./authorization-proof/jwt.js');
     await import('./authorization-proof/detached-signature.js');
     await import('./authorization-proof/certificate.js');
+    const manifestDigest = computeManifestDigest(manifest);
 
     for (const job of compiled.jobs) {
       const proof = resolvedProofsByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
@@ -300,7 +329,19 @@ export async function applyManifestToScheduler(
         );
       }
 
-      const result = verifier.verifyProof(proofValue, proof, { env });
+      let verificationContext = {
+        env,
+        manifestDigest,
+      };
+      if (proof.method === 'jwt') {
+        verificationContext = await resolveJwtVerificationContext(
+          proofValue,
+          proof,
+          verificationContext,
+        );
+      }
+
+      const result = await verifier.verifyProof(proofValue, proof, verificationContext);
       if (!result.verified) {
         throw Object.assign(
           new Error(`Authorization proof verification failed for profile "${proof.ref}": ${result.reason || 'verification failed'}`),

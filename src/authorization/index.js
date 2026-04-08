@@ -99,6 +99,8 @@ export function resolveAuthorizationProvider(providerName) {
  * @param {object} params.identity - { principal, trust_level }
  * @param {object} params.contract - { required_trust_level, allowed_paths }
  * @param {object} params.command  - { program, args }
+ * @param {object} params.actor    - { actor, org_id, on_behalf_of_user_id, delegation_grant_id, run_id, agent_id }
+ * @param {object} params.stepUp   - { verified, method, issuer, verified_at, step_up_policy, verification_ref, verification_level, claims, reason }
  * @param {object} params.resource - Resource object or null
  * @param {object} params.trust    - { declared_level, effective_level }
  * @param {string[]} params.includeFields - The request.include array from the authorization profile
@@ -109,6 +111,8 @@ export function normalizeAuthorizationRequest({
   identity,
   contract,
   command,
+  actor,
+  stepUp,
   resource,
   trust,
   includeFields,
@@ -137,6 +141,66 @@ export function normalizeAuthorizationRequest({
     request.command = command
       ? { program: command.program, args: command.args }
       : { program: null, args: null };
+  }
+
+  if (fields.includes('actor')) {
+    request.actor = actor
+      ? {
+          actor: actor.actor
+            ? {
+                principal: actor.actor.principal ?? null,
+                kind: actor.actor.kind ?? null,
+                display_name: actor.actor.display_name ?? null,
+              }
+            : {
+                principal: null,
+                kind: null,
+                display_name: null,
+              },
+          org_id: actor.org_id ?? null,
+          on_behalf_of_user_id: actor.on_behalf_of_user_id ?? null,
+          delegation_grant_id: actor.delegation_grant_id ?? null,
+          run_id: actor.run_id ?? null,
+          agent_id: actor.agent_id ?? null,
+        }
+      : {
+          actor: {
+            principal: null,
+            kind: null,
+            display_name: null,
+          },
+          org_id: null,
+          on_behalf_of_user_id: null,
+          delegation_grant_id: null,
+          run_id: null,
+          agent_id: null,
+        };
+  }
+
+  if (fields.includes('step_up')) {
+    request.step_up = stepUp
+      ? {
+          verified: stepUp.verified ?? null,
+          method: stepUp.method ?? null,
+          issuer: stepUp.issuer ?? null,
+          verified_at: stepUp.verified_at ?? null,
+          step_up_policy: stepUp.step_up_policy ?? null,
+          verification_ref: stepUp.verification_ref ?? null,
+          verification_level: stepUp.verification_level ?? null,
+          claims: stepUp.claims ?? null,
+          reason: stepUp.reason ?? null,
+        }
+      : {
+          verified: null,
+          method: null,
+          issuer: null,
+          verified_at: null,
+          step_up_policy: null,
+          verification_ref: null,
+          verification_level: null,
+          claims: null,
+          reason: null,
+        };
   }
 
   if (fields.includes('resource')) {

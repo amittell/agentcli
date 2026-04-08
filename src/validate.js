@@ -282,6 +282,9 @@ function validateSubject(errors, path, value) {
   checkToken(errors, `${path}.run_as`, value.run_as, { required: false });
   checkString(errors, `${path}.issuer`, value.issuer, { required: false });
   checkEnum(errors, `${path}.delegation_mode`, value.delegation_mode, ['none', 'on-behalf-of', 'impersonation']);
+  if (value.attributes != null && !isObject(value.attributes)) {
+    addError(errors, `${path}.attributes`, 'must be an object');
+  }
 }
 
 function validateDelegationPolicy(errors, path, value) {

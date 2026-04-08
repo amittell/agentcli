@@ -252,7 +252,7 @@ Authorization proof verifies that the manifest itself was approved before execut
 | Method | Description |
 |---|---|
 | `none` | No proof required. |
-| `jwt` | Manifest approval encoded as a signed JWT. |
+| `jwt` | Manifest approval encoded as a signed JWT verified with a configured `public_key` or `jwks_uri`. |
 | `detached-signature` | Manifest approval via a detached cryptographic signature. |
 | `certificate` | Manifest approval via an X.509 certificate chain. |
 
@@ -459,7 +459,9 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [identity-v2.json](examples/identity-v2.json) | Full v0.2 identity: profiles, trust levels, credential presentation, evidence, and authorization proof. |
 | [oidc-service-auth.json](examples/oidc-service-auth.json) | OIDC client credentials authentication with token materialization into the process environment. |
 | [trust-enforcement.json](examples/trust-enforcement.json) | Graduated trust levels with strict and advisory enforcement across multiple tasks. |
-| [authorization-proof.json](examples/authorization-proof.json) | JWT-based manifest authorization proof with claims verification. |
+| [authorization-proof.json](examples/authorization-proof.json) | JWT-based manifest authorization proof with signature-backed verification via `jwks_uri`. |
+| [stripe-identity-step-up.json](examples/stripe-identity-step-up.json) | Stripe Identity-style step-up for sensitive commands: normal service auth plus a short-lived signed JWT proof and actor-context audit metadata. |
+| [stripe-identity-step-up.rego](examples/stripe-identity-step-up.rego) | Example OPA policy for the Stripe Identity step-up manifest. |
 | [cloud-workload.json](examples/cloud-workload.json) | Azure managed identity for cloud workload authentication with evidence and compliance context. |
 | [stripe-ops.json](examples/stripe-ops.json) | Wrapping the Stripe CLI with API key binding, JSON output parsing, evidence, and failure triage. |
 | [stripe-projects.json](examples/stripe-projects.json) | Wrapping [Stripe Projects](https://projects.dev): credential sync, status checks, and database migrations with two identity profiles at different trust levels. |
@@ -476,6 +478,8 @@ The `examples/` directory contains annotated manifests covering the full feature
 | [git-ops.json](examples/git-ops.json) | Git operations: status, log, diff, commit, and push with strict trust enforcement on push. |
 | [ssh-remote.json](examples/ssh-remote.json) | SSH remote ops: uptime, disk, memory monitoring, service restart with approval, and log tailing. |
 | [vercel-ops.json](examples/vercel-ops.json) | Vercel CLI: deployment listing, domain checks, preview→promote pipeline with approval gate, health verification, and env var audit. |
+
+For a step-by-step local walkthrough of the Stripe Identity example, see [docs/guide-testing-stripe-identity-step-up.md](docs/guide-testing-stripe-identity-step-up.md).
 
 ### Putting it together: a v0.2 manifest
 

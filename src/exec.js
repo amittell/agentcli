@@ -23,6 +23,7 @@ import { getAgentcliPaths } from './home.js';
 import { buildAttestationPayload, commandHash } from './attestation.js';
 import { resolveProvider } from './signing/index.js';
 import { resolveRuntimeAdapter } from './runtime/index.js';
+import { buildActorContext, buildStepUpContext } from './actor-context.js';
 
 // Ensure the ssh signing provider is registered on import
 import './signing/ssh.js';
@@ -50,7 +51,7 @@ import { buildEvidencePayload, serializePayload, collectComplianceContext } from
 // v0.2 authorization proof verifiers
 import { resolveVerifier } from './authorization-proof/index.js';
 import './authorization-proof/none.js';
-import './authorization-proof/jwt.js';
+import { resolveJwtVerificationContext } from './authorization-proof/jwt.js';
 import './authorization-proof/detached-signature.js';
 import './authorization-proof/certificate.js';
 
@@ -135,6 +136,7 @@ function runVerify(verify, {
 
 function resolvePrincipal(identity) {
   if (identity.principal) return identity.principal;
+  if (identity.subject?.principal) return identity.subject.principal;
   const user = process.env.USER || process.env.USERNAME || 'unknown';
   const host = process.env.HOSTNAME || process.env.HOST || 'localhost';
   return `${user}@${host}`;
@@ -161,6 +163,32 @@ function resolveValueFrom(valueFrom, envObj, { cwd = process.cwd() } = {}) {
     return resolveCommandValue(valueFrom.command, { env: envObj, cwd });
   }
   return null;
+}
+
+function sortKeysDeep(value) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => sortKeysDeep(item));
+  }
+
+  if (typeof value === 'object') {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortKeysDeep(value[key]);
+    }
+    return sorted;
+  }
+
+  return value;
+}
+
+function computeManifestDigest(manifest) {
+  return createHash('sha256')
+    .update(JSON.stringify(sortKeysDeep(manifest)))
+    .digest('hex');
 }
 
 function summarizeMaterialization(materialization) {
@@ -774,6 +802,13 @@ async function executeV2(common, {
   };
 
   const cmdHash = commandHash(shell);
+  const manifestDigest = computeManifestDigest(expanded);
+  const identityDeclaration = mergeIdentityProfile(
+    identity.ref
+      ? expanded.identity_profiles?.find(profile => profile.id === identity.ref) ?? null
+      : null,
+    identity
+  );
   const authorizationProof = resolveAuthorizationProof(workflow, task);
   const authorization = resolveAuthorization(workflow, task);
   const evidence = resolveEvidence(workflow, task);
@@ -801,7 +836,22 @@ async function executeV2(common, {
       }
 
       if (proofValue) {
-        const verifyResult = verifier.verifyProof(proofValue, authorizationProofDeclaration, { env });
+        let verificationContext = {
+          env,
+          manifestDigest,
+        };
+        if (authorizationProofDeclaration.method === 'jwt') {
+          verificationContext = await resolveJwtVerificationContext(
+            proofValue,
+            authorizationProofDeclaration,
+            verificationContext,
+          );
+        }
+        const verifyResult = await verifier.verifyProof(
+          proofValue,
+          authorizationProofDeclaration,
+          verificationContext,
+        );
         authorizationProofSummary = verifier.describeVerification(verifyResult, {});
 
         if (verifyRequired && !verifyResult.verified) {
@@ -809,7 +859,21 @@ async function executeV2(common, {
             execution_id: executionId,
             timestamp,
             source: { workflow_id: workflow.id, task_id: task.id },
-            declared_identity: null,
+            declared_identity: {
+              provider: identityDeclaration.provider || 'none',
+              subject: {
+                principal: identityDeclaration.subject?.principal || null,
+                kind: identityDeclaration.subject?.kind || null,
+                issuer: identityDeclaration.subject?.issuer || null,
+              },
+              trust_level: identityDeclaration.trust?.level || null,
+            },
+            actor_context: buildActorContext({
+              identityDeclaration,
+              authorizationProofSummary,
+              principal: resolvePrincipal(identityDeclaration),
+              target: task.target,
+            }),
             authorization_proof: authorizationProofSummary,
             resolved_identity: null,
             result: null,
@@ -827,7 +891,25 @@ async function executeV2(common, {
           execution_id: executionId,
           timestamp,
           source: { workflow_id: workflow.id, task_id: task.id },
-          declared_identity: null,
+          declared_identity: {
+            provider: identityDeclaration.provider || 'none',
+            subject: {
+              principal: identityDeclaration.subject?.principal || null,
+              kind: identityDeclaration.subject?.kind || null,
+              issuer: identityDeclaration.subject?.issuer || null,
+            },
+            trust_level: identityDeclaration.trust?.level || null,
+          },
+          actor_context: buildActorContext({
+            identityDeclaration,
+            authorizationProofSummary: {
+              method: authorizationProofDeclaration.method,
+              verified: false,
+              reason: 'proof value not available',
+            },
+            principal: resolvePrincipal(identityDeclaration),
+            target: task.target,
+          }),
           authorization_proof: {
             method: authorizationProofDeclaration.method,
             verified: false,
@@ -857,12 +939,6 @@ async function executeV2(common, {
   let principal;
   let identitySession = null;
   let identityProviderInstance = null;
-  const identityDeclaration = mergeIdentityProfile(
-    identity.ref
-      ? expanded.identity_profiles?.find(profile => profile.id === identity.ref) ?? null
-      : null,
-    identity
-  );
 
   if (identity.ref) {
     const referencedIdentityProfile =
@@ -907,6 +983,13 @@ async function executeV2(common, {
           source: { workflow_id: workflow.id, task_id: task.id },
           declared_identity: declaredIdentity,
           resolved_identity: null,
+          actor_context: buildActorContext({
+            identityDeclaration,
+            declaredIdentity,
+            authorizationProofSummary,
+            principal: subject.principal || resolvePrincipal(identityDeclaration),
+            target: task.target,
+          }),
           resolution_error: {
             phase: 'credential_acquisition',
             provider: providerName,
@@ -982,6 +1065,39 @@ async function executeV2(common, {
         credential_summary: identitySession ? buildCredentialSummary(identitySession) : null,
       }
     : null;
+  const actorContext = buildActorContext({
+    identityDeclaration,
+    declaredIdentity,
+    resolvedIdentity,
+    authorizationProofSummary,
+    principal,
+    target: task.target,
+  });
+  const stepUpContext = buildStepUpContext(authorizationProofSummary);
+  let authorizationDecision = null;
+
+  function writePreExecutionFailureAuditRecord(failureKey, failureValue) {
+    if (auditPolicy === 'none') return;
+    const paths = getAgentcliPaths({ env });
+    writeAuditRecord({
+      execution_id: executionId,
+      timestamp,
+      source: { workflow_id: workflow.id, task_id: task.id },
+      declared_identity: declaredIdentity,
+      resolved_identity: resolvedIdentity,
+      principal_used: principal,
+      actor_context: actorContext,
+      authorization_proof: authorizationProofSummary,
+      authorization: authorizationDecision,
+      trust: trustInfo,
+      contract,
+      command: commandMeta,
+      warnings,
+      dry_run: false,
+      result: null,
+      [failureKey]: failureValue,
+    }, { auditPath: paths.audit });
+  }
 
   // ------------------------------------------------------------------
   // Phase 4: Trust Level Enforcement
@@ -994,6 +1110,10 @@ async function executeV2(common, {
       if (enforcement === 'advisory') {
         warnings.push(`Trust level is not declared but contract requires "${contract.required_trust_level}" (advisory)`);
       } else if (enforcement === 'strict') {
+        writePreExecutionFailureAuditRecord('trust_error', {
+          code: 'trust_level_insufficient',
+          message: `Trust level is not declared but contract requires "${contract.required_trust_level}"`,
+        });
         throw Object.assign(
           new Error(`Trust level is not declared but contract requires "${contract.required_trust_level}"`),
           { code: 'trust_level_insufficient' }
@@ -1007,6 +1127,10 @@ async function executeV2(common, {
         if (enforcement === 'advisory') {
           warnings.push(`Trust level "${effectiveLevel}" is below required "${contract.required_trust_level}" (advisory)`);
         } else if (enforcement === 'strict') {
+          writePreExecutionFailureAuditRecord('trust_error', {
+            code: 'trust_level_insufficient',
+            message: `Trust level "${effectiveLevel}" is below required "${contract.required_trust_level}"`,
+          });
           throw Object.assign(
             new Error(`Trust level "${effectiveLevel}" is below required "${contract.required_trust_level}"`),
             { code: 'trust_level_insufficient' }
@@ -1028,7 +1152,6 @@ async function executeV2(common, {
   // Phase 4.5: Authorization
   // ------------------------------------------------------------------
 
-  let authorizationDecision = null;
   const authorizationDeclaration = authorization?.ref
     ? mergeAuthorizationProfile(
         expanded.authorization_profiles?.find(profile => profile.id === authorization.ref) ?? null,
@@ -1045,6 +1168,8 @@ async function executeV2(common, {
         identity: { principal, trust_level: trustInfo?.effective_level },
         contract,
         command: commandMeta,
+        actor: actorContext,
+        stepUp: stepUpContext,
         resource: null,
         trust: trustInfo,
         includeFields,
@@ -1060,12 +1185,20 @@ async function executeV2(common, {
       );
 
       if (normalized.decision === 'deny') {
+        writePreExecutionFailureAuditRecord('authorization_error', {
+          code: 'authorization_denied',
+          message: 'Authorization denied',
+        });
         throw Object.assign(
           new Error('Authorization denied'),
           { code: 'authorization_denied' }
         );
       }
       if (normalized.decision === 'require-escalation') {
+        writePreExecutionFailureAuditRecord('authorization_error', {
+          code: 'authorization_escalation_required',
+          message: 'Authorization requires escalation',
+        });
         throw Object.assign(
           new Error('Authorization requires escalation'),
           { code: 'authorization_escalation_required' }
@@ -1189,6 +1322,8 @@ async function executeV2(common, {
       resolved_identity: resolvedIdentity,
       identity: identityDeclaration,
       principal_used: principal,
+      actor_context: actorContext,
+      step_up: stepUpContext,
       authorization_proof: authorizationProofSummary,
       authorization: authorizationDecision,
       contract,
@@ -1219,6 +1354,8 @@ async function executeV2(common, {
       resolved_identity: resolvedIdentity,
       identity: identityDeclaration,
       principal_used: principal,
+      actor_context: actorContext,
+      step_up: stepUpContext,
       contract,
       command: commandMeta,
       command_hash: cmdHash,
@@ -1336,6 +1473,7 @@ async function executeV2(common, {
         resolvedIdentity,
         authorizationProof: authorizationProofSummary,
         authorization: authorizationDecision,
+        actorContext,
         contract,
         command: commandMeta,
         result: {
@@ -1443,6 +1581,8 @@ async function executeV2(common, {
       declared_identity: declaredIdentity,
       resolved_identity: resolvedIdentity,
       principal_used: principal,
+      actor_context: actorContext,
+      step_up: stepUpContext,
       authorization_proof: authorizationProofSummary,
       authorization: authorizationDecision,
       trust: trustInfo,
@@ -1492,6 +1632,8 @@ async function executeV2(common, {
     resolved_identity: resolvedIdentity,
     identity: identityDeclaration,
     principal_used: principal,
+    actor_context: actorContext,
+    step_up: stepUpContext,
     contract,
     result,
     verify: verifyResult,
