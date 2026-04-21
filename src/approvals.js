@@ -2,7 +2,7 @@ import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { getProvider, resolveProvider } from './signing/index.js';
-import { resolveSigningKey, resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
+import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
 import { getAgentcliPaths } from './home.js';
 
 // Concurrency note: grantApproval, findValidApproval, and consumeApproval read
