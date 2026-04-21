@@ -380,6 +380,25 @@ This field provides a direct override for the auto-resolution behavior when an a
 
 `approval.required` is supported for compatibility, but `approval.policy` SHOULD be preferred in new manifests.
 
+### Local enforcement in `agentcli exec`
+
+`agentcli exec` enforces `approval.policy` directly, without a scheduler:
+
+- When `approval.policy` is `manual` (or legacy `approval.required: true` with no `policy`), `exec` MUST refuse execution unless a matching, unconsumed, unrevoked, unexpired approval record exists in `~/.agentcli/state/approvals.ndjson`. The error type is `approval_required`.
+- When `approval.policy` is `auto-reject`, `exec` MUST refuse execution unconditionally. Approval records cannot override this policy. The error type is `approval_auto_rejected`.
+- When `approval.policy` is `auto-approve` or absent, `exec` proceeds without requiring an approval record.
+- `exec --dry-run` MUST bypass the gate without consuming any approval record.
+
+A matching approval record is one whose `task_hash` equals the canonical hash of the current task over these fields: `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `approval.policy`, `approval.risk_level`. Any drift in those fields invalidates prior grants.
+
+Approvals are single-use. The matching grant MUST be consumed (written as a `consume` event in `approvals.ndjson`) before the process is spawned; crashed or failed executions still consume the grant.
+
+Successful gated executions MUST include an `approval_used` object in both the result payload and the audit record, carrying `approval_id`, `approver`, `reason`, `risk_level`, `granted_at`, `expires_at`, `signature_verified`, and `signature.{method, key_fingerprint}`.
+
+Grants SHOULD be signed. If a grant carries a `signature` field, `exec` MUST verify it against the configured allowed-signers file. A failing signature MUST refuse execution with error type `approval_signature_invalid`.
+
+This local mechanism is scoped to single-machine `exec` invocations. Durable multi-actor cron-triggered approvals remain the responsibility of the runtime target (e.g. `openclaw-scheduler`).
+
 ## Context
 
 `context.retrieval`, if present, MUST be one of:

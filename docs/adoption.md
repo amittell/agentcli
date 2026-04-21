@@ -13,9 +13,9 @@ Adopt `agentcli` if you want:
 
 If you own both products, the clean story is:
 
-- `agentcli` is the control plane for workflow authoring, identity, validation, local execution, and discovery
-- `openclaw-scheduler` is the durable runtime for schedule execution, retries, approvals, delivery, and persistent state
-- the same manifest can be authored and tested in `agentcli`, then compiled and applied into `openclaw-scheduler`
+- `agentcli` is the control plane for workflow authoring, identity, validation, local execution, local approval gates for direct `exec`, and discovery
+- `openclaw-scheduler` is the durable runtime for schedule execution, retries, cron-triggered approval queues, delivery, and persistent state
+- the same manifest can be authored and tested in `agentcli`, then compiled and applied into `openclaw-scheduler`; approval declarations (`approval.policy`, `approval.risk_level`) are honored by both layers
 
 That means users do not have to choose between them.
 

@@ -30,6 +30,17 @@ export {
   listRuntimeAdapters,
 } from './runtime/index.js';
 export { generateExecutionId, writeAuditRecord, readAuditLog } from './audit.js';
+export {
+  grantApproval,
+  listApprovals,
+  findValidApproval,
+  consumeApproval,
+  revokeApproval,
+  computeTaskApprovalHash,
+  approvalPolicyRequiresApproval,
+  approvalPolicyAutoRejects,
+  verifyApprovalSignature,
+} from './approvals.js';
 export { resolveIdentity, resolveIdentityV2, resolveContract, resolveAuthorizationProof, resolveAuthorization, resolveEvidence } from './compiler/shared.js';
 export { buildAttestationPayload, commandHash } from './attestation.js';
 export { createManifestScaffold, writeManifest } from './init.js';

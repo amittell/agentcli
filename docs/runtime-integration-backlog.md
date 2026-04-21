@@ -19,9 +19,13 @@ Keep a strict three-layer split:
 Do not:
 
 - build a second durable runtime inside `agentcli`
-- add scheduler-like queue, retry, approval, or SQLite orchestration logic to `agentcli`
+- add scheduler-like queuing, retry, cron-triggered approval flows, or SQLite orchestration logic to `agentcli`
 - reimplement isolated-session execution in `agentcli`
 - move manifest authoring/schema concerns down into `openclaw-scheduler`
+
+Allowed inside `agentcli` (non-durable, single-machine scope):
+
+- local enforcement of `approval.policy` for direct `exec` via single-use, ssh-signed, task-hash-bound grants in an append-only ndjson state file (`approvals.ndjson`). This is an authoring-time policy enforced at local execution time; it is not a queue, has no timeout resolver, no multi-actor routing, and no cron coupling.
 
 ## Current State
 
@@ -148,7 +152,7 @@ Constraints:
 
 - No local queue.
 - No local retry engine.
-- No local approval state.
+- No local cron-triggered approval queue, timeout resolver, or multi-actor routing (local single-use approval records for direct `exec` are allowed -- see Workstream guardrails above).
 - No local session manager for prompt tasks.
 
 Acceptance criteria:

@@ -1,0 +1,1568 @@
+{
+  "version": "0.2",
+  "identity_profiles": [
+    {
+      "id": "rh-readonly",
+      "provider": "none",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/rh-readonly",
+        "display_name": "RequestHub CLI Read-Only Agent"
+      },
+      "trust": {
+        "level": "restricted",
+        "constraints": {
+          "max_autonomy": "restricted",
+          "escalation": "fail"
+        }
+      }
+    },
+    {
+      "id": "rh-admin-k8s",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/rh-admin-k8s",
+        "display_name": "RequestHub Internal K8s Admin Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "KUBECONFIG"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "KUBECONFIG" },
+            "required": true,
+            "redact": false
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    },
+    {
+      "id": "rh-admin-customer",
+      "provider": "env-bearer",
+      "subject": {
+        "kind": "service",
+        "principal": "agent://ops/rh-admin-customer",
+        "display_name": "RequestHub Customer (Fly.io) Admin Agent",
+        "delegation_mode": "none"
+      },
+      "auth": {
+        "mode": "service",
+        "required": true,
+        "provider_config": {
+          "token_env": "FLY_API_TOKEN"
+        }
+      },
+      "trust": {
+        "level": "supervised",
+        "constraints": {
+          "max_autonomy": "supervised",
+          "escalation": "human-approval"
+        }
+      },
+      "presentation": {
+        "bindings": [
+          {
+            "source": "credentials.access_token.value",
+            "target": { "kind": "env", "name": "FLY_API_TOKEN" },
+            "required": true,
+            "redact": true
+          }
+        ],
+        "handoff": "none",
+        "cleanup": "always"
+      }
+    }
+  ],
+  "evidence_profiles": [
+    {
+      "id": "rh-evidence",
+      "provider": "ssh",
+      "payload": {
+        "bind": ["execution_id", "declared_identity", "command", "result"],
+        "format": "canonical-json"
+      },
+      "verify": { "required": false }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "rh-ops",
+      "name": "RequestHub CLI Operations",
+      "contract": {
+        "sandbox": "permissive",
+        "network": "unrestricted",
+        "audit": "always"
+      },
+      "tasks": [
+        {
+          "id": "status-all",
+          "name": "rh status (all internal envs)",
+          "shell": {
+            "program": "./rh",
+            "args": ["status"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000, "offload": "auto" },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "status-dev",
+          "name": "rh status dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["status", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "status-prod",
+          "name": "rh status prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["status", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/5 * * * *" },
+          "on_failure": {
+            "id": "triage-status-prod",
+            "name": "Collect prod events after status failure",
+            "shell": {
+              "program": "./rh",
+              "args": ["events", "prod"],
+              "cwd": "/Users/alex/git/requesthub"
+            },
+            "identity": { "ref": "rh-readonly" },
+            "evidence": { "ref": "rh-evidence" },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "health-check-dev",
+          "name": "rh health check dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "check", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "health-check-prod",
+          "name": "rh health check prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "check", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "*/5 * * * *" },
+          "on_failure": {
+            "id": "triage-health-prod",
+            "name": "Inspect prod pods after health failure",
+            "shell": {
+              "program": "./rh",
+              "args": ["health", "pods", "prod"],
+              "cwd": "/Users/alex/git/requesthub"
+            },
+            "identity": { "ref": "rh-readonly" },
+            "evidence": { "ref": "rh-evidence" },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "health-api-dev",
+          "name": "rh health api dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "api", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "health-db-dev",
+          "name": "rh health db dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "db", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "health-redis-dev",
+          "name": "rh health redis dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "redis", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "health-schema-dev",
+          "name": "rh health schema dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "schema", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 * * * *" }
+        },
+        {
+          "id": "health-pods-dev",
+          "name": "rh health pods dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "pods", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "health-storage-dev",
+          "name": "rh health storage dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "storage", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */2 * * *" }
+        },
+        {
+          "id": "health-customer",
+          "name": "rh health check customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["health", "check", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */4 * * *" }
+        },
+        {
+          "id": "env-list",
+          "name": "rh env list",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "list"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "env-info-dev",
+          "name": "rh env info dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "info", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 9 * * *" }
+        },
+        {
+          "id": "env-compare-dev-prod",
+          "name": "rh env compare dev prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "compare", "dev", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "0 8 * * 1" }
+        },
+        {
+          "id": "events-dev",
+          "name": "rh events dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["events", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "events-prod",
+          "name": "rh events prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["events", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "logs-dev-backend",
+          "name": "rh logs dev backend",
+          "shell": {
+            "program": "./rh",
+            "args": ["logs", "dev", "backend", "--limit", "100"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "*/30 * * * *" }
+        },
+        {
+          "id": "logs-prod-errors-loki",
+          "name": "rh logs prod backend (Loki, ERROR)",
+          "shell": {
+            "program": "./rh",
+            "args": ["logs", "prod", "backend", "--loki", "--level", "ERROR", "--since", "1h", "--limit", "200", "--json"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "json", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "*/15 * * * *" },
+          "on_failure": {
+            "id": "triage-logs-prod",
+            "name": "Fallback to kubectl logs after Loki failure",
+            "shell": {
+              "program": "./rh",
+              "args": ["logs", "prod", "backend", "--level", "ERROR", "--limit", "100"],
+              "cwd": "/Users/alex/git/requesthub"
+            },
+            "identity": { "ref": "rh-readonly" },
+            "evidence": { "ref": "rh-evidence" },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "logs-customer",
+          "name": "rh logs customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["logs", "customer", "CUSTOMER_SLUG", "backend", "--tail", "100"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "stats-overview-prod",
+          "name": "rh stats overview prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "overview", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 * * * *" }
+        },
+        {
+          "id": "stats-requests-prod",
+          "name": "rh stats requests prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "requests", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/30 * * * *" }
+        },
+        {
+          "id": "stats-resources-prod",
+          "name": "rh stats resources prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "resources", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "stats-errors-prod",
+          "name": "rh stats errors prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "errors", "prod", "--since", "1h"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" }
+        },
+        {
+          "id": "stats-tickets-prod",
+          "name": "rh stats tickets prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "tickets", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */2 * * *" }
+        },
+        {
+          "id": "stats-users-prod",
+          "name": "rh stats users prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["stats", "users", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 9 * * *" }
+        },
+        {
+          "id": "images-list",
+          "name": "rh images list",
+          "shell": {
+            "program": "./rh",
+            "args": ["images", "list"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "images-deployed",
+          "name": "rh images deployed",
+          "shell": {
+            "program": "./rh",
+            "args": ["images", "deployed"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 * * * *" }
+        },
+        {
+          "id": "images-frontend",
+          "name": "rh images frontend",
+          "shell": {
+            "program": "./rh",
+            "args": ["images", "frontend"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */12 * * *" }
+        },
+        {
+          "id": "images-backend",
+          "name": "rh images backend",
+          "shell": {
+            "program": "./rh",
+            "args": ["images", "backend"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */12 * * *" }
+        },
+        {
+          "id": "db-info-dev",
+          "name": "rh db info dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "info", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "db-tables-dev",
+          "name": "rh db tables dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "tables", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 9 * * *" }
+        },
+        {
+          "id": "db-query-dev",
+          "name": "rh db query dev (sample SELECT)",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "query", "dev", "SELECT now(), current_database(), version()"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */4 * * *" }
+        },
+        {
+          "id": "config-dev",
+          "name": "rh config dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["config", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */12 * * *" }
+        },
+        {
+          "id": "secrets-list-dev",
+          "name": "rh secrets list dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "list", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */12 * * *" }
+        },
+        {
+          "id": "secrets-diff-dev-prod",
+          "name": "rh secrets diff dev prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "diff", "dev", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 8 * * 1" }
+        },
+        {
+          "id": "secrets-get-dev",
+          "name": "rh secrets get dev (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "get", "dev", "SECRET_KEY_NAME"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 12 * * 0" }
+        },
+        {
+          "id": "customers-list",
+          "name": "rh customers list",
+          "shell": {
+            "program": "./rh",
+            "args": ["customers", "list"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "status-customer",
+          "name": "rh status customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["status", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */4 * * *" }
+        },
+        {
+          "id": "argocd-status",
+          "name": "rh argocd status",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "status"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/10 * * * *" },
+          "on_failure": {
+            "id": "triage-argocd-status",
+            "name": "Dump raw ArgoCD application list after status failure",
+            "shell": {
+              "program": "./rh",
+              "args": ["argocd", "list"],
+              "cwd": "/Users/alex/git/requesthub"
+            },
+            "identity": { "ref": "rh-readonly" },
+            "evidence": { "ref": "rh-evidence" },
+            "delivery": { "mode": "announce", "to": "@owner_dm" }
+          }
+        },
+        {
+          "id": "argocd-list",
+          "name": "rh argocd list",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "list"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 */6 * * *" }
+        },
+        {
+          "id": "argocd-password",
+          "name": "rh argocd password",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "password"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 2000 },
+          "schedule": { "cron": "0 9 * * 1" }
+        },
+        {
+          "id": "tunnel-status",
+          "name": "rh tunnel status",
+          "shell": {
+            "program": "./rh",
+            "args": ["tunnel", "status"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "*/15 * * * *" }
+        },
+        {
+          "id": "rollback-prod-info",
+          "name": "rh rollback prod (list available tags)",
+          "shell": {
+            "program": "./rh",
+            "args": ["rollback", "prod"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-readonly" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "0 9 * * *" }
+        },
+        {
+          "id": "build-all",
+          "name": "rh build all",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "all"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 * * 0" }
+        },
+        {
+          "id": "build-backend",
+          "name": "rh build backend",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "backend"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 * * 1" }
+        },
+        {
+          "id": "build-frontend",
+          "name": "rh build frontend",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "frontend"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 * * 2" }
+        },
+        {
+          "id": "build-central",
+          "name": "rh build central",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "central"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 * * 3" }
+        },
+        {
+          "id": "build-docs",
+          "name": "rh build docs",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "docs"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "low"
+          },
+          "schedule": { "cron": "0 3 * * 4" }
+        },
+        {
+          "id": "build-storybook",
+          "name": "rh build storybook",
+          "shell": {
+            "program": "./rh",
+            "args": ["build", "storybook"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "low"
+          },
+          "schedule": { "cron": "0 3 * * 5" }
+        },
+        {
+          "id": "deploy-dev-dry-run",
+          "name": "rh deploy dev --dry-run",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "dev", "--dry-run"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "0 10 * * *" }
+        },
+        {
+          "id": "deploy-dev",
+          "name": "rh deploy dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 4 * * 1-5" }
+        },
+        {
+          "id": "deploy-qa",
+          "name": "rh deploy qa",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "qa"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 5 * * 1-5" }
+        },
+        {
+          "id": "deploy-prod",
+          "name": "rh deploy prod",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "prod", "--verify", "--pre-check"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 14 * * 2" }
+        },
+        {
+          "id": "deploy-demo",
+          "name": "rh deploy demo",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "demo"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 6 * * 3" }
+        },
+        {
+          "id": "deploy-all-dry-run",
+          "name": "rh deploy all --dry-run",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "all", "--dry-run"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "0 11 * * 1" }
+        },
+        {
+          "id": "promote-marketing-scratch-staging",
+          "name": "rh promote marketing scratch staging",
+          "shell": {
+            "program": "./rh",
+            "args": ["promote", "marketing", "scratch", "staging"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 15 * * 4" }
+        },
+        {
+          "id": "promote-marketing-staging-public",
+          "name": "rh promote marketing staging public",
+          "shell": {
+            "program": "./rh",
+            "args": ["promote", "marketing", "staging", "public"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 16 * * 4" }
+        },
+        {
+          "id": "migrate-apply",
+          "name": "rh migrate (apply pending)",
+          "shell": {
+            "program": "./rh",
+            "args": ["migrate"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 7 * * 2" }
+        },
+        {
+          "id": "migrate-create",
+          "name": "rh migrate create (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["migrate", "create", "MIGRATION_DESCRIPTION"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 14 * * 0" }
+        },
+        {
+          "id": "migrate-rollback",
+          "name": "rh migrate rollback",
+          "shell": {
+            "program": "./rh",
+            "args": ["migrate", "rollback"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 15 * * 0" }
+        },
+        {
+          "id": "seed-dev",
+          "name": "rh seed dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["seed", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 2 * * 1" }
+        },
+        {
+          "id": "seed-dev-reset",
+          "name": "rh seed dev --reset --flush-redis",
+          "shell": {
+            "program": "./rh",
+            "args": ["seed", "dev", "--reset", "--flush-redis"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 2 * * 6" }
+        },
+        {
+          "id": "test",
+          "name": "rh test",
+          "shell": {
+            "program": "./rh",
+            "args": ["test"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "schedule": { "cron": "0 1 * * *" }
+        },
+        {
+          "id": "lint",
+          "name": "rh lint",
+          "shell": {
+            "program": "./rh",
+            "args": ["lint"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "schedule": { "cron": "30 1 * * *" }
+        },
+        {
+          "id": "lint-fix",
+          "name": "rh lint --fix",
+          "shell": {
+            "program": "./rh",
+            "args": ["lint", "--fix"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "low"
+          },
+          "schedule": { "cron": "0 13 * * 1" }
+        },
+        {
+          "id": "env-restart-dev",
+          "name": "rh env restart dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "restart", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 * * 0" }
+        },
+        {
+          "id": "env-scale-dev",
+          "name": "rh env scale dev (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "scale", "dev", "backend", "2"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 12 * * 0" }
+        },
+        {
+          "id": "env-sync-dev-qa",
+          "name": "rh env sync dev qa",
+          "shell": {
+            "program": "./rh",
+            "args": ["env", "sync", "dev", "qa"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 10 * * 0" }
+        },
+        {
+          "id": "secrets-set-dev",
+          "name": "rh secrets set dev (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "set", "dev", "SECRET_KEY_NAME", "SECRET_VALUE"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 2000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 11 * * 0" }
+        },
+        {
+          "id": "secrets-delete-dev",
+          "name": "rh secrets delete dev (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "delete", "dev", "SECRET_KEY_NAME"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 2000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 11 * * 0" }
+        },
+        {
+          "id": "secrets-export-dev",
+          "name": "rh secrets export dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["secrets", "export", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 8 1 * *" }
+        },
+        {
+          "id": "db-backup-dev",
+          "name": "rh db backup dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "backup", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 2 * * *" }
+        },
+        {
+          "id": "db-restore-dev",
+          "name": "rh db restore dev (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "restore", "dev", "BACKUP_FILE.sql"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 10 * * 0" }
+        },
+        {
+          "id": "db-vacuum-dev",
+          "name": "rh db vacuum dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["db", "vacuum", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "low"
+          },
+          "schedule": { "cron": "0 4 * * 0" }
+        },
+        {
+          "id": "argocd-sync-dev",
+          "name": "rh argocd sync dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "sync", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 6 * * 1" }
+        },
+        {
+          "id": "argocd-unstick-dev",
+          "name": "rh argocd unstick dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "unstick", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 7 * * 1" }
+        },
+        {
+          "id": "argocd-terminate-dev",
+          "name": "rh argocd terminate dev",
+          "shell": {
+            "program": "./rh",
+            "args": ["argocd", "terminate", "dev"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 8 * * 1" }
+        },
+        {
+          "id": "tunnel-reload",
+          "name": "rh tunnel reload",
+          "shell": {
+            "program": "./rh",
+            "args": ["tunnel", "reload"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-k8s" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 5 * * 0" }
+        },
+        {
+          "id": "customer-deploy",
+          "name": "rh deploy customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["deploy", "customer", "CUSTOMER_SLUG", "--region", "iad"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 8000, "offload": "auto" },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 14 * * 3" }
+        },
+        {
+          "id": "customer-suspend",
+          "name": "rh suspend customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["suspend", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 10 * * 0" }
+        },
+        {
+          "id": "customer-resume",
+          "name": "rh resume customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["resume", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 11 * * 0" }
+        },
+        {
+          "id": "customer-teardown",
+          "name": "rh teardown customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["teardown", "customer", "CUSTOMER_SLUG", "--confirm"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "contract": {
+            "required_trust_level": "supervised",
+            "trust_enforcement": "strict"
+          },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 12 1 * *" }
+        },
+        {
+          "id": "customer-export",
+          "name": "rh export customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["export", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "medium"
+          },
+          "schedule": { "cron": "0 3 1 * *" }
+        },
+        {
+          "id": "customer-rotate-secrets",
+          "name": "rh rotate-secrets customer (template)",
+          "shell": {
+            "program": "./rh",
+            "args": ["rotate-secrets", "customer", "CUSTOMER_SLUG"],
+            "cwd": "/Users/alex/git/requesthub"
+          },
+          "target": { "session_target": "shell" },
+          "identity": { "ref": "rh-admin-customer" },
+          "evidence": { "ref": "rh-evidence" },
+          "output": { "format": "text", "preview_bytes": 4000 },
+          "approval": {
+            "required": true,
+            "policy": "manual",
+            "risk_level": "high"
+          },
+          "schedule": { "cron": "0 13 1 * *" }
+        }
+      ]
+    }
+  ]
+}

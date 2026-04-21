@@ -81,10 +81,41 @@ Exec enforces contracts before spawning:
 - Rejects `shell.cwd` outside `allowed_paths`
 - Warns about sandbox/network constraints not yet enforced at OS level
 - Respects `runtime.timeout_ms`
+- Enforces `approval.policy` locally (see "Approval Gates" below)
 
-The audit log (`~/.agentcli/state/audit.ndjson`) records every execution with identity, contract, timing, and output hash. Read it with `agentcli audit` or `agentcli audit --limit 10`.
+The audit log (`~/.agentcli/state/audit.ndjson`) records every execution with identity, contract, timing, output hash, and (for gated tasks) `approval_used` details. Read it with `agentcli audit` or `agentcli audit --limit 10`.
 
 The audit record never includes environment variable values or stdin content (these may contain secrets). It records env key names and a boolean for stdin presence.
+
+## Approval Gates
+
+When a task declares `approval.policy: "manual"`, `agentcli exec` refuses to run it unless a matching approval record exists:
+
+```
+agentcli exec manifest.json deploy-prod
+# -> { "ok": false, "error_type": "approval_required", ... }
+
+agentcli approve manifest.json deploy-prod --by alex --reason "tuesday deploy"
+# -> { "ok": true, "approval": { "approval_id": "...", "signature": {...} } }
+
+agentcli exec manifest.json deploy-prod
+# -> { "ok": true, "approval_used": { "approval_id": "...", "approver": "alex", ... } }
+
+agentcli exec manifest.json deploy-prod
+# -> { "ok": false, "error_type": "approval_required", ... }   # single-use: consumed
+```
+
+Properties of the local gate:
+
+- **Single-use.** Each grant is consumed before `spawnSync` (fail-closed: a crashed execution still consumes the grant). Retrying requires a new approval.
+- **Hash-bound.** The grant is tied to a canonical hash over `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `approval.policy`, and `approval.risk_level`. Editing any of those invalidates prior grants.
+- **Dry-run bypasses.** `--dry-run` runs without needing or consuming an approval.
+- **ssh-signed by default.** Grants carry a signature over the canonical payload, verified against `~/.agentcli/state/allowed_signers`. Tampered grants are refused (`error_type: approval_signature_invalid`).
+- **`auto-reject` is absolute.** A task with `approval.policy: "auto-reject"` is refused even with an approval record (`error_type: approval_auto_rejected`).
+
+Grants live in `~/.agentcli/state/approvals.ndjson` (append-only: grant, consume, and revoke events). List them with `agentcli approvals list`; revoke with `agentcli approvals revoke <approval-id>`.
+
+This local mechanism is scoped to direct `exec` on a single machine. Durable multi-actor approvals for cron-triggered jobs remain owned by `openclaw-scheduler`.
 
 ## Execution-Time Attestation
 

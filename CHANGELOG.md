@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 (2026-04-21)
+
+- local approval gate enforcement in `agentcli exec`: tasks with `approval.policy: "manual"` refuse to execute unless a matching, unconsumed, unrevoked, unexpired approval record is present (`error_type: approval_required`)
+- `approval.policy: "auto-reject"` refuses execution even when an approval record exists (`error_type: approval_auto_rejected`)
+- approval grants are bound to a canonical task hash over `{workflow_id, task_id, shell.program, shell.args, shell.cwd, identity.ref, approval.policy, approval.risk_level}`; drift in any of those fields invalidates prior approvals
+- `--dry-run` bypasses the approval gate (no approval consumed, no gate enforced)
+- successful gated executions include `approval_used: {approval_id, approver, reason, risk_level, granted_at, expires_at, signature_verified, signature: {method, key_fingerprint}}` in both the result payload and the audit record
+- approvals are single-use, consumed before `spawnSync` (fail-closed: crashed executions still consume the grant)
+- new `agentcli approve <manifest> <task-id>` command with `--workflow`, `--by`, `--reason`, `--ttl-s`, `--signer`, `--signing-key` flags; grants ssh-signed by default over canonical approval payload
+- new `agentcli approvals list` command with `--status pending|consumed|expired|revoked|all`, `--workflow`, `--task` filters
+- new `agentcli approvals revoke <approval-id>` command with `--by` and `--reason` flags
+- new `--approval-id <id>` flag on `exec` to target a specific pending grant when more than one matches
+- new append-only state file at `~/.agentcli/state/approvals.ndjson` (grant, consume, revoke events); path exposed by `agentcli paths`
+- new module `src/approvals.js` exports `grantApproval`, `listApprovals`, `findValidApproval`, `consumeApproval`, `revokeApproval`, `computeTaskApprovalHash`, `approvalPolicyRequiresApproval`, `approvalPolicyAutoRejects`, `verifyApprovalSignature`
+- approval signature verification reuses existing ssh allowed-signers chain (`~/.agentcli/state/allowed_signers`); tampered grants are refused (`error_type: approval_signature_invalid`)
+- scope: local single-machine enforcement only; durable multi-actor cron-triggered approvals remain owned by openclaw-scheduler
+
 ## 0.2.2 (2026-04-08)
 
 - identity step-up verification for sensitive commands via signed JWT authorization proofs

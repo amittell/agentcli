@@ -748,22 +748,39 @@ agentcli compile examples/full-stack-deploy.json --target openclaw-scheduler --e
 ## From local exec to durable scheduling
 
 Every example in this guide works with `agentcli exec` for local, on-demand execution.
-When you want durable scheduling -- cron-based triggers, retries, approvals, and
-persistent state -- the same manifest compiles to `openclaw-scheduler` without
-rewriting.
+When you want durable scheduling -- cron-based triggers, retries, multi-actor approval
+queues, and persistent state -- the same manifest compiles to `openclaw-scheduler`
+without rewriting.
+
+### Approval gates work in both modes
+
+Tasks that declare `approval.policy: "manual"` (all the destructive operations in
+the examples above) are enforced at both layers:
+
+- `agentcli exec` refuses to run them without a matching ssh-signed approval
+  record (`agentcli approve <manifest> <task-id> --by <principal>`).
+- `openclaw-scheduler` enforces the durable queue version of the same gate for
+  cron-triggered executions.
+
+The local gate is single-use and single-machine. The scheduler gate is
+multi-actor, durable, and timeout-aware. The `approval.policy`,
+`approval.risk_level`, and `approval.timeout_s` fields on the task are authored
+once and honored by both.
 
 ### The lifecycle
 
 ```
 1. Author     agentcli init --tool kubectl
 2. Validate   agentcli validate manifest.json
-3. Exec       agentcli exec manifest.json <task> --signer none
-4. Compile    agentcli compile manifest.json --target openclaw-scheduler --explain
-5. Apply      agentcli apply manifest.json --scheduler-prefix ~/.openclaw/scheduler
-6. Inspect    agentcli inspect jobs --db ~/.openclaw/scheduler/scheduler.db
+3. Approve    agentcli approve manifest.json <task> --by alex --reason "..."
+4. Exec       agentcli exec manifest.json <task>
+5. Compile    agentcli compile manifest.json --target openclaw-scheduler --explain
+6. Apply      agentcli apply manifest.json --scheduler-prefix ~/.openclaw/scheduler
+7. Inspect    agentcli inspect jobs --db ~/.openclaw/scheduler/scheduler.db
 ```
 
-Steps 1-3 work without a scheduler. Steps 4-6 add durable operation.
+Steps 1-4 work without a scheduler; step 3 is only required for tasks with
+`approval.policy: "manual"`. Steps 5-7 add durable operation.
 
 ### What the scheduler preserves
 

@@ -140,6 +140,7 @@ Copy-paste patterns for common agentcli manifests.
 | [trust-enforcement.json](examples/trust-enforcement.json) | 3 | Trust level enforcement with contract boundaries |
 | [authorization-proof.json](examples/authorization-proof.json) | 1 | JWT-based authorization proof verification |
 | [stripe-identity-step-up.json](examples/stripe-identity-step-up.json) | - | Identity step-up verification with OPA policy and testing guide |
+| [rh-ops.json](examples/rh-ops.json) | 85 | RequestHub CLI: reads (status/health/stats/logs/events/images/db/argocd/customers) and mutations (build/deploy/migrate/seed/secrets/customer lifecycle) across three identity profiles with approval gates on all 37 mutating tasks |
 
 ## Commands
 
@@ -149,6 +150,20 @@ agentcli compile manifest.json --target openclaw-scheduler --explain
 agentcli apply manifest.json --db scheduler.db --scheduler-prefix ./scheduler --dry-run
 agentcli apply manifest.json --db scheduler.db --scheduler-prefix ./scheduler --adopt-by name
 agentcli exec manifest.json task-id      # Run a task locally
+agentcli exec manifest.json task-id --approval-id <id>   # Target a specific pending approval
 agentcli schema manifest                 # Machine-readable schema
 agentcli describe commands --json        # All CLI commands
 ```
+
+## Approvals (local gate)
+
+Tasks with `approval.policy: "manual"` refuse to run via `agentcli exec` unless a matching, unconsumed approval record exists. Grants are ssh-signed, single-use, and bound to the exact task hash (`workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, policy, risk level). `--dry-run` bypasses the gate.
+
+```bash
+agentcli approve manifest.json task-id --by alex --reason "tuesday deploy" --ttl-s 3600
+agentcli approvals list                         # all records, latest first
+agentcli approvals list --status pending        # filter by status
+agentcli approvals revoke <approval-id> --by alex --reason "changed plans"
+```
+
+Durable multi-actor cron-triggered approvals remain owned by `openclaw-scheduler`; the local mechanism is for direct `exec` on a single machine.
