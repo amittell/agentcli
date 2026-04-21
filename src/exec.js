@@ -24,6 +24,14 @@ import { buildAttestationPayload, commandHash } from './attestation.js';
 import { resolveProvider } from './signing/index.js';
 import { resolveRuntimeAdapter } from './runtime/index.js';
 import { buildActorContext, buildStepUpContext } from './actor-context.js';
+import {
+  approvalPolicyRequiresApproval,
+  approvalPolicyAutoRejects,
+  computeTaskApprovalHash,
+  findValidApproval,
+  consumeApproval,
+  verifyApprovalSignature,
+} from './approvals.js';
 
 // Ensure the ssh signing provider is registered on import
 import './signing/ssh.js';
@@ -416,6 +424,7 @@ export function executeTask(manifest, {
   schedulerPrefix = '',
   schedulerBin = '',
   dbPath = '',
+  approvalId,
   cwd = process.cwd(),
   env = process.env,
 } = {}) {
@@ -435,15 +444,73 @@ export function executeTask(manifest, {
 
   // v0.1 path: fully synchronous, preserves exact existing behavior
   if (!common.isV2) {
-    return executeV1(common, { dryRun });
+    return executeV1(common, { dryRun, approvalId });
   }
 
   // v0.2 path: returns a Promise (resolveSession may be async)
   return executeV2(common, {
     dryRun, evidenceProviderOverride, instanceId,
     requireEvidence, requireAuthorization,
-    identityDebug, presentationDebug, env,
+    identityDebug, presentationDebug, approvalId, env,
   });
+}
+
+function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
+  if (!task.approval) return null;
+  if (approvalPolicyAutoRejects(task.approval)) {
+    throw Object.assign(
+      new Error(
+        `Task "${task.id}" has approval.policy="auto-reject"; execution refused. ` +
+        `Edit the manifest to change the policy, or run with --dry-run.`
+      ),
+      { code: 'approval_auto_rejected' }
+    );
+  }
+  if (!approvalPolicyRequiresApproval(task.approval)) return null;
+  const taskHash = computeTaskApprovalHash({ workflowId: workflow.id, task });
+  const grant = findValidApproval({
+    workflowId: workflow.id,
+    taskId: task.id,
+    taskHash,
+    approvalId,
+    env,
+  });
+  if (!grant) {
+    const approveCmd = `agentcli approve <manifest> ${task.id} --workflow ${workflow.id} --by <principal>`;
+    const idHint = approvalId ? ` (--approval-id ${approvalId} did not match a pending grant)` : '';
+    throw Object.assign(
+      new Error(
+        `Task "${task.id}" requires manual approval ` +
+        `(policy=manual, risk=${task.approval.risk_level || 'unspecified'})${idHint}. ` +
+        `No valid approval record found for this exact task. Run: ${approveCmd}`
+      ),
+      { code: 'approval_required' }
+    );
+  }
+  const sigCheck = verifyApprovalSignature(grant, { env });
+  if (sigCheck.verified === false) {
+    throw Object.assign(
+      new Error(
+        `Approval ${grant.approval_id} signature verification failed: ${sigCheck.reason || 'invalid signature'}. ` +
+        `Refusing execution.`
+      ),
+      { code: 'approval_signature_invalid' }
+    );
+  }
+  consumeApproval({ approvalId: grant.approval_id, executionId, env });
+  return {
+    approval_id: grant.approval_id,
+    task_hash: grant.task_hash,
+    approver: grant.approver,
+    reason: grant.reason ?? null,
+    risk_level: grant.risk_level ?? null,
+    granted_at: grant.granted_at,
+    expires_at: grant.expires_at,
+    signature_verified: sigCheck.verified === true,
+    signature: grant.signature
+      ? { method: grant.signature.method, key_fingerprint: grant.signature.key_fingerprint }
+      : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +561,7 @@ function executeDelegated(common, options) {
 // v0.1 execution path -- fully synchronous
 // ---------------------------------------------------------------------------
 
-function executeV1(common, { dryRun }) {
+function executeV1(common, { dryRun, approvalId }) {
   const {
     workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
     effectiveTimeout, warnings, provider, providerConfig, cwd, env,
@@ -597,6 +664,10 @@ function executeV1(common, { dryRun }) {
       warnings,
     };
   }
+
+  const approvalUsed = enforceApprovalGate({
+    workflow, task, executionId, approvalId, env: common.env,
+  });
 
   const spawnEnv = Object.keys(shell.env).length > 0
     ? { ...process.env, ...env, ...shell.env }
@@ -731,6 +802,7 @@ function executeV1(common, { dryRun }) {
       warnings,
       dry_run: false,
       result: auditResult,
+      approval_used: approvalUsed,
     };
     const paths = getAgentcliPaths({ env: common.env });
     writeAuditRecord(record, { auditPath: paths.audit });
@@ -768,6 +840,7 @@ function executeV1(common, { dryRun }) {
     attestation_note,
     warnings,
     audited: shouldAudit,
+    approval_used: approvalUsed,
   };
 }
 
@@ -783,6 +856,7 @@ async function executeV2(common, {
   requireAuthorization,
   identityDebug: includeIdentityDebug,
   presentationDebug: includePresentationDebug,
+  approvalId,
   env,
 }) {
   const {
@@ -1377,6 +1451,10 @@ async function executeV2(common, {
   // Live execution: spawn the process
   // ------------------------------------------------------------------
 
+  const approvalUsed = enforceApprovalGate({
+    workflow, task, executionId, approvalId, env,
+  });
+
   const spawnOpts = {
     cwd: shell.cwd || cwd,
     env: spawnEnv,
@@ -1600,6 +1678,7 @@ async function executeV2(common, {
       warnings,
       dry_run: false,
       result: auditResult,
+      approval_used: approvalUsed,
     };
     const paths = getAgentcliPaths({ env });
     writeAuditRecord(record, { auditPath: paths.audit });
@@ -1648,6 +1727,7 @@ async function executeV2(common, {
     attestation_note,
     warnings,
     audited: shouldAudit,
+    approval_used: approvalUsed,
     ...(identityDebug ? { identity_debug: identityDebug } : {}),
     ...(presentationDebug ? { presentation_debug: presentationDebug } : {}),
   };

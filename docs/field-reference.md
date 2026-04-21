@@ -214,6 +214,8 @@ All budget fields, when present, must be integers >= 1.
 | `timeout_s` | integer | No | >= 1 | Approval timeout in seconds. |
 | `auto` | string | No | `approve`, `reject` | Direct override for auto-resolution on timeout. Explicit value takes precedence over inference from `policy`. |
 
+`agentcli exec` enforces `policy` locally (see spec.md): `manual` requires a matching record in `~/.agentcli/state/approvals.ndjson` created via `agentcli approve`, `auto-reject` refuses unconditionally, `auto-approve` or absent runs freely. `--dry-run` bypasses the gate. The approval record is bound to a canonical hash over `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `policy`, and `risk_level`.
+
 ---
 
 ## Context Fields

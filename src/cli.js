@@ -16,6 +16,7 @@ import {
 import { executeTask } from './exec.js';
 import { runWorkflow } from './run.js';
 import { readAuditLog } from './audit.js';
+import { grantApproval, listApprovals, revokeApproval } from './approvals.js';
 import { resolveProviderForMethod } from './signing/index.js';
 import './signing/ssh.js';
 import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
@@ -45,7 +46,7 @@ Commands:
   exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms]
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
        [--instance-id id] [--require-evidence] [--require-authorization]
-       [--identity-debug] [--presentation-debug]
+       [--identity-debug] [--presentation-debug] [--approval-id id]
        [--db path] [--scheduler-prefix path|--scheduler-bin path]
   run <path-or-json|-> [--workflow id] [--root task-id|--all-roots] [--dry-run] [--timeout ms]
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
@@ -53,6 +54,10 @@ Commands:
        [--identity-debug] [--presentation-debug]
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
+  approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text]
+          [--ttl-s seconds] [--signer ssh|none] [--signing-key path]
+  approvals list [--status pending|consumed|expired|revoked|all] [--workflow id] [--task id]
+  approvals revoke <approval-id> [--by principal] [--reason text]
   verify <execution-id> [--allowed-signers path]
   signing providers
   registry list
@@ -382,6 +387,7 @@ export async function runCli(
         schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
         schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,
         dbPath: flags.db || defaultDbPath,
+        approvalId: flags['approval-id'] || undefined,
         cwd,
         env: derivedEnv,
       });
@@ -435,6 +441,77 @@ export async function runCli(
         limit: rawLimit ? Number(rawLimit) : undefined,
       });
       return formatOutput({ ok: true, count: records.length, records }, { mode: outputMode, pretty });
+    }
+    case 'approve': {
+      const manifestInput = positionals[1];
+      const taskId = positionals[2];
+      if (!manifestInput || !taskId) {
+        throw Object.assign(
+          new Error('Usage: agentcli approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--signer ssh|none] [--signing-key path]'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const manifest = await loadJsonInput(manifestInput, { cwd, env: derivedEnv, stdin });
+      const rawTtl = flags['ttl-s'];
+      if (rawTtl != null && (typeof rawTtl !== 'string' || !/^[1-9][0-9]*$/.test(rawTtl))) {
+        throw Object.assign(
+          new Error(`Invalid --ttl-s value: ${rawTtl}. Must be a positive integer (seconds).`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const approver = flags.by || derivedEnv.USER || derivedEnv.LOGNAME;
+      if (!approver) {
+        throw Object.assign(
+          new Error('Approver required. Pass --by <principal> or set USER/LOGNAME in env.'),
+          { code: 'invalid_argument' }
+        );
+      }
+      const record = grantApproval({
+        manifest,
+        workflowId: flags.workflow || undefined,
+        taskId,
+        approver,
+        reason: flags.reason || undefined,
+        ttlS: rawTtl ? Number(rawTtl) : undefined,
+        signer: flags.signer || undefined,
+        signingKey: flags['signing-key'] || undefined,
+        env: derivedEnv,
+      });
+      return formatOutput({ ok: true, approval: record }, { mode: outputMode, pretty });
+    }
+    case 'approvals': {
+      const subcommand = positionals[1];
+      if (subcommand === 'list') {
+        const statusFilter = flags.status || undefined;
+        const records = listApprovals({
+          env: derivedEnv,
+          status: statusFilter,
+          workflowId: flags.workflow || undefined,
+          taskId: flags.task || undefined,
+        });
+        return formatOutput({ ok: true, count: records.length, records }, { mode: outputMode, pretty });
+      }
+      if (subcommand === 'revoke') {
+        const approvalId = positionals[2];
+        if (!approvalId) {
+          throw Object.assign(
+            new Error('Usage: agentcli approvals revoke <approval-id> [--by principal] [--reason text]'),
+            { code: 'invalid_argument' }
+          );
+        }
+        const revokedBy = flags.by || derivedEnv.USER || derivedEnv.LOGNAME || null;
+        revokeApproval({
+          approvalId,
+          revokedBy,
+          reason: flags.reason || undefined,
+          env: derivedEnv,
+        });
+        return formatOutput({ ok: true, approval_id: approvalId, status: 'revoked' }, { mode: outputMode, pretty });
+      }
+      throw Object.assign(
+        new Error('Usage: agentcli approvals <list|revoke> [args]'),
+        { code: 'invalid_argument' }
+      );
     }
     case 'verify': {
       const executionId = positionals[1];

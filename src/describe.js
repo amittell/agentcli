@@ -75,6 +75,14 @@ export const COMMAND_DESCRIPTIONS = [
     summary: 'Read the local execution audit log.'
   },
   {
+    command: 'approve',
+    summary: 'Grant a local, single-use, ssh-signed approval record for a task whose approval.policy is "manual". Required before agentcli exec will run the task.'
+  },
+  {
+    command: 'approvals',
+    summary: 'List or revoke local approval records stored in ~/.agentcli/state/approvals.ndjson. Subcommands: list, revoke.'
+  },
+  {
     command: 'signing',
     summary: 'List available signing providers used for execution attestations.'
   },

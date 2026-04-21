@@ -34,6 +34,7 @@
 - Comprehensive v0.2 profile validation with cross-reference checks for dangling refs
 - Converter produces proper identity profile refs (not inline blocks)
 - 591 total tests including 12 end-to-end integration tests
+- Local approval gate enforcement in `agentcli exec` with single-use ssh-signed grants (`agentcli approve`, `agentcli approvals list|revoke`, `exec --approval-id`); approval records stored at `~/.agentcli/state/approvals.ndjson`; enforces `approval.policy: manual` and `approval.policy: auto-reject`
 
 ## v0.3
 
@@ -42,7 +43,7 @@
 - Agent registry export compatibility (structured identity profiles exportable for Entra Agent Registry, organizational CMDBs)
 - Multi-runtime credential handoff (cross-backend derived credential propagation)
 - CIBA-based human approval for trust escalation (out-of-band approval flow for `require-escalation` decisions)
-- Approval policy model beyond scheduler boolean gates
+- Richer approval policy model building on the v0.2 local gate (approval quorum/multi-party, approver identity attribution beyond SSH principal, scheduler/local-gate unification)
 - Streaming watch / tail surfaces for runtime state
 - Scheduler lineage and causality queries
 

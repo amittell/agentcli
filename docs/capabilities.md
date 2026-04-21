@@ -70,12 +70,16 @@ Does not provide:
 - durable execution
 - retries
 - delivery
-- approvals
 - lineage
+
+Provides in `agentcli exec` (single-machine, non-durable):
+
+- `approval-gates` (local enforcement): refuses execution of tasks whose `approval.policy` is `manual` without a matching, unconsumed, unrevoked, unexpired ssh-signed grant in `~/.agentcli/state/approvals.ndjson`; refuses unconditionally when `policy` is `auto-reject`
 
 Interpretation:
 
-- approval fields are intent only
+- approval fields declared at authoring time are both portable plan metadata AND enforced locally by `agentcli exec` (grants managed via `agentcli approve` and `agentcli approvals`)
+- durable multi-actor and cron-triggered approval flows still require a runtime target such as `openclaw-scheduler`
 - plan/read-only intent is preserved in the compiled plan
 - output hints and budgets are preserved for another backend or consumer
 

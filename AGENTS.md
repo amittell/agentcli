@@ -62,4 +62,8 @@ For JSON-RPC integrations, use `agentcli.version` and `agentcli.describe` with `
 - `agentcli compile examples/hello-world.json --target openclaw-scheduler`
 - `agentcli apply <manifest> --adopt-by name --dry-run` -- preview migration of existing scheduler jobs
 - `agentcli inspect jobs --db /path/to/scheduler.sqlite --fields id,status`
+- `agentcli approve <manifest> <task-id> --by <principal> --reason <text>` -- grant a local single-use approval for a gated task
+- `agentcli approvals list [--status pending|consumed|expired|revoked|all]` -- list approval records
+- `agentcli approvals revoke <approval-id> --by <principal> --reason <text>` -- revoke a pending approval
+- `agentcli exec <manifest> <task-id> --approval-id <id>` -- target a specific pending grant
 - `agentcli serve`

@@ -22,6 +22,7 @@ export function getAgentcliPaths({ env = process.env, homeDir = homedir() } = {}
     state: join(root, 'state'),
     registry: join(root, 'registry'),
     audit: join(root, 'state', 'audit.ndjson'),
+    approvals: join(root, 'state', 'approvals.ndjson'),
     allowed_signers: join(root, 'state', 'allowed_signers'),
     skill_path: join(root, 'skills', 'manifest-authoring', 'SKILL.md'),
     readme: join(root, 'README.md'),

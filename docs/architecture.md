@@ -20,6 +20,9 @@
 - scheduler inspection surface
 - machine-readable CLI
 - stdio JSON-RPC server
+- local approval gate for direct `exec` (single-use ssh-signed grants; no queue, no cron coupling, no multi-actor routing)
+
+The local gate and the scheduler's durable gate coexist: both honor the same `approval.policy` and `approval.risk_level` declarations in the manifest. `agentcli exec` enforces the gate for single-machine invocations using `~/.agentcli/state/approvals.ndjson`; `openclaw-scheduler` enforces the gate for cron-triggered durable execution using its own approval queue.
 
 ## Backend Model
 

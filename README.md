@@ -310,7 +310,7 @@ Use `agentcli signing providers` to list the registered signing providers and th
 
 | Command | Description |
 |---|---|
-| `exec <path> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path] [--db path] [--scheduler-prefix path\|--scheduler-bin path]` | Execute shell tasks locally with identity resolution, contract enforcement, and attestation, or delegate non-shell tasks to the scheduler when configured. |
+| `exec <path> <task-id> [--workflow id] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path] [--approval-id id] [--db path] [--scheduler-prefix path\|--scheduler-bin path]` | Execute shell tasks locally with identity resolution, contract enforcement, attestation, and approval gate enforcement, or delegate non-shell tasks to the scheduler when configured. |
 | `run <path> [--workflow id] [--root task-id\|--all-roots] [--dry-run] [--timeout ms] [--signer ssh\|none] [--signing-key path]` | Execute a shell-only workflow DAG locally. Trigger edges, `contains:` / `regex:` conditions, and `on_failure` handlers are evaluated in-process. |
 | `apply <path> [--db path] [--scheduler-prefix path\|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id\|name] [--check-capabilities]` | Apply a manifest to the scheduler runtime, or inspect runtime capability negotiation without writing jobs. |
 
@@ -318,8 +318,24 @@ Use `agentcli signing providers` to list the registered signing providers and th
 
 - It only executes tasks with `target.session_target: "shell"`.
 - It runs one workflow DAG locally from a selected scheduled root, or from every root when `--all-roots` is set.
-- It does not add queueing, retries, approvals, or durable state.
+- It does not add queueing, retries, or durable state. Approval gates declared on tasks are enforced through the same local mechanism that `exec` uses.
 - Manifests that include `main` or `isolated` tasks still need a runtime adapter such as `openclaw-scheduler`.
+
+### Approvals
+
+| Command | Description |
+|---|---|
+| `approve <path> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--signer ssh\|none] [--signing-key path]` | Grant a single-use local approval for a gated task. Writes an ssh-signed record bound to the exact task hash to `~/.agentcli/state/approvals.ndjson`. |
+| `approvals list [--status pending\|consumed\|expired\|revoked\|all] [--workflow id] [--task id]` | List approval records with current status, approver, reason, and signature metadata. |
+| `approvals revoke <approval-id> [--by principal] [--reason text]` | Revoke a pending approval. |
+
+`agentcli exec` enforces `approval.policy` at runtime:
+
+- `manual`: exec refuses (`error_type: approval_required`) unless a matching, unconsumed, unrevoked, unexpired approval record exists. The grant's task hash must match the exact task (workflow id, task id, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, policy, risk level). Any drift invalidates prior grants.
+- `auto-reject`: exec refuses unconditionally (`error_type: approval_auto_rejected`). Grants cannot override.
+- `auto-approve` or absent: exec proceeds without an approval record.
+
+Approvals are single-use and consumed before `spawnSync` (fail-closed: a crashed execution still consumes the grant). `--dry-run` bypasses the gate without consuming anything. Successful gated executions include `approval_used` in both the result payload and the audit record. The local mechanism is single-machine; durable cron-triggered approvals remain owned by `openclaw-scheduler`.
 
 ### Identity and Authorization
 
