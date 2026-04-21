@@ -1,19 +1,81 @@
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  appendFileSync, readFileSync, existsSync, mkdirSync,
+  openSync, closeSync, writeSync, unlinkSync, statSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { getProvider, resolveProvider } from './signing/index.js';
 import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
 import { getAgentcliPaths } from './home.js';
 
-// Concurrency note: grantApproval, findValidApproval, and consumeApproval read
-// and append to an NDJSON log without advisory locking. Two concurrent
-// `agentcli exec` invocations of the same gated task can both observe the
-// same pending grant and both consume it. This is an accepted limitation of
-// the local single-machine enforcement model; workflows that require
-// multi-dispatcher approval coordination should use openclaw-scheduler.
+// Concurrency: `claimApproval` is the atomic public primitive that
+// enforceApprovalGate uses. It acquires an fs-lock on <approvals>.lock
+// (openSync 'wx'), re-reads the log inside the critical section, finds a
+// matching pending grant, appends a consume event, and releases the lock.
+// Concurrent claims of the same grant serialize to exactly one winner;
+// losers re-read and either find a different pending grant or throw
+// approval_required. Locks older than LOCK_STALE_MS are treated as
+// abandoned (crashed holder) and removed.
 
 const APPROVAL_RECORD_VERSION = 1;
 const DEFAULT_TTL_S = 3600;
+const LOCK_SUFFIX = '.lock';
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_STALE_MS = 30000;
+const LOCK_POLL_MS = 25;
+
+// Shared memory used for sync sleep during lock backoff. Allocated once per
+// process rather than per-retry.
+const LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms) {
+  Atomics.wait(LOCK_SLEEP_BUF, 0, 0, ms);
+}
+
+function withApprovalsLock(approvalsPath, fn, {
+  timeoutMs = LOCK_TIMEOUT_MS,
+  staleMs = LOCK_STALE_MS,
+  pollMs = LOCK_POLL_MS,
+  now = () => Date.now(),
+} = {}) {
+  mkdirSync(dirname(approvalsPath), { recursive: true });
+  const lockPath = `${approvalsPath}${LOCK_SUFFIX}`;
+  const deadline = now() + timeoutMs;
+  let fd;
+  while (true) {
+    try {
+      fd = openSync(lockPath, 'wx');
+      writeSync(fd, `${process.pid}\n`);
+      break;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      // Lock held. Check staleness and potentially break it.
+      try {
+        const st = statSync(lockPath);
+        if (now() - st.mtimeMs > staleMs) {
+          try { unlinkSync(lockPath); } catch { /* someone else cleaned up */ }
+          continue;
+        }
+      } catch {
+        // Lock vanished between EEXIST and stat; retry immediately.
+        continue;
+      }
+      if (now() >= deadline) {
+        throw Object.assign(
+          new Error(`Timed out acquiring approvals lock at ${lockPath} after ${timeoutMs}ms`),
+          { code: 'approval_lock_timeout' }
+        );
+      }
+      sleepSync(pollMs);
+    }
+  }
+  try {
+    closeSync(fd);
+    return fn();
+  } finally {
+    try { unlinkSync(lockPath); } catch { /* already removed */ }
+  }
+}
 
 export function approvalPolicyRequiresApproval(approval) {
   if (!approval) return false;
@@ -160,6 +222,41 @@ export function findValidApproval({
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => (a.granted_at < b.granted_at ? -1 : 1));
   return candidates[0];
+}
+
+// Atomically find a matching pending grant and mark it consumed.
+// Returns the consumed grant object, or null if no match. Concurrent callers
+// serialize on the approvals lockfile; at most one wins per grant.
+export function claimApproval({
+  workflowId,
+  taskId,
+  taskHash,
+  approvalId,
+  executionId,
+  env = process.env,
+  now = () => Date.now(),
+  lockOptions,
+}) {
+  const paths = getAgentcliPaths({ env });
+  return withApprovalsLock(paths.approvals, () => {
+    const grant = findValidApproval({
+      workflowId, taskId, taskHash, approvalId, env, now: now(),
+    });
+    if (!grant) return null;
+    const consumedAt = new Date(now()).toISOString();
+    appendFileSync(
+      paths.approvals,
+      JSON.stringify({
+        v: APPROVAL_RECORD_VERSION,
+        kind: 'consume',
+        approval_id: grant.approval_id,
+        execution_id: executionId,
+        consumed_at: consumedAt,
+      }) + '\n',
+      'utf8'
+    );
+    return grant;
+  }, lockOptions);
 }
 
 function buildApprovalSignaturePayload(grant) {

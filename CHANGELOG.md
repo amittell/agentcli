@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-04-21)
+
+- fix: concurrent `agentcli exec` calls on the same gated task no longer double-consume a single approval. A new `claimApproval` primitive performs find-then-consume atomically under an fs-lockfile at `~/.agentcli/state/approvals.ndjson.lock` (openSync `wx` + `Atomics.wait` backoff); stale locks (older than 30s) are broken; `approval_lock_timeout` is raised after 5s of contention
+- `enforceApprovalGate` in `src/exec.js` now calls `claimApproval` instead of the separate `findValidApproval` + `consumeApproval` pair; signature verification still runs after the atomic claim and a bad signature refuses execution (the grant is already consumed and its use is audited)
+- `claimApproval` added to the barrel export (`src/index.js`)
+- 4 new concurrency tests: worker-thread race (N=8 parallel claims, exactly 1 winner), distinct-grant parallelism, stale-lock recovery, lock-timeout behavior
+
 ## 0.3.0 (2026-04-21)
 
 - local approval gate enforcement in `agentcli exec`: tasks with `approval.policy: "manual"` refuse to execute unless a matching, unconsumed, unrevoked, unexpired approval record is present (`error_type: approval_required`)
