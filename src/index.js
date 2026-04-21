@@ -35,6 +35,7 @@ export {
   listApprovals,
   findValidApproval,
   consumeApproval,
+  claimApproval,
   revokeApproval,
   computeTaskApprovalHash,
   approvalPolicyRequiresApproval,

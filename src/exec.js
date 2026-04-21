@@ -28,8 +28,7 @@ import {
   approvalPolicyRequiresApproval,
   approvalPolicyAutoRejects,
   computeTaskApprovalHash,
-  findValidApproval,
-  consumeApproval,
+  claimApproval,
   verifyApprovalSignature,
 } from './approvals.js';
 
@@ -468,11 +467,12 @@ function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
   }
   if (!approvalPolicyRequiresApproval(task.approval)) return null;
   const taskHash = computeTaskApprovalHash({ workflowId: workflow.id, task });
-  const grant = findValidApproval({
+  const grant = claimApproval({
     workflowId: workflow.id,
     taskId: task.id,
     taskHash,
     approvalId,
+    executionId,
     env,
   });
   if (!grant) {
@@ -489,6 +489,9 @@ function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
   }
   const sigCheck = verifyApprovalSignature(grant, { env });
   if (sigCheck.verified === false) {
+    // We have already consumed the grant atomically; a bad signature means
+    // the record is corrupt or forged. Refuse execution and surface the
+    // consumption in error context so an operator can audit.
     throw Object.assign(
       new Error(
         `Approval ${grant.approval_id} signature verification failed: ${sigCheck.reason || 'invalid signature'}. ` +
@@ -497,7 +500,6 @@ function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
       { code: 'approval_signature_invalid' }
     );
   }
-  consumeApproval({ approvalId: grant.approval_id, executionId, env });
   return {
     approval_id: grant.approval_id,
     task_hash: grant.task_hash,

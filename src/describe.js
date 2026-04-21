@@ -76,7 +76,7 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'approve',
-    summary: 'Grant a local, single-use, ssh-signed approval record for a task whose approval.policy is "manual". Required before agentcli exec will run the task.'
+    summary: 'Grant a local, single-use, ssh-signed approval record for a task whose approval.policy is "manual". Required before agentcli exec will run the task. Concurrent execs serialize on an fs-lockfile so at most one consumer wins per grant.'
   },
   {
     command: 'approvals',

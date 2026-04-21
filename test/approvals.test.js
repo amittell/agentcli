@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, appendFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Worker } from 'node:worker_threads';
 
 import {
   grantApproval,
@@ -10,6 +11,7 @@ import {
   findValidApproval,
   consumeApproval,
   revokeApproval,
+  claimApproval,
   computeTaskApprovalHash,
   approvalPolicyRequiresApproval,
   approvalPolicyAutoRejects,
@@ -523,5 +525,168 @@ test('ssh-signed grant: round-trip with allowed_signers auto-bootstrap', async (
     assert.equal(existsSync(paths.allowed_signers), true, 'allowed_signers should have been bootstrapped');
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// --- Concurrency: claimApproval is atomic across workers ---
+
+const CLAIM_WORKER_SOURCE = `
+import { parentPort, workerData } from 'node:worker_threads';
+import { claimApproval } from '${new URL('../src/approvals.js', import.meta.url).href}';
+
+const { workflowId, taskId, taskHash, env, executionId, approvalId } = workerData;
+try {
+  const grant = claimApproval({
+    workflowId, taskId, taskHash,
+    approvalId: approvalId || undefined,
+    executionId,
+    env,
+  });
+  parentPort.postMessage({ ok: true, grant });
+} catch (err) {
+  parentPort.postMessage({ ok: false, error: err.message, code: err.code });
+}
+`;
+
+function runClaimWorker({ workflowId, taskId, taskHash, env, executionId, approvalId }) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(CLAIM_WORKER_SOURCE, {
+      eval: true,
+      workerData: { workflowId, taskId, taskHash, env, executionId, approvalId },
+    });
+    worker.once('message', resolve);
+    worker.once('error', reject);
+  });
+}
+
+test('concurrency: N parallel claims on one grant serialize to exactly one winner', async () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'medium' } });
+    const task = m.workflows[0].tasks[0];
+    const taskHash = computeTaskApprovalHash({ workflowId: 'test-wf', task });
+    const rec = grantApproval({
+      manifest: m,
+      taskId: 'echo-task',
+      approver: 'alice',
+      env,
+    });
+
+    const N = 8;
+    const workerArgs = Array.from({ length: N }, (_, i) => ({
+      workflowId: 'test-wf',
+      taskId: 'echo-task',
+      taskHash,
+      env,
+      executionId: `exec-${i}`,
+      approvalId: rec.approval_id,
+    }));
+    const results = await Promise.all(workerArgs.map(runClaimWorker));
+
+    const winners = results.filter(r => r.ok && r.grant);
+    const empties = results.filter(r => r.ok && !r.grant);
+    const errors = results.filter(r => !r.ok);
+
+    assert.equal(winners.length, 1, `expected exactly one winner, got ${winners.length}`);
+    assert.equal(empties.length, N - 1, 'losers should receive null, not errors');
+    assert.equal(errors.length, 0, `no worker should error: ${JSON.stringify(errors)}`);
+    assert.equal(winners[0].grant.approval_id, rec.approval_id);
+
+    // Only one consume event was written
+    const list = listApprovals({ env });
+    assert.equal(list.length, 1);
+    assert.equal(list[0].status, 'consumed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('concurrency: two pending grants + two concurrent claims → both succeed with distinct grants', async () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'medium' } });
+    const task = m.workflows[0].tasks[0];
+    const taskHash = computeTaskApprovalHash({ workflowId: 'test-wf', task });
+    const a = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'alice', env });
+    const b = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'bob', env });
+
+    const workerArgs = [
+      { workflowId: 'test-wf', taskId: 'echo-task', taskHash, env, executionId: 'exec-1' },
+      { workflowId: 'test-wf', taskId: 'echo-task', taskHash, env, executionId: 'exec-2' },
+    ];
+    const results = await Promise.all(workerArgs.map(runClaimWorker));
+    const winners = results.filter(r => r.ok && r.grant);
+    assert.equal(winners.length, 2, 'both claims should succeed because two grants exist');
+    const ids = new Set(winners.map(w => w.grant.approval_id));
+    assert.equal(ids.size, 2, 'winners should hold distinct grants');
+    assert.ok(ids.has(a.approval_id));
+    assert.ok(ids.has(b.approval_id));
+  } finally {
+    cleanup();
+  }
+});
+
+test('concurrency: stale lock is broken and claim proceeds', () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'low' } });
+    const rec = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'alice', env });
+    const taskHash = rec.task_hash;
+
+    // Plant a lock file dated far in the past to simulate a crashed holder.
+    const paths = getAgentcliPaths({ env });
+    const lockPath = `${paths.approvals}.lock`;
+    mkdirSync(paths.state, { recursive: true });
+    writeFileSync(lockPath, 'stale pid\n', 'utf8');
+    const hourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+    utimesSync(lockPath, hourAgo, hourAgo);
+
+    // Claim should detect staleness, break the lock, and succeed.
+    const grant = claimApproval({
+      workflowId: 'test-wf',
+      taskId: 'echo-task',
+      taskHash,
+      executionId: 'exec-stale',
+      env,
+    });
+    assert.ok(grant, 'claim should succeed after breaking stale lock');
+    assert.equal(grant.approval_id, rec.approval_id);
+
+    // Lock file cleaned up after claim
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('concurrency: lock held past timeout throws approval_lock_timeout', () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'low' } });
+    const rec = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'alice', env });
+
+    // Plant a fresh lock file so the claim cannot acquire it.
+    const paths = getAgentcliPaths({ env });
+    const lockPath = `${paths.approvals}.lock`;
+    mkdirSync(paths.state, { recursive: true });
+    writeFileSync(lockPath, 'another pid\n', 'utf8');
+    // Leave mtime fresh (now) so staleness check doesn't fire.
+
+    assert.throws(
+      () => claimApproval({
+        workflowId: 'test-wf',
+        taskId: 'echo-task',
+        taskHash: rec.task_hash,
+        executionId: 'exec-blocked',
+        env,
+        lockOptions: { timeoutMs: 100, staleMs: 60000, pollMs: 20 },
+      }),
+      err => err.code === 'approval_lock_timeout'
+    );
+
+    // Clean up the planted lock
+    rmSync(lockPath, { force: true });
+  } finally {
+    cleanup();
   }
 });
