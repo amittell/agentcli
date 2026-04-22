@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 (2026-04-21)
+
+- fix: `verifyApprovalSignature` now performs a tamper check against the stored `signature.signed_payload`. Previously the canonical payload was rebuilt from the current grant but then discarded; post-sign edits to `approver`, `reason`, `expires_at`, or `task_hash` fields in `approvals.ndjson` would not be detected (the ssh provider only checks signature-against-signed_payload). The rebuilt payload is now compared to `signature.signed_payload` and divergence returns `verified: false` with reason "grant fields do not match signed payload (possible tampering)"
+- tests: new tamper-detection test (ssh-signed grant, then mutate `approver`/`reason`/`expires_at` in the stored record and assert each edit fails verification) and new multi-workflow disambiguation tests (grantApproval throws without `--workflow` on multi-workflow manifests, throws on unknown workflow id, and correctly scopes grants per workflow with distinct task hashes)
+- docs: clarify that `contract.max_cost_usd` is enforced by runtimes that track cost-attributed operations; declarative-only for shell-target `agentcli exec` (no cost signal to enforce against)
+- docs: add recommendation that production-grade isolation on Linux / Windows should run `agentcli exec` inside a container until native OS sandbox adapters ship; manifest declaration remains valid metadata
+
 ## 0.3.1 (2026-04-21)
 
 - fix: concurrent `agentcli exec` calls on the same gated task no longer double-consume a single approval. A new `claimApproval` primitive performs find-then-consume atomically under an fs-lockfile at `~/.agentcli/state/approvals.ndjson.lock` (openSync `wx` + `Atomics.wait` backoff); stale locks (older than 30s) are broken; `approval_lock_timeout` is raised after 5s of contention

@@ -278,6 +278,21 @@ export function verifyApprovalSignature(grant, { env = process.env } = {}) {
   if (!grant.signature) return { verified: null, reason: 'unsigned' };
   const provider = getProvider(grant.signature.method?.replace(/-signature$/, '') || 'ssh');
   if (!provider) return { verified: false, reason: `unknown signer "${grant.signature.method}"` };
+
+  // Tamper check: rebuild the canonical payload from the current grant fields
+  // and compare against the payload that was signed at grant time. An attacker
+  // who edits approver/reason/expires_at/task_hash in the ndjson after signing
+  // would leave signature.signed_payload untouched; the divergence catches it.
+  // The ssh provider only re-verifies that signature matches signed_payload,
+  // so without this check, post-sign field edits would go undetected.
+  const expectedPayload = buildApprovalSignaturePayload(grant);
+  if (grant.signature.signed_payload !== expectedPayload) {
+    return {
+      verified: false,
+      reason: 'grant fields do not match signed payload (possible tampering)',
+    };
+  }
+
   const paths = getAgentcliPaths({ env });
   let allowedSigners = resolveAllowedSigners({ env, statePath: paths.allowed_signers });
   if (!allowedSigners && grant.signature.method === 'ssh-signature') {
@@ -294,9 +309,7 @@ export function verifyApprovalSignature(grant, { env = process.env } = {}) {
       };
     }
   }
-  const payload = buildApprovalSignaturePayload(grant);
-  const attestation = { ...grant.signature, payload };
-  return provider.verify(attestation, {
+  return provider.verify(grant.signature, {
     allowedSignersPath: allowedSigners,
     principal: grant.approver,
   });

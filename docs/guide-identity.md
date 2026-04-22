@@ -1191,6 +1191,8 @@ Use this rule of thumb:
 - other OSes: keep the contract declaration, but rely on a backend or environment that can enforce it until an OS-specific adapter is available
 - if you want no warning during local runs on an unsupported machine, use `sandbox: "none"` and `network: "unrestricted"`
 
+For production-grade isolation on Linux or Windows, the recommended path today is **run `agentcli exec` inside a container** and let the container's namespace / AppContainer boundary provide the sandbox. The manifest declaration remains valid metadata; the OS-level boundary comes from the execution environment rather than an in-process sandbox adapter. Native Linux (bubblewrap / seccomp-bpf) and Windows (AppContainer / Job Objects) adapters are on the roadmap but not in the current release.
+
 ### Example: require supervised trust for production tasks
 
 ```json

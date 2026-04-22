@@ -659,6 +659,139 @@ test('concurrency: stale lock is broken and claim proceeds', () => {
   }
 });
 
+test('tamper: edit to approver/reason/expires_at in ndjson fails verification', async (t) => {
+  const { existsSync: fsExists } = await import('node:fs');
+  const { homedir } = await import('node:os');
+  const sshCandidates = ['id_ed25519', 'id_ecdsa', 'id_rsa']
+    .map(k => join(homedir(), '.ssh', k))
+    .filter(p => fsExists(p) && fsExists(`${p}.pub`));
+  if (sshCandidates.length === 0) {
+    t.skip('no local SSH key pair found; skipping signed tamper test');
+    return;
+  }
+
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-approval-tamper-'));
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  delete env.AGENTCLI_SIGNER;
+  try {
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    const rec = grantApproval({
+      manifest: m,
+      taskId: 'echo-task',
+      approver: 'alice',
+      reason: 'original reason',
+      signer: 'ssh',
+      env,
+    });
+    assert.ok(rec.signature, 'grant should be signed');
+
+    const paths = getAgentcliPaths({ env });
+    const raw = readFileSync(paths.approvals, 'utf8').trim().split('\n');
+    const grantEvent = JSON.parse(raw[0]);
+
+    // 1. Unmodified grant: verifies cleanly (also exercises bootstrap)
+    const clean = verifyApprovalSignature(grantEvent, { env });
+    assert.equal(clean.verified, true, `clean grant should verify, got: ${clean.reason}`);
+
+    // 2. Tamper with approver field: should fail with tamper reason
+    const tampered = { ...grantEvent, approver: 'mallory' };
+    const bad = verifyApprovalSignature(tampered, { env });
+    assert.equal(bad.verified, false);
+    assert.match(bad.reason || '', /tamper|signed payload/i);
+
+    // 3. Tamper with reason field: should also fail
+    const tamperedReason = { ...grantEvent, reason: 'escalated privileges' };
+    const bad2 = verifyApprovalSignature(tamperedReason, { env });
+    assert.equal(bad2.verified, false);
+
+    // 4. Tamper with expires_at: should fail (could be used to extend a grant)
+    const tamperedExpiry = {
+      ...grantEvent,
+      expires_at: new Date(Date.now() + 10 * 365 * 24 * 3600 * 1000).toISOString(),
+    };
+    const bad3 = verifyApprovalSignature(tamperedExpiry, { env });
+    assert.equal(bad3.verified, false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('multi-workflow manifest: grantApproval requires --workflow disambiguation', () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const multi = {
+      version: '0.2',
+      workflows: [
+        {
+          id: 'wf-a',
+          name: 'Workflow A',
+          contract: { sandbox: 'permissive', network: 'unrestricted', audit: 'always' },
+          tasks: [
+            {
+              id: 'task-x',
+              name: 'Task X',
+              shell: { program: 'printf', args: ['a'] },
+              target: { session_target: 'shell' },
+              output: { format: 'text' },
+              schedule: { cron: '0 * * * *' },
+              approval: { policy: 'manual', risk_level: 'medium' },
+            },
+          ],
+        },
+        {
+          id: 'wf-b',
+          name: 'Workflow B',
+          contract: { sandbox: 'permissive', network: 'unrestricted', audit: 'always' },
+          tasks: [
+            {
+              id: 'task-x',
+              name: 'Task X in B',
+              shell: { program: 'printf', args: ['b'] },
+              target: { session_target: 'shell' },
+              output: { format: 'text' },
+              schedule: { cron: '0 * * * *' },
+              approval: { policy: 'manual', risk_level: 'medium' },
+            },
+          ],
+        },
+      ],
+    };
+
+    // No --workflow with multiple workflows → throws
+    assert.throws(
+      () => grantApproval({ manifest: multi, taskId: 'task-x', approver: 'alice', env }),
+      /multiple workflows|--workflow/
+    );
+
+    // --workflow=nonexistent → throws
+    assert.throws(
+      () => grantApproval({ manifest: multi, workflowId: 'wf-ghost', taskId: 'task-x', approver: 'alice', env }),
+      /not found/
+    );
+
+    // --workflow=wf-a → works, grant scoped to wf-a
+    const recA = grantApproval({ manifest: multi, workflowId: 'wf-a', taskId: 'task-x', approver: 'alice', env });
+    assert.equal(recA.workflow_id, 'wf-a');
+
+    // --workflow=wf-b → works, distinct grant for same task-id in different workflow
+    const recB = grantApproval({ manifest: multi, workflowId: 'wf-b', taskId: 'task-x', approver: 'alice', env });
+    assert.equal(recB.workflow_id, 'wf-b');
+    assert.notEqual(recA.approval_id, recB.approval_id);
+    assert.notEqual(recA.task_hash, recB.task_hash, 'different workflows → different task hashes');
+
+    // Grant for wf-a does not satisfy wf-b: findValidApproval on wf-b sees only recB
+    const foundB = findValidApproval({
+      workflowId: 'wf-b',
+      taskId: 'task-x',
+      taskHash: recB.task_hash,
+      env,
+    });
+    assert.equal(foundB.approval_id, recB.approval_id);
+  } finally {
+    cleanup();
+  }
+});
+
 test('concurrency: lock held past timeout throws approval_lock_timeout', () => {
   const { env, cleanup } = isolatedEnv();
   try {
