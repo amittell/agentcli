@@ -560,7 +560,7 @@ Workflow-level `contract` acts as a default for tasks. Task-level overrides key 
 | `sandbox` | string | No | `none`, `permissive`, `strict` | Sandbox enforcement level. |
 | `allowed_paths` | array of strings | No | -- | Filesystem paths the execution may access. Each element must be a non-empty string. |
 | `network` | string | No | `unrestricted`, `restricted`, `none` | Network access level. |
-| `max_cost_usd` | number | No | >= 0 | Maximum cost in USD. |
+| `max_cost_usd` | number | No | >= 0 | Maximum cost in USD. Enforced by runtimes that track cost-attributed operations (e.g. `openclaw-scheduler` for LLM tasks that report token usage). Declarative-only for shell-target tasks executed via `agentcli exec`, which has no cost signal to enforce against. |
 | `audit` | string | No | `none`, `on-failure`, `always` | Audit trail strategy. Default: `always` for exec. |
 | `required_trust_level` | string | No | `untrusted`, `restricted`, `supervised`, `autonomous` | Minimum trust level for execution (v0.2). Must not exceed the resolved identity's `trust.constraints.max_autonomy`. |
 | `trust_enforcement` | string | No | `none`, `advisory`, `strict` | How trust level mismatches are handled (v0.2). Default: `none`. |
