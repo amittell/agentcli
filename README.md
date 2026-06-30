@@ -1,23 +1,57 @@
 # agentcli
 
-`agentcli` is an agent-native workflow manifest standard, execution identity framework, and reference CLI. It gives agents and operators a declarative way to describe workflows, bind execution identity, acquire credentials, produce verifiable evidence, and compile manifests into runtime-specific artifacts.
+When an agent loop can touch GitHub, Kubernetes, Terraform, Stripe, or a production shell, the missing piece is usually not another runtime. It is control: who approved the action, what identity it ran as, which credentials it received, what boundaries applied, and what evidence remains afterward.
 
-Use `agentcli` on its own when you want a clean authoring, validation, local execution, and audit surface.
+`agentcli` is a control plane for governed agent and CLI workflows. It gives agents and operators a portable manifest contract for execution identity, credential binding, trust boundaries, approval proofs, audit records, and signed evidence around existing tools and runtimes.
 
-Use `agentcli` with `openclaw-scheduler` when you want that same manifest contract backed by a durable runtime with scheduling, queueing, retries, approvals, delivery, and SQLite state.
+`agentcli` is not the durable runtime. Use it to author, validate, execute, inspect, and compile the governed workflow contract. Pair it with `openclaw-scheduler` when you need durable scheduling, queueing, retries, approvals, delivery, and persisted runtime state.
 
-Together, `agentcli` is the control plane and `openclaw-scheduler` is the runtime.
+Use `agentcli` when you want to:
+
+- put existing tools such as `gh`, `kubectl`, `terraform`, `flyctl`, `aws`, or internal CLIs behind approvals, identity, and audit
+- keep workflows portable across local execution, CI, cron, and scheduler-backed runtimes
+- give platform and security teams a control surface without forcing application teams onto one agent framework or one vendor runtime
 
 | If you need... | Start here |
 | --- | --- |
-| Fast local authoring, validation, and execution | `agentcli` |
+| Govern local or externally scheduled workflows | `agentcli` |
 | Durable schedules, retries, approvals, and runtime state | `agentcli` + `openclaw-scheduler` |
 
 ## Quick Start
 
-If you just want to try the manifest model locally, start with the first path.
+Start with one risky action you already understand.
 
-If you want to run the same workflows on a durable scheduler, use the second path.
+The example below wraps `docker system prune -f` as a governed operation with supervised trust, manual approval, audit records, and optional signed evidence, while still calling plain old `docker`.
+
+```bash
+# Install
+npm install -g @amittell/agentcli
+
+# Validate the governed workflow manifest
+agentcli validate examples/docker-ops.json
+
+# Inspect the identity and trust level on the risky step
+agentcli identity resolve examples/docker-ops.json prune-unused
+
+# Preview the controlled action locally without executing it
+agentcli exec examples/docker-ops.json prune-unused --dry-run --signer none
+
+# Compile the same manifest for the durable scheduler runtime
+agentcli compile examples/docker-ops.json --target openclaw-scheduler --explain
+```
+
+That is the core value of `agentcli`: keep the existing CLI, add identity, trust boundaries, approvals, audit, and evidence around it.
+
+`agentcli validate examples/docker-ops.json` succeeds with advisory warnings because the example intentionally models manual approval on a scheduled destructive root.
+
+Other good first examples:
+
+- `examples/gh-ops.json` for GitHub read vs write operations and draft release approval
+- `examples/kubectl-ops.json` for cluster inspection and controlled deploy actions
+- `examples/terraform-ops.json` for init/plan/apply chains under policy
+- `examples/stripe-ops.json` for API-key-backed finance and payments operations
+
+If you just want the broader CLI surface, the sections below show the main local and scheduler-backed paths.
 
 ### `agentcli` on its own
 
@@ -28,20 +62,20 @@ npm install -g @amittell/agentcli
 # Create a local home directory with a starter manifest
 agentcli init
 
-# Validate a simple manifest
-agentcli validate examples/hello-world.json
+# Validate a governed workflow manifest
+agentcli validate examples/docker-ops.json
 
 # See the portable standalone plan
-agentcli compile examples/hello-world.json --target standalone --explain
+agentcli compile examples/docker-ops.json --target standalone --explain
 
-# Run a task locally
-agentcli exec examples/trust-enforcement.json collect-data --dry-run --signer none
+# Preview a supervised task locally
+agentcli exec examples/docker-ops.json prune-unused --dry-run --signer none
 
 # Run a shell-only workflow DAG locally
 agentcli run examples/trust-enforcement.json --root collect-data --signer none
 
 # Inspect identity resolution
-agentcli identity resolve examples/identity-v2.json echo-identity
+agentcli identity resolve examples/docker-ops.json prune-unused
 
 # View recent audit records
 agentcli audit --limit 10
@@ -61,16 +95,16 @@ npm install --prefix ~/.openclaw/scheduler openclaw-scheduler@latest
 npm exec --prefix ~/.openclaw/scheduler openclaw-scheduler -- setup
 
 # Compile the same manifest for the durable runtime
-agentcli compile examples/hello-world.json --target openclaw-scheduler --explain
+agentcli compile examples/docker-ops.json --target openclaw-scheduler --explain
 
 # Preview the jobs that would be created or updated
-agentcli apply examples/hello-world.json \
+agentcli apply examples/docker-ops.json \
   --db ~/.openclaw/scheduler/scheduler.db \
   --scheduler-prefix ~/.openclaw/scheduler \
   --dry-run
 
 # Ask the runtime which capability surface and handoff version it supports
-agentcli apply examples/hello-world.json \
+agentcli apply examples/docker-ops.json \
   --db ~/.openclaw/scheduler/scheduler.db \
   --scheduler-prefix ~/.openclaw/scheduler \
   --check-capabilities
@@ -81,6 +115,18 @@ AGENTCLI_SCHEDULER_DB=~/.openclaw/scheduler/scheduler.db \
 ```
 
 Node 22.5.0 or newer is required. Scheduler inspection uses `node:sqlite`, which became stable in Node 23.4.0.
+
+## Why Teams Use It
+
+`agentcli` gives you a narrow, high-value layer on top of existing tools and agent loops:
+
+- portable workflow manifests instead of runtime-specific job definitions
+- explicit execution identity and credential presentation
+- task contracts for trust level, sandboxing, network, and allowed paths
+- approval and evidence surfaces that security and platform teams can inspect
+- one path from local execution to durable scheduler-backed execution
+
+If you are trying to add controls to an existing loop, start with `agentcli` alone. Add `openclaw-scheduler` when you need durable runtime behavior.
 
 ## Better Together
 
@@ -94,7 +140,9 @@ If you want to start simple, start with `agentcli` alone. If you want durable op
 
 ## Wrapping Existing CLI Tools
 
-`agentcli` works well as a stable wrapper around existing CLI tools such as `flyctl`, `kubectl`, `gh`, `terraform`, and the Stripe CLI. See [Wrapping CLI Tools](docs/guide-wrapping-tools.md) for the full guide, including a complete multi-tool deployment pipeline that chains Stripe Projects, Prisma, and Fly.io under agentcli governance.
+For most teams, this is the shortest path to value.
+
+`agentcli` works well as a stable control layer around existing CLI tools such as `flyctl`, `kubectl`, `gh`, `terraform`, and the Stripe CLI. See [Wrapping CLI Tools](docs/guide-wrapping-tools.md) for the full guide, including a complete multi-tool deployment pipeline that chains Stripe Projects, Prisma, and Fly.io under agentcli governance.
 
 The pattern is:
 

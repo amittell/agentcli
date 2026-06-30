@@ -1,7 +1,7 @@
 {
   "name": "@amittell/agentcli",
   "version": "0.3.2",
-  "description": "Agent-native workflow manifest CLI, schema, and protocol surface for standalone planning and backend compilation.",
+  "description": "Control plane for governed agent and CLI workflows with portable manifests, identity, approvals, and evidence.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
