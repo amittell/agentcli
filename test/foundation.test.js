@@ -231,6 +231,7 @@ test('registry refuses symbolic-link entries', { skip: process.platform === 'win
     assert.throws(() => showRegistryEntry('linked', { env }), /symbolic-link/);
     const linked = listRegistry({ env }).find(entry => entry.name === 'linked');
     assert.equal(linked.symlink_refused, true);
+    assert.equal(linked.parse_error, undefined);
     assert.equal(readFileSync(target, 'utf8'), '{"outside":true}\n');
   } finally {
     rmSync(home, { recursive: true, force: true });

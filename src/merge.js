@@ -26,6 +26,14 @@ export function mergeManifests(manifests) {
     }
   }
 
+  const version = manifests[0].version;
+  if (manifests.some(manifest => manifest.version !== version)) {
+    throw Object.assign(
+      new Error('merge requires every manifest to use the same version; convert v0.1 inputs to v0.2 before merging mixed versions'),
+      { code: 'invalid_argument' }
+    );
+  }
+
   const seenWorkflowIds = new Map();
   const mergedWorkflows = [];
   const mergedProfiles = Object.fromEntries(PROFILE_COLLECTIONS.map(key => [key, []]));
@@ -67,7 +75,7 @@ export function mergeManifests(manifests) {
   }
 
   const merged = {
-    version: '0.2',
+    version,
     ...Object.fromEntries(
       Object.entries(mergedProfiles).filter(([, profiles]) => profiles.length > 0)
     ),

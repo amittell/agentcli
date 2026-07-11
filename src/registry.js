@@ -48,7 +48,7 @@ export function listRegistry({ env } = {}) {
     const filePath = join(dir, file);
     try {
       if (lstatSync(filePath).isSymbolicLink()) {
-        return { name, workflows: [], parse_error: true, symlink_refused: true };
+        return { name, workflows: [], symlink_refused: true };
       }
       const manifest = JSON.parse(readFileSync(filePath, 'utf8'));
       const workflows = (manifest.workflows || []).map(w => ({

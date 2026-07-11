@@ -5295,9 +5295,69 @@ test('mergeManifests combines two manifests', () => {
     }]
   };
   const merged = mergeManifests([a, b]);
+  assert.equal(merged.version, '0.1');
   assert.equal(merged.workflows.length, 2);
   assert.equal(merged.workflows[0].id, 'a');
   assert.equal(merged.workflows[1].id, 'b');
+});
+
+test('mergeManifests rejects mixed manifest versions with conversion guidance', () => {
+  const v1 = {
+    version: '0.1',
+    workflows: [{
+      id: 'v1', name: 'V1',
+      tasks: [{ id: 't1', name: 'T1', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  const v2 = {
+    version: '0.2',
+    workflows: [{
+      id: 'v2', name: 'V2',
+      tasks: [{ id: 't2', name: 'T2', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  assert.throws(
+    () => mergeManifests([v1, v2]),
+    error => error.code === 'invalid_argument' && /convert v0\.1 inputs to v0\.2/.test(error.message)
+  );
+});
+
+test('mergeManifests preserves v0.2 profile collections and rejects conflicting definitions', () => {
+  const makeManifest = (workflowId, profileId, principal) => ({
+    version: '0.2',
+    identity_profiles: [{
+      id: profileId,
+      provider: 'none',
+      subject: { kind: 'service', principal },
+    }],
+    workflows: [{
+      id: workflowId,
+      name: workflowId,
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: profileId },
+      }],
+    }],
+  });
+  const first = makeManifest('first', 'first-profile', 'agent://test/first');
+  const second = makeManifest('second', 'second-profile', 'agent://test/second');
+  const merged = mergeManifests([first, second]);
+  assert.equal(merged.version, '0.2');
+  assert.deepEqual(merged.identity_profiles.map(profile => profile.id), [
+    'first-profile',
+    'second-profile',
+  ]);
+  assert.equal(validateManifest(merged).ok, true);
+
+  const conflicting = makeManifest('conflicting', 'first-profile', 'agent://test/changed');
+  assert.throws(
+    () => mergeManifests([first, conflicting]),
+    /Conflicting identity_profiles id "first-profile"/
+  );
 });
 
 test('mergeManifests rejects duplicate workflow ids', () => {
