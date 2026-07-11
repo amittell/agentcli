@@ -142,7 +142,7 @@ export function resolveSafeOutputPath(outputPath, cwd = process.cwd()) {
 
 export function writeJsonOutput(outputPath, payload, { cwd = process.cwd() } = {}) {
   let resolvedPath = resolveSafeOutputPath(outputPath, cwd);
-  mkdirSync(dirname(resolvedPath), { recursive: true });
+  mkdirSync(dirname(resolvedPath), { recursive: true, mode: 0o700 });
   resolvedPath = resolveSafeOutputPath(outputPath, cwd);
 
   let fd;

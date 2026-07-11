@@ -181,6 +181,9 @@ export function prepareSandboxedShellCommand(shell, contract = {}, {
     if (contract.sandbox === 'strict') constraints.push('strict filesystem/process isolation');
     if (contract.network === 'none') constraints.push('network denial');
     if (contract.network === 'restricted') constraints.push('network restriction');
+    if (Array.isArray(contract.allowed_paths) && contract.allowed_paths.length > 0) {
+      constraints.push('allowed_paths filesystem boundary');
+    }
     throw Object.assign(
       new Error(`Required sandbox enforcement is unavailable: ${constraints.join(', ')}`),
       { code: 'sandbox_enforcement_unavailable', constraints }

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -524,7 +525,12 @@ test('safe JSON output creates mode-restricted files inside cwd', (t) => {
   const base = mkdtempSync(join(tmpdir(), 'agentcli-output-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
 
-  const written = writeJsonOutput('nested/result.json', { ok: true }, { cwd: base });
-  assert.equal(written, join(base, 'nested', 'result.json'));
+  const written = writeJsonOutput('nested/private/result.json', { ok: true }, { cwd: base });
+  assert.equal(written, join(base, 'nested', 'private', 'result.json'));
   assert.deepEqual(JSON.parse(readFileSync(written, 'utf8')), { ok: true });
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(join(base, 'nested')).mode & 0o777, 0o700);
+    assert.equal(statSync(join(base, 'nested', 'private')).mode & 0o777, 0o700);
+    assert.equal(statSync(written).mode & 0o777, 0o600);
+  }
 });

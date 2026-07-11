@@ -52,6 +52,22 @@ test('strict and network-restricted contracts fail closed without enforcement', 
   }
 });
 
+test('allowed_paths enforcement failures identify the required filesystem boundary', () => {
+  assert.throws(
+    () => prepareSandboxedShellCommand(shell, {
+      sandbox: 'permissive',
+      network: 'unrestricted',
+      allowed_paths: [tmpdir()],
+    }, { platform: 'linux', env: {} }),
+    error => {
+      assert.equal(error.code, 'sandbox_enforcement_unavailable');
+      assert.deepEqual(error.constraints, ['allowed_paths filesystem boundary']);
+      assert.match(error.message, /allowed_paths filesystem boundary/);
+      return true;
+    }
+  );
+});
+
 test('allowed_paths creates a filesystem boundary even without sandbox strict', () => {
   const profile = buildMacOSSandboxProfile({
     contract: {
