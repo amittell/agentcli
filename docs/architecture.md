@@ -20,6 +20,7 @@
 - scheduler inspection surface
 - machine-readable CLI
 - stdio JSON-RPC server
+- non-durable local shell execution for `exec` and `run`
 - local approval gate for direct `exec` (single-use ssh-signed grants; no queue, no cron coupling, no multi-actor routing)
 
 The local gate and the scheduler's durable gate coexist: both honor the same `approval.policy` and `approval.risk_level` declarations in the manifest. `agentcli exec` enforces the gate for single-machine invocations using `~/.agentcli/state/approvals.ndjson`; `openclaw-scheduler` enforces the gate for cron-triggered durable execution using its own approval queue.
@@ -53,7 +54,7 @@ The identity architecture separates concerns into six distinct layers:
 Four separate provider registries serve distinct concerns:
 
 - **Identity provider registry** -- resolves credentials for declared identity profiles (`none`, `env-bearer`, `oidc-client-credentials`, `oidc-token-exchange`, and future enterprise providers).
-- **Authorization proof verifier registry** -- validates manifest-time authorization proof (`jwt`, `certificate`, `signature`).
+- **Authorization proof verifier registry** -- validates manifest-time authorization proof (`jwt`, `certificate`, `detached-signature`, `none`).
 - **Evidence provider registry** -- generates and verifies post-execution attestation (`ssh`, `none`). Conceptual successor to the v0.1 signing provider.
 - **Authorization provider registry** -- dispatches per-action authorization to external policy engines (`opa`).
 
@@ -63,23 +64,21 @@ Each provider file auto-registers with its registry on import (side-effect regis
 
 `agentcli exec` runs the following pipeline for v0.2 manifests:
 
-- **Phase 1: Manifest Loading + Authorization Proof Verification** -- load, expand shorthands, validate schema, verify manifest authorization proof when declared.
-- **Phase 2: Identity Resolution** -- resolve profile references, merge workflow and task overrides (three-stage merge), validate delegation chains, resolve credential session, evaluate trust level. Async for providers that call external token endpoints.
-- **Phase 3: Presentation Materialization** -- materialize credentials per declared bindings (env vars, temp files, stdin payload).
-- **Phase 3.5: Credential Handoff** (optional) -- when the executing runtime exposes an explicit downstream handoff boundary, prepare a derived credential (downscoped or transaction-scoped). Fails closed if required but unsupported.
-- **Phase 4: Contract Evaluation + Trust Enforcement** -- evaluate execution boundaries. When `required_trust_level` is declared, compare against the resolved trust level. Enforcement modes: `none` (log only), `advisory` (warn and continue), `strict` (escalate or fail closed).
-- **Phase 4.5: Authorization** (optional) -- invoke external policy engine (OPA, Cedar, Topaz) when an authorization block is configured. Decisions: `permit`, `deny`, `require-escalation`. Skipped entirely when no authorization block resolves for the task.
-- **Phase 5: Execution** -- run the tool, capture stdout/stderr/exit code/duration, compute hashes.
-- **Phase 6: Evidence Generation** -- build canonical evidence payload, attest execution, verify evidence if required.
-- **Phase 6.5: Post-exec Verify** (optional) -- run `workflow.verify` / `task.verify` after a successful command. This is an operator-local postcondition check recorded separately from evidence; verify failures can still fail the task or downgrade to warnings according to `verify.on_failure`.
-- **Phase 7: Audit** -- write structured append-only audit record with declared/resolved identity, authorization proof summary, delegation chain, trust level, authorization decision, and runtime instance attribution.
-- **Phase 8: Cleanup** -- delete temporary files, destroy ephemeral materialization and derived handoff credentials.
+- **Phase 1: Static preparation**: load, expand, validate, resolve the selected task, and compute the canonical manifest digest and secret-safe effective execution binding.
+- **Phase 2: Approval gate**: enforce `auto-reject` or atomically consume a matching manual grant before any live side effect. The grant binds the complete effective configuration, scope, and timeout.
+- **Phase 3: Runtime boundary preparation**: resolve the signing provider and require the requested sandbox, allowed-path, and network enforcement. Missing enforcement fails closed.
+- **Phase 4: Manifest authorization proof**: validate proof configuration, acquire the proof value, and cryptographically verify every non-`none` method against the canonical manifest.
+- **Phase 5: Identity resolution and presentation**: validate the provider before network access, resolve the session and delegation chain, materialize declared bindings, and prepare any supported handoff. Required caching, refresh, or handoff capabilities fail closed when unavailable.
+- **Phase 6: Trust and authorization**: enforce the trust floor and invoke the configured authorization provider. Deny, unknown, and unsupported escalation outcomes fail closed unless the manifest explicitly selects an advisory policy.
+- **Phase 7: Execution**: run the tool with a sanitized child environment, capture the result, and calculate audit-safe hashes.
+- **Phase 8: Postcondition and evidence**: run `workflow.verify` or `task.verify` after a successful command, then build and verify the complete versioned evidence envelope so the postcondition is part of the binding.
+- **Phase 9: Audit and cleanup**: append an audit-safe record according to policy and clean up materialized and handoff credentials on success or failure.
+
+`exec --dry-run` stops after static preparation and returns a plan whose live phases are marked `skipped`. It does not consume an approval, execute proof commands, resolve providers, contact a network endpoint, probe a sandbox, materialize credentials, sign or verify evidence, run postconditions, or write audit records.
 
 ### v0.1/v0.2 Dual Path
 
-`exec.js` detects the manifest version (`manifest.version === '0.2' || Boolean(manifest.identity_profiles)`) and dispatches to entirely separate code paths. The v0.1 path (`executeTaskV1`) is preserved unchanged -- synchronous, no identity providers, original signing flow. The v0.2 path (`executeTaskV2`) is async and runs the full lifecycle above.
-
-This dual-path design guarantees zero behavioral change for v0.1 manifests. `src/signing/` is preserved for v0.1; `src/evidence/` exists alongside it for v0.2 without cross-coupling.
+`exec.js` detects the manifest version (`manifest.version === '0.2' || Boolean(manifest.identity_profiles)`) and dispatches to separate execution paths. The v0.1 path remains synchronous and uses the signing-provider flow. The v0.2 path is asynchronous and adds proof, identity, authorization, and evidence providers. Both paths share the static dry-run contract, approval-before-side-effects ordering, canonical execution binding, child-environment sanitization, and safe audit metadata.
 
 ### Standards Alignment
 
@@ -100,7 +99,7 @@ The credential flow traces through four control surfaces:
 1. **Operator provisions** -- credentials enter the system via env vars,
    Vault, managed identity, or files. The operator controls
    `SCHEDULER_PROVIDER_PATH` and the scheduler's execution environment.
-2. **Scheduler resolves** -- at dispatch time, the scheduler calls the
+2. **Scheduler resolves** -- when the selected runtime explicitly advertises the required capabilities, at dispatch time it calls the
    identity provider to resolve a credential session. Trust evaluation
    and authorization gates run before any credential is materialized.
 3. **Provider narrows** -- when `child_credential_policy` is `downscope`,
@@ -113,7 +112,7 @@ The credential flow traces through four control surfaces:
    For agent tasks, auth-profile forwarding directs the gateway to use
    the appropriate profile.
 
-**Trust boundary definition:** the operator controls the scheduler env
+**Trust boundary definition:** the operator controls the scheduler binary, capability response, env
 and provider directory. Everything downstream narrows only. A child
 MUST NOT receive broader credentials than its parent. If the provider
 directory or scheduler env is compromised, the trust model is broken --

@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, statSync, symlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Worker } from 'node:worker_threads';
+import { spawnSync } from 'node:child_process';
 
 import {
   grantApproval,
@@ -60,6 +61,30 @@ function isolatedEnv() {
   };
 }
 
+function createEphemeralSshKey(directory) {
+  const keyPath = join(directory, 'approval-signing-key');
+  const generated = spawnSync('ssh-keygen', [
+    '-q', '-t', 'ed25519', '-N', '', '-f', keyPath,
+  ], { encoding: 'utf8' });
+  assert.equal(
+    generated.status,
+    0,
+    `ssh-keygen failed: ${generated.stderr || generated.error?.message || 'unknown error'}`
+  );
+  return keyPath;
+}
+
+function trustEphemeralSshKey({ env, keyPath, principal }) {
+  const paths = getAgentcliPaths({ env });
+  mkdirSync(paths.state, { recursive: true });
+  const publicKey = readFileSync(`${keyPath}.pub`, 'utf8').trim();
+  writeFileSync(paths.allowed_signers, `${principal} ${publicKey}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  return paths;
+}
+
 test('policy predicates', () => {
   assert.equal(approvalPolicyRequiresApproval({ policy: 'manual' }), true);
   assert.equal(approvalPolicyRequiresApproval({ required: true }), true);
@@ -92,8 +117,11 @@ test('grant writes a pending approval; list + find work', () => {
   const { env, cleanup } = isolatedEnv();
   try {
     const m = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
-    const task = m.workflows[0].tasks[0];
-    const taskHash = computeTaskApprovalHash({ workflowId: 'test-wf', task });
+    const taskHash = computeTaskApprovalHash({
+      manifest: m,
+      workflowId: 'test-wf',
+      taskId: 'echo-task',
+    });
 
     const rec = grantApproval({
       manifest: m,
@@ -118,6 +146,36 @@ test('grant writes a pending approval; list + find work', () => {
     });
     assert.ok(found);
     assert.equal(found.approval_id, rec.approval_id);
+    if (process.platform !== 'win32') {
+      const paths = getAgentcliPaths({ env });
+      assert.equal(statSync(paths.state).mode & 0o777, 0o700);
+      assert.equal(statSync(paths.approvals).mode & 0o777, 0o600);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('approval writes refuse symbolic-link log destinations', { skip: process.platform === 'win32' }, () => {
+  const { home, env, cleanup } = isolatedEnv();
+  try {
+    const paths = getAgentcliPaths({ env });
+    mkdirSync(paths.state, { recursive: true });
+    const target = join(home, 'outside-approvals.ndjson');
+    writeFileSync(target, 'unchanged\n', 'utf8');
+    symlinkSync(target, paths.approvals);
+    const manifest = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    assert.throws(
+      () => grantApproval({
+        manifest,
+        taskId: 'echo-task',
+        approver: 'alice',
+        signer: 'none',
+        env,
+      }),
+      error => error.code === 'ELOOP' || error.code === 'EACCES'
+    );
+    assert.equal(readFileSync(target, 'utf8'), 'unchanged\n');
   } finally {
     cleanup();
   }
@@ -449,6 +507,82 @@ test('verifyApprovalSignature returns unsigned for signer=none grants', () => {
   }
 });
 
+test('unexpected unsigned approval records are rejected', () => {
+  const check = verifyApprovalSignature({
+    approval_id: 'unsigned',
+    workflow_id: 'test-wf',
+    task_id: 'echo-task',
+    task_hash: 'sha256:deadbeef',
+    approver: 'alice',
+    granted_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 1000).toISOString(),
+    signature: null,
+  });
+  assert.equal(check.verified, false);
+  assert.match(check.reason, /unexpectedly unsigned/);
+});
+
+test('approval signing failure does not silently write an unsigned grant', () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    delete env.AGENTCLI_SIGNER;
+    const m = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    assert.throws(
+      () => grantApproval({
+        manifest: m,
+        taskId: 'echo-task',
+        approver: 'alice',
+        signer: 'ssh',
+        signingKey: '/definitely/missing/agentcli-key',
+        env,
+      }),
+      error => error.code === 'approval_signature_invalid'
+    );
+    assert.deepEqual(listApprovals({ env }), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('approver scope and manifest timeout are enforced when granting', () => {
+  const { env, cleanup } = isolatedEnv();
+  try {
+    const m = makeManifest({
+      approval: {
+        policy: 'manual',
+        risk_level: 'high',
+        approver_scope: 'domain:example.com',
+        timeout_s: 30,
+      },
+    });
+    assert.throws(
+      () => grantApproval({ manifest: m, taskId: 'echo-task', approver: 'alice@other.test', env }),
+      error => error.code === 'approval_scope_mismatch'
+    );
+    assert.throws(
+      () => grantApproval({
+        manifest: m,
+        taskId: 'echo-task',
+        approver: 'alice@example.com',
+        ttlS: 31,
+        env,
+      }),
+      error => error.code === 'invalid_argument'
+    );
+    const rec = grantApproval({
+      manifest: m,
+      taskId: 'echo-task',
+      approver: 'alice@example.com',
+      env,
+      now: 1_000,
+    });
+    assert.equal(rec.approver_scope, 'domain:example.com');
+    assert.equal(Date.parse(rec.expires_at) - Date.parse(rec.granted_at), 30_000);
+  } finally {
+    cleanup();
+  }
+});
+
 test('corrupted approvals.ndjson does not DoS subsequent exec', async () => {
   const { env, cleanup } = isolatedEnv();
   try {
@@ -479,50 +613,39 @@ test('corrupted approvals.ndjson does not DoS subsequent exec', async () => {
   }
 });
 
-test('ssh-signed grant: round-trip with allowed_signers auto-bootstrap', async (t) => {
-  // End-to-end: approve with signer=ssh on a fresh AGENTCLI_HOME (no
-  // allowed_signers file yet), then exec and confirm the auto-bootstrap kicks
-  // in and signature_verified is true. If the test host has no SSH key
-  // available, skip gracefully.
-  const { existsSync: fsExists } = await import('node:fs');
-  const { homedir } = await import('node:os');
-  const sshCandidates = ['id_ed25519', 'id_ecdsa', 'id_rsa']
-    .map(k => join(homedir(), '.ssh', k))
-    .filter(p => fsExists(p) && fsExists(`${p}.pub`));
-  if (sshCandidates.length === 0) {
-    t.skip('no local SSH key pair found; skipping signed round-trip');
-    return;
-  }
+test('ssh-signed grant round-trips with an isolated explicit trust store', async () => {
+  // End-to-end: approve with signer=ssh, trust the generated public key, then
+  // execute and verify without reading a developer's personal SSH identity.
 
   const home = mkdtempSync(join(tmpdir(), 'agentcli-approval-signed-'));
   const env = { ...process.env, AGENTCLI_HOME: home };
   delete env.AGENTCLI_SIGNER; // use default (ssh)
   try {
+    const signingKey = createEphemeralSshKey(home);
     const m = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
     const rec = grantApproval({
       manifest: m,
       taskId: 'echo-task',
       approver: 'alice',
       signer: 'ssh',
+      signingKey,
       env,
     });
     assert.ok(rec.signature, 'grant should carry a signature');
     assert.equal(rec.signature.method, 'ssh-signature');
 
-    // Pre-condition: allowed_signers file should NOT exist yet
-    const paths = getAgentcliPaths({ env });
-    assert.equal(existsSync(paths.allowed_signers), false, 'allowed_signers should not pre-exist');
+    const paths = trustEphemeralSshKey({ env, keyPath: signingKey, principal: 'alice' });
+    assert.equal(existsSync(paths.allowed_signers), true);
 
-    // Run the gated task; verifyApprovalSignature should auto-bootstrap
-    // allowed_signers and verify cleanly.
     const result = await executeTask(m, { taskId: 'echo-task', env });
     assert.equal(result.ok, true);
     assert.ok(result.approval_used);
     assert.equal(result.approval_used.approval_id, rec.approval_id);
     assert.equal(result.approval_used.signature_verified, true);
 
-    // Post-condition: allowed_signers was generated
-    assert.equal(existsSync(paths.allowed_signers), true, 'allowed_signers should have been bootstrapped');
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(paths.allowed_signers).mode & 0o777, 0o600);
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -563,8 +686,11 @@ test('concurrency: N parallel claims on one grant serialize to exactly one winne
   const { env, cleanup } = isolatedEnv();
   try {
     const m = makeManifest({ approval: { policy: 'manual', risk_level: 'medium' } });
-    const task = m.workflows[0].tasks[0];
-    const taskHash = computeTaskApprovalHash({ workflowId: 'test-wf', task });
+    const taskHash = computeTaskApprovalHash({
+      manifest: m,
+      workflowId: 'test-wf',
+      taskId: 'echo-task',
+    });
     const rec = grantApproval({
       manifest: m,
       taskId: 'echo-task',
@@ -605,8 +731,11 @@ test('concurrency: two pending grants + two concurrent claims → both succeed w
   const { env, cleanup } = isolatedEnv();
   try {
     const m = makeManifest({ approval: { policy: 'manual', risk_level: 'medium' } });
-    const task = m.workflows[0].tasks[0];
-    const taskHash = computeTaskApprovalHash({ workflowId: 'test-wf', task });
+    const taskHash = computeTaskApprovalHash({
+      manifest: m,
+      workflowId: 'test-wf',
+      taskId: 'echo-task',
+    });
     const a = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'alice', env });
     const b = grantApproval({ manifest: m, taskId: 'echo-task', approver: 'bob', env });
 
@@ -659,21 +788,12 @@ test('concurrency: stale lock is broken and claim proceeds', () => {
   }
 });
 
-test('tamper: edit to approver/reason/expires_at in ndjson fails verification', async (t) => {
-  const { existsSync: fsExists } = await import('node:fs');
-  const { homedir } = await import('node:os');
-  const sshCandidates = ['id_ed25519', 'id_ecdsa', 'id_rsa']
-    .map(k => join(homedir(), '.ssh', k))
-    .filter(p => fsExists(p) && fsExists(`${p}.pub`));
-  if (sshCandidates.length === 0) {
-    t.skip('no local SSH key pair found; skipping signed tamper test');
-    return;
-  }
-
+test('tamper: edit to approver/reason/expires_at in ndjson fails verification', async () => {
   const home = mkdtempSync(join(tmpdir(), 'agentcli-approval-tamper-'));
   const env = { ...process.env, AGENTCLI_HOME: home };
   delete env.AGENTCLI_SIGNER;
   try {
+    const signingKey = createEphemeralSshKey(home);
     const m = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
     const rec = grantApproval({
       manifest: m,
@@ -681,11 +801,12 @@ test('tamper: edit to approver/reason/expires_at in ndjson fails verification', 
       approver: 'alice',
       reason: 'original reason',
       signer: 'ssh',
+      signingKey,
       env,
     });
     assert.ok(rec.signature, 'grant should be signed');
 
-    const paths = getAgentcliPaths({ env });
+    const paths = trustEphemeralSshKey({ env, keyPath: signingKey, principal: 'alice' });
     const raw = readFileSync(paths.approvals, 'utf8').trim().split('\n');
     const grantEvent = JSON.parse(raw[0]);
 

@@ -69,3 +69,44 @@ export function resolveEvidenceProviderForMethod(method) {
   }
   return null;
 }
+
+/**
+ * Verify a persisted evidence envelope using the provider named by its method.
+ * Unknown, malformed, or provider-error results fail closed.
+ */
+export async function verifyEvidenceEnvelope(envelope, options = {}, ctx = {}) {
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return { verified: false, reason: 'evidence envelope must be an object' };
+  }
+  if (typeof envelope.method !== 'string' || envelope.method.length === 0) {
+    return { verified: false, reason: 'evidence envelope method is missing' };
+  }
+
+  let provider = resolveEvidenceProviderForMethod(envelope.method);
+  if (!provider && envelope.method === 'ssh-signature') {
+    await import('./ssh.js');
+    provider = resolveEvidenceProviderForMethod(envelope.method);
+  }
+  if (!provider) {
+    return {
+      verified: false,
+      reason: `no evidence provider is registered for method "${envelope.method}"`,
+    };
+  }
+
+  try {
+    const result = await provider.verify(envelope, options, ctx);
+    return result?.verified === true
+      ? result
+      : {
+          ...(result && typeof result === 'object' ? result : {}),
+          verified: false,
+          reason: result?.reason || 'evidence verification did not succeed',
+        };
+  } catch (error) {
+    return {
+      verified: false,
+      reason: `evidence verification failed: ${error.message}`,
+    };
+  }
+}

@@ -77,11 +77,11 @@ const schedulerRuntime = existsSync(schedulerPkg)
     };
 
 const v02RuntimeSkipReason = schedulerRuntime.ok
-  && schedulerRuntime.capabilities?.handoff_version === '2'
+  && Number.parseInt(schedulerRuntime.capabilities?.handoff_version || '0', 10) >= 2
   && schedulerRuntime.capabilities?.features?.trust_evaluation === true
   && schedulerRuntime.capabilities?.features?.authorization_hook === true
   ? null
-  : 'scheduler under test does not advertise handoff_version=2 with trust_evaluation=true and authorization_hook=true';
+  : 'scheduler under test does not advertise handoff_version>=2 with trust_evaluation=true and authorization_hook=true';
 
 if (!schedulerRuntime.ok) {
   describe('integration-scheduler (skipped)', { skip: schedulerRuntime.reason }, () => {

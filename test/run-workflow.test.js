@@ -244,3 +244,78 @@ test('cli run --all-roots dry-run plans every selected root graph', async () => 
     rmSync(tempHome, { recursive: true, force: true });
   }
 });
+
+test('runWorkflow skips disabled tasks and their dependent trigger branches', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'disabled-flow',
+      name: 'Disabled Flow',
+      tasks: [
+        {
+          id: 'root',
+          name: 'Root',
+          enabled: false,
+          shell: { program: 'sh', args: ['-c', 'exit 99'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+        },
+        {
+          id: 'child',
+          name: 'Child',
+          shell: { program: 'sh', args: ['-c', 'exit 98'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'root', on: 'failure' },
+        },
+        {
+          id: 'grandchild',
+          name: 'Grandchild',
+          shell: { program: 'sh', args: ['-c', 'exit 97'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'child', on: 'complete' },
+        },
+      ],
+    }],
+  };
+
+  const result = await runWorkflow(manifest, { rootTaskId: 'root', signer: 'none' });
+  assert.equal(result.ok, true);
+  assert.equal(result.summary.total, 3);
+  assert.equal(result.summary.failed, 0);
+  assert.equal(result.summary.skipped, 3);
+  assert(result.tasks.every(task => task.status === 'skipped'));
+  assert.match(result.tasks[0].reason, /disabled/);
+  assert.match(result.tasks[1].reason, /ancestor task/);
+});
+
+test('runWorkflow dry-run marks disabled branches as skipped instead of planned', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'disabled-plan',
+      name: 'Disabled Plan',
+      tasks: [
+        {
+          id: 'root',
+          name: 'Root',
+          enabled: false,
+          shell: { program: 'echo', args: ['root'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+        },
+        {
+          id: 'child',
+          name: 'Child',
+          shell: { program: 'echo', args: ['child'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'root', on: 'success' },
+        },
+      ],
+    }],
+  };
+
+  const result = await runWorkflow(manifest, { rootTaskId: 'root', dryRun: true });
+  assert.equal(result.summary.planned, 0);
+  assert.equal(result.summary.skipped, 2);
+  assert(result.tasks.every(task => task.status === 'skipped'));
+});

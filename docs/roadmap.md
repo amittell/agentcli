@@ -25,7 +25,7 @@
 - Credential handoff (downscope and transaction modes)
 - Audit enhancements (delegation chain, trust level, authorization decision, runtime instance attribution, handoff mode)
 - v0.1 to v0.2 conversion utility (`agentcli convert`)
-- v0.1/v0.2 dual-path execution (zero behavioral change for v0.1 manifests)
+- v0.1/v0.2 dual-path execution with shared static dry-run, approval ordering, child-environment sanitization, and audit safety guarantees
 - Provider discovery CLI and JSON-RPC (`agentcli identity providers`, `agentcli identity validate-delegation`)
 - Delegation chain validation with policy enforcement
 - Three-stage profile merge (profile, workflow, task) with tightening-only rules
@@ -33,8 +33,12 @@
 - Enterprise identity providers: `azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`
 - Comprehensive v0.2 profile validation with cross-reference checks for dangling refs
 - Converter produces proper identity profile refs (not inline blocks)
-- 591 total tests including 12 end-to-end integration tests
 - Local approval gate enforcement in `agentcli exec` with single-use ssh-signed grants (`agentcli approve`, `agentcli approvals list|revoke`, `exec --approval-id`); approval records stored at `~/.agentcli/state/approvals.ndjson`; enforces `approval.policy: manual` and `approval.policy: auto-reject`
+- Complete effective-execution approval binding with approver scope, timeout caps, unexpected-unsigned rejection, and approval-before-side-effects ordering
+- Cryptographic, manifest-bound authorization proofs and versioned evidence envelopes with transplantation detection
+- Fail-closed sandbox, network, provider capability, delegation, and credential cleanup behavior
+- Draft 2020-12 JSON Schema output, strict nested validation, strict CLI flags, and read-only JSON-RPC discovery methods
+- Scheduler handoff v3, authoritative live capabilities, governed feature gates, auto-reject disabling, and refusal to persist inline shell credentials
 
 ## v0.3
 

@@ -37,7 +37,7 @@ function tempFilePath(prefix) {
  * @param {object} env       - Environment variables object.
  * @returns {string|undefined} The resolved value, or undefined.
  */
-function resolveValueFrom(valueFrom, env, { cwd = process.cwd() } = {}) {
+function resolveValueFrom(valueFrom, env, { cwd = process.cwd(), commandEnv = env } = {}) {
   if (!valueFrom || typeof valueFrom !== 'object') return undefined;
   if (valueFrom.env) {
     const val = env[valueFrom.env];
@@ -51,29 +51,26 @@ function resolveValueFrom(valueFrom, env, { cwd = process.cwd() } = {}) {
     }
   }
   if (valueFrom.command) {
-    return resolveCommandValue(valueFrom.command, { env, cwd }) ?? undefined;
+    return resolveCommandValue(valueFrom.command, { env, commandEnv, cwd }) ?? undefined;
   }
   return undefined;
 }
 
 /**
  * Check if a file's permissions indicate it is world-readable.
- * Returns a warning string if world-readable, or null otherwise.
+ * Returns true if world-readable, false if private, or null when the mode
+ * cannot be inspected. Source paths are never returned in provider output.
  *
  * @param {string} filePath - Path to check.
- * @returns {string|null} Warning message, or null if permissions are acceptable.
+ * @returns {boolean|null}
  */
 function checkWorldReadable(filePath) {
   try {
     const stats = statSync(filePath);
-    const othersRead = stats.mode & 0o004;
-    if (othersRead) {
-      return `Token file "${filePath}" is world-readable (mode ${(stats.mode & 0o777).toString(8)}). Consider restricting permissions to 0600.`;
-    }
+    return Boolean(stats.mode & 0o004);
   } catch (_e) {
-    // If stat fails, skip the permission check; existence check handles missing files.
+    return null;
   }
-  return null;
 }
 
 const fileBearerProvider = {
@@ -149,6 +146,7 @@ const fileBearerProvider = {
   resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
     const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const inputs = (profile.auth && profile.auth.inputs) || {};
@@ -158,7 +156,7 @@ const fileBearerProvider = {
     let tokenFilePath = providerConfig.token_file || undefined;
 
     if (!tokenFilePath && inputs.token_file && inputs.token_file.value_from) {
-      tokenFilePath = resolveValueFrom(inputs.token_file.value_from, env, { cwd });
+      tokenFilePath = resolveValueFrom(inputs.token_file.value_from, env, { cwd, commandEnv });
     }
 
     if (!tokenFilePath || typeof tokenFilePath !== 'string' || tokenFilePath.length === 0) {
@@ -186,10 +184,10 @@ const fileBearerProvider = {
 
     // Check permissions and collect warnings
     const providerAssertions = {};
-    const permWarning = checkWorldReadable(tokenFilePath);
-    if (permWarning) {
-      providerAssertions.permission_warning = permWarning;
-    }
+    const worldReadable = checkWorldReadable(tokenFilePath);
+    providerAssertions.token_source = 'file';
+    providerAssertions.token_file_permissions_checked = worldReadable !== null;
+    providerAssertions.token_file_world_readable = worldReadable === true;
 
     // Read and trim the token
     const token = readFileSync(tokenFilePath, 'utf8').trim();
@@ -207,8 +205,6 @@ const fileBearerProvider = {
     const trustLevel = (profile.trust && profile.trust.level) || 'supervised';
     const subject = profile.subject || {};
     const auth = profile.auth || {};
-
-    providerAssertions.token_file = tokenFilePath;
 
     return {
       provider: 'file-bearer',

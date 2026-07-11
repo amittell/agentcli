@@ -1,333 +1,376 @@
 /**
  * SPIFFE JWT-SVID identity provider.
  *
- * Acquires JWT-SVIDs (SPIFFE Verifiable Identity Documents) from the
- * SPIFFE Workload API or from file-mounted projected volumes. SPIFFE
- * (Secure Production Identity Framework for Everyone) provides
- * cryptographically verifiable workload identities. Supports reading
- * JWT-SVIDs from file paths (common in Kubernetes with SPIRE agent
- * projected volumes) or via the SPIFFE Workload API socket. Uses the
- * global fetch() API available in Node >= 22 (no external dependencies).
+ * This provider deliberately supports only file-mounted JWT-SVIDs. The SPIFFE
+ * Workload API is a gRPC Unix-socket protocol and must be integrated through a
+ * conforming client, not an ad-hoc HTTP endpoint. File-mounted tokens are
+ * accepted only after audience, lifetime, subject, and signature verification.
  */
 
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createPublicKey, verify as verifySignature } from 'node:crypto';
 import { registerProvider } from './index.js';
-import { resolveSourcePath, formatMaterializationValue, buildCredentialSummary } from './session.js';
+import {
+  buildCredentialSummary,
+  cleanupMaterializedCredentials,
+  materializeCredentialBindings,
+  redactSession,
+} from './session.js';
 
-/**
- * Generate a unique temporary file path for credential materialization.
- *
- * @param {string} prefix - Filename prefix.
- * @returns {string} Absolute path to a temp file.
- */
-function tempFilePath(prefix) {
-  const rand = randomBytes(12).toString('hex');
-  return join(tmpdir(), `${prefix}-${Date.now()}-${rand}`);
+const SUPPORTED_ALGORITHMS = new Map([
+  ['RS256', 'RSA-SHA256'],
+  ['RS384', 'RSA-SHA384'],
+  ['RS512', 'RSA-SHA512'],
+]);
+const sessionContexts = new WeakMap();
+
+function providerError(code, message) {
+  return Object.assign(new Error(message), { code });
 }
 
-/**
- * Decode a base64url-encoded string to a UTF-8 string.
- *
- * Handles the base64url alphabet (- and _ instead of + and /) and
- * missing padding characters.
- *
- * @param {string} str - Base64url-encoded string.
- * @returns {string} Decoded UTF-8 string.
- */
-function base64urlDecode(str) {
-  // Convert base64url to standard base64
-  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  // Add padding if necessary
-  const padding = base64.length % 4;
-  if (padding === 2) {
-    base64 += '==';
-  } else if (padding === 3) {
-    base64 += '=';
+function decodeJsonSegment(segment, label) {
+  if (typeof segment !== 'string' || segment.length === 0 || !/^[A-Za-z0-9_-]+$/.test(segment)) {
+    throw providerError('spiffe_svid_invalid', `JWT-SVID ${label} is malformed`);
   }
-  return Buffer.from(base64, 'base64').toString('utf8');
+  try {
+    const decoded = Buffer.from(segment, 'base64url').toString('utf8');
+    const value = JSON.parse(decoded);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object');
+    return value;
+  } catch {
+    throw providerError('spiffe_svid_invalid', `JWT-SVID ${label} is not valid JSON`);
+  }
 }
 
-/**
- * Parse JWT claims from a JWT token string without signature verification.
- *
- * Extracts and decodes the payload segment of a JWT token. Does NOT
- * verify the signature -- that is the responsibility of the SPIFFE
- * trust bundle verifier at the consuming service.
- *
- * @param {string} jwt - The JWT token string.
- * @returns {{ header: object, payload: object }} Decoded JWT header and payload.
- * @throws {Error} If the JWT format is invalid.
- */
-function parseJwtClaims(jwt) {
-  if (typeof jwt !== 'string' || jwt.length === 0) {
-    throw new Error('JWT token is empty or not a string');
+function parseJwtSvid(token) {
+  if (typeof token !== 'string') throw providerError('spiffe_svid_invalid', 'JWT-SVID must be a string');
+  const segments = token.split('.');
+  if (segments.length !== 3 || segments.some(segment => segment.length === 0)) {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID must contain three non-empty segments');
   }
-
-  const parts = jwt.split('.');
-  if (parts.length !== 3) {
-    throw new Error(`Invalid JWT format: expected 3 dot-separated parts, got ${parts.length}`);
+  const [encodedHeader, encodedClaims, encodedSignature] = segments;
+  if (!/^[A-Za-z0-9_-]+$/.test(encodedSignature)) {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID signature is malformed');
   }
+  const signature = Buffer.from(encodedSignature, 'base64url');
+  if (signature.length === 0) throw providerError('spiffe_svid_invalid', 'JWT-SVID signature is empty');
+  return {
+    header: decodeJsonSegment(encodedHeader, 'header'),
+    claims: decodeJsonSegment(encodedClaims, 'claims'),
+    signature,
+    signingInput: `${encodedHeader}.${encodedClaims}`,
+  };
+}
 
-  let header;
+function parseTrustDocument(value, label) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw providerError('spiffe_trust_invalid', `${label} is empty`);
+  }
   try {
-    header = JSON.parse(base64urlDecode(parts[0]));
-  } catch (err) {
-    throw new Error(`Failed to decode JWT header: ${err.message}`, { cause: err });
+    return JSON.parse(value);
+  } catch {
+    throw providerError('spiffe_trust_invalid', `${label} is not valid JSON`);
   }
+}
 
-  let payload;
+function assertStrongRsaKey(key) {
+  if (key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength || 0) < 2048) {
+    throw providerError('spiffe_trust_invalid', 'JWT-SVID trust key must be an RSA public key of at least 2048 bits');
+  }
+  return key;
+}
+
+function selectJwk(document, header) {
+  const keys = Array.isArray(document?.keys) ? document.keys : [document];
+  const candidates = keys.filter(key => key && typeof key === 'object' && key.kty === 'RSA');
+  const key = header.kid
+    ? candidates.find(candidate => candidate.kid === header.kid)
+    : candidates.length === 1 ? candidates[0] : null;
+  if (!key) {
+    throw providerError(
+      'spiffe_trust_invalid',
+      header.kid ? 'No trusted JWT-SVID key matches the token key id' : 'JWT-SVID trust set is ambiguous without a key id'
+    );
+  }
+  if (key.use != null && key.use !== 'sig') {
+    throw providerError('spiffe_trust_invalid', 'Selected JWT-SVID key is not authorized for signatures');
+  }
+  if (key.alg != null && key.alg !== header.alg) {
+    throw providerError('spiffe_trust_invalid', 'Selected JWT-SVID key does not permit the token algorithm');
+  }
+  if (key.d != null || (Array.isArray(key.key_ops) && !key.key_ops.includes('verify'))) {
+    throw providerError('spiffe_trust_invalid', 'Selected JWT-SVID key must be a public verification key');
+  }
+  return assertStrongRsaKey(createPublicKey({ key, format: 'jwk' }));
+}
+
+function validateJwksStructure(value) {
+  const document = parseTrustDocument(value, 'JWT-SVID JWKS');
+  const keys = Array.isArray(document?.keys) ? document.keys : [document];
+  if (keys.length === 0) throw providerError('spiffe_trust_invalid', 'JWT-SVID JWKS contains no keys');
+  for (const key of keys) {
+    if (!key || typeof key !== 'object' || key.kty !== 'RSA') {
+      throw providerError('spiffe_trust_invalid', 'JWT-SVID JWKS supports RSA signing keys only');
+    }
+    if (key.d != null || (Array.isArray(key.key_ops) && !key.key_ops.includes('verify'))) {
+      throw providerError('spiffe_trust_invalid', 'JWT-SVID JWKS must contain public verification keys only');
+    }
+    assertStrongRsaKey(createPublicKey({ key, format: 'jwk' }));
+  }
+}
+
+function resolveTrustKey(config, header) {
+  if (typeof config.public_key_pem === 'string' && config.public_key_pem.trim()) {
+    if (/BEGIN (?:RSA )?PRIVATE KEY/.test(config.public_key_pem)) {
+      throw providerError('spiffe_trust_invalid', 'JWT-SVID trust material must not contain a private key');
+    }
+    return { key: assertStrongRsaKey(createPublicKey(config.public_key_pem)), source: 'public_key_pem' };
+  }
+  if (typeof config.public_key_file === 'string' && config.public_key_file.trim()) {
+    const pem = readFileSync(config.public_key_file, 'utf8');
+    if (/BEGIN (?:RSA )?PRIVATE KEY/.test(pem)) {
+      throw providerError('spiffe_trust_invalid', 'JWT-SVID trust material must not contain a private key');
+    }
+    return {
+      key: assertStrongRsaKey(createPublicKey(pem)),
+      source: 'public_key_file',
+    };
+  }
+  if (config.jwks != null) {
+    return { key: selectJwk(parseTrustDocument(config.jwks, 'JWT-SVID JWKS'), header), source: 'jwks' };
+  }
+  if (typeof config.jwks_file === 'string' && config.jwks_file.trim()) {
+    const document = parseTrustDocument(readFileSync(config.jwks_file, 'utf8'), 'JWT-SVID JWKS file');
+    return { key: selectJwk(document, header), source: 'jwks_file' };
+  }
+  throw providerError('spiffe_trust_required', 'JWT-SVID cryptographic trust material is required');
+}
+
+function validateAudience(claim, expected) {
+  const audiences = Array.isArray(claim) ? claim : [claim];
+  return audiences.some(value => typeof value === 'string' && value === expected);
+}
+
+function validateSpiffeId(value) {
+  if (typeof value !== 'string' || !value.startsWith('spiffe://')) return false;
   try {
-    payload = JSON.parse(base64urlDecode(parts[1]));
-  } catch (err) {
-    throw new Error(`Failed to decode JWT payload: ${err.message}`, { cause: err });
+    const parsed = new URL(value);
+    return parsed.protocol === 'spiffe:' && parsed.hostname.length > 0 &&
+      parsed.username === '' && parsed.password === '' && parsed.search === '' && parsed.hash === '';
+  } catch {
+    return false;
+  }
+}
+
+function verifyJwtSvid(token, config, expectedAudience, { clockToleranceS = 30 } = {}) {
+  const parsed = parseJwtSvid(token);
+  const algorithm = SUPPORTED_ALGORITHMS.get(parsed.header.alg);
+  if (!algorithm) {
+    throw providerError('spiffe_algorithm_unsupported', 'JWT-SVID uses an unsupported signature algorithm');
+  }
+  if (parsed.header.typ != null && parsed.header.typ !== 'JWT') {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID typ header must be JWT when present');
   }
 
-  return { header, payload };
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(parsed.claims.exp) || parsed.claims.exp <= now - clockToleranceS) {
+    throw providerError('spiffe_svid_expired', 'JWT-SVID is expired or has no valid expiration');
+  }
+  if (parsed.claims.nbf != null &&
+      (!Number.isFinite(parsed.claims.nbf) || parsed.claims.nbf > now + clockToleranceS)) {
+    throw providerError('spiffe_svid_not_active', 'JWT-SVID is not active yet');
+  }
+  if (parsed.claims.iat != null &&
+      (!Number.isFinite(parsed.claims.iat) || parsed.claims.iat > now + clockToleranceS)) {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID issuance time is in the future');
+  }
+  if (!validateAudience(parsed.claims.aud, expectedAudience)) {
+    throw providerError('spiffe_audience_mismatch', 'JWT-SVID audience does not match the requested audience');
+  }
+  if (!validateSpiffeId(parsed.claims.sub)) {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID subject is not a valid SPIFFE ID');
+  }
+  if (!validateSpiffeId(parsed.claims.iss)) {
+    throw providerError('spiffe_svid_invalid', 'JWT-SVID issuer is not a valid SPIFFE trust-domain URI');
+  }
+  if (config.expected_issuer != null && parsed.claims.iss !== config.expected_issuer) {
+    throw providerError('spiffe_issuer_mismatch', 'JWT-SVID issuer does not match the configured issuer');
+  }
+
+  let trust;
+  try {
+    trust = resolveTrustKey(config, parsed.header);
+  } catch (error) {
+    if (error?.code) throw error;
+    throw providerError('spiffe_trust_invalid', 'JWT-SVID trust material could not be loaded');
+  }
+  let verified;
+  try {
+    verified = verifySignature(
+      algorithm,
+      Buffer.from(parsed.signingInput, 'ascii'),
+      trust.key,
+      parsed.signature
+    );
+  } catch {
+    throw providerError('spiffe_signature_invalid', 'JWT-SVID signature verification failed');
+  }
+  if (!verified) throw providerError('spiffe_signature_invalid', 'JWT-SVID signature verification failed');
+  return { ...parsed, trustSource: trust.source };
+}
+
+function emptySession(profile) {
+  const trustLevel = profile?.trust?.level || 'supervised';
+  return {
+    provider: 'spiffe-jwt-svid',
+    subject: {
+      principal: profile?.subject?.principal || null,
+      issuer: profile?.subject?.issuer || null,
+      run_as: profile?.subject?.run_as || null,
+    },
+    instance: null,
+    trust: { declared_level: trustLevel, effective_level: trustLevel },
+    delegation_chain: [],
+    delegation_validation: {
+      valid: true,
+      depth: 0,
+      acyclic: true,
+      all_grants_present: true,
+    },
+    credentials: {},
+    provider_assertions: { acquisition_method: 'file', signature_verified: false },
+    refresh: { supported: true, expires_at: null },
+    handoff: { mode: 'none', prepared: false },
+  };
 }
 
 const spiffeJwtSvidProvider = {
   name: 'spiffe-jwt-svid',
 
   capabilities: {
-    auth_modes: ['service'],
-    credential_types: ['access_token'],
-    presentation_kinds: ['env', 'file'],
+    auth_modes: ['service', 'delegated'],
+    credential_types: ['jwt_svid'],
+    presentation_kinds: ['env', 'file', 'stdin'],
     handoff_modes: ['none'],
     refreshable: true,
-    delegation: false,
-    trust_levels: ['untrusted', 'restricted', 'supervised', 'autonomous'],
+    delegation: true,
+    trust_levels: ['restricted', 'supervised', 'autonomous'],
     approval_mechanisms: [],
   },
 
-  /**
-   * Validate a profile for the spiffe-jwt-svid provider.
-   *
-   * Checks that the profile declares an audience. The workload API socket
-   * is optional and defaults to the SPIFFE_ENDPOINT_SOCKET environment
-   * variable. The svid_file path is an alternative acquisition method.
-   *
-   * @param {object} profile - The identity profile.
-   * @param {object} [_ctx]  - Resolution context.
-   * @returns {{ valid: boolean, errors?: string[] }}
-   */
-  validateProfile(profile, _ctx) {
+  validateProfile(profile) {
     const errors = [];
-    const providerConfig = (profile.auth && profile.auth.provider_config) || {};
-    const auth = profile.auth || {};
+    const auth = profile?.auth || {};
+    const config = auth.provider_config || {};
+    const required = auth.required !== false;
+    const audience = auth.audience || config.audience;
 
-    const audience = providerConfig.audience || auth.audience;
-    if (typeof audience !== 'string' || audience.length === 0) {
-      errors.push(
-        'Audience is required: provide auth.provider_config.audience or auth.audience ' +
-        'as a non-empty string (e.g. "spiffe://example.org/my-service")'
-      );
+    if (config.workload_api_socket != null) {
+      errors.push('auth.provider_config.workload_api_socket is unsupported; mount a JWT-SVID file instead');
+    }
+    if (config.jwks_uri != null) {
+      errors.push('auth.provider_config.jwks_uri is unsupported; provide local trust material instead');
+    }
+    if (required && (typeof config.svid_file !== 'string' || config.svid_file.trim() === '')) {
+      errors.push('auth.provider_config.svid_file is required for file-mounted JWT-SVID acquisition');
+    } else if (config.svid_file != null && typeof config.svid_file !== 'string') {
+      errors.push('auth.provider_config.svid_file must be a string');
+    }
+    if (required && (typeof audience !== 'string' || audience.trim() === '')) {
+      errors.push('auth.audience or auth.provider_config.audience is required for JWT-SVID verification');
     }
 
-    if (providerConfig.workload_api_socket !== undefined && providerConfig.workload_api_socket !== null) {
-      if (typeof providerConfig.workload_api_socket !== 'string' || providerConfig.workload_api_socket.length === 0) {
-        errors.push(
-          'auth.provider_config.workload_api_socket, when specified, must be a non-empty string ' +
-          '(path to the SPIFFE Workload API Unix domain socket)'
-        );
+    const trustSources = ['public_key_pem', 'public_key_file', 'jwks', 'jwks_file']
+      .filter(key => config[key] != null);
+    if (required && trustSources.length !== 1) {
+      errors.push('exactly one local JWT-SVID trust source is required');
+    } else if (trustSources.length > 1) {
+      errors.push('configure only one JWT-SVID trust source');
+    }
+    if (config.public_key_pem != null) {
+      if (typeof config.public_key_pem !== 'string' || config.public_key_pem.trim() === '') {
+        errors.push('auth.provider_config.public_key_pem must be a non-empty PEM string');
+      } else {
+        try {
+          if (/BEGIN (?:RSA )?PRIVATE KEY/.test(config.public_key_pem)) throw new Error('private key');
+          assertStrongRsaKey(createPublicKey(config.public_key_pem));
+        } catch {
+          errors.push('auth.provider_config.public_key_pem must be a public RSA key of at least 2048 bits');
+        }
       }
     }
-
-    if (providerConfig.svid_file !== undefined && providerConfig.svid_file !== null) {
-      if (typeof providerConfig.svid_file !== 'string' || providerConfig.svid_file.length === 0) {
-        errors.push(
-          'auth.provider_config.svid_file, when specified, must be a non-empty string ' +
-          '(path to a file containing the JWT-SVID)'
-        );
+    if (config.public_key_file != null &&
+        (typeof config.public_key_file !== 'string' || config.public_key_file.trim() === '')) {
+      errors.push('auth.provider_config.public_key_file must be a non-empty file path');
+    }
+    if (config.jwks != null) {
+      try {
+        validateJwksStructure(config.jwks);
+      } catch (error) {
+        errors.push(error.message);
       }
     }
-
-    if (errors.length > 0) {
-      return { valid: false, errors };
+    if (config.jwks_file != null &&
+        (typeof config.jwks_file !== 'string' || config.jwks_file.trim() === '')) {
+      errors.push('auth.provider_config.jwks_file must be a non-empty file path');
     }
-
-    return { valid: true };
+    if (config.clock_tolerance_s != null &&
+        (!Number.isInteger(config.clock_tolerance_s) || config.clock_tolerance_s < 0 || config.clock_tolerance_s > 300)) {
+      errors.push('auth.provider_config.clock_tolerance_s must be an integer from 0 through 300');
+    }
+    return errors.length === 0 ? { valid: true } : { valid: false, errors };
   },
 
-  /**
-   * Resolve a credential session by acquiring a JWT-SVID.
-   *
-   * Attempts to acquire the JWT-SVID in order of preference:
-   * 1. Read from a file path (svid_file) -- common with Kubernetes projected volumes
-   * 2. Contact the SPIFFE Workload API via the configured or default socket
-   *
-   * The SPIFFE Workload API is a Unix domain socket gRPC service. Since
-   * gRPC requires external dependencies, this provider uses the file-based
-   * approach as the primary mechanism. The Workload API socket path is
-   * recorded for diagnostic purposes.
-   *
-   * @param {object} request - The session request containing the profile and instanceId.
-   * @param {object} [ctx]   - Resolution context. ctx.env defaults to process.env.
-   * @returns {Promise<object>} A credential session.
-   */
-  async resolveSession(request, ctx) {
-    const env = (ctx && ctx.env) || process.env;
-    const profile = request.profile || {};
-    const providerConfig = (profile.auth && profile.auth.provider_config) || {};
+  resolveSession(request, ctx = {}) {
+    const profile = request?.profile || {};
     const auth = profile.auth || {};
+    const config = auth.provider_config || {};
     const required = auth.required !== false;
+    const audience = auth.audience || config.audience;
 
-    const audience = providerConfig.audience || auth.audience;
-    const svidFile = providerConfig.svid_file || null;
-    const workloadApiSocket = providerConfig.workload_api_socket || env.SPIFFE_ENDPOINT_SOCKET || null;
-
-    const trustLevel = (profile.trust && profile.trust.level) || 'supervised';
-    const subject = profile.subject || {};
-
-    const buildEmptySession = () => ({
-      provider: 'spiffe-jwt-svid',
-      subject: {
-        principal: subject.principal || null,
-        issuer: subject.issuer || null,
-        run_as: subject.run_as || null,
-      },
-      instance: request.instanceId ? { id: request.instanceId, source: 'operator' } : null,
-      trust: {
-        declared_level: trustLevel,
-        effective_level: trustLevel,
-      },
-      delegation_chain: [],
-      delegation_validation: {
-        valid: true,
-        depth: 0,
-        acyclic: true,
-        all_grants_present: true,
-      },
-      credentials: {},
-      provider_assertions: {
-        audience,
-        svid_file: svidFile,
-        workload_api_socket: workloadApiSocket,
-      },
-      refresh: {
-        supported: true,
-        expires_at: null,
-      },
-      handoff: {
-        mode: 'none',
-        prepared: false,
-      },
-    });
-
-    // Strategy 1: Read JWT-SVID from a file path
-    let jwtSvid = null;
-    let acquisitionMethod = null;
-
-    if (svidFile) {
-      try {
-        jwtSvid = readFileSync(svidFile, 'utf8').trim();
-        if (jwtSvid.length === 0) {
-          jwtSvid = null;
-        } else {
-          acquisitionMethod = 'file';
-        }
-      } catch {
-        // File not readable -- fall through to socket approach
-        jwtSvid = null;
-      }
-    }
-
-    // Strategy 2: Try the SPIFFE Workload API via HTTP
-    // The SPIRE Agent exposes a REST-like API at the Unix domain socket.
-    // Standard fetch() cannot connect to Unix domain sockets, but some
-    // SPIFFE implementations expose an HTTP endpoint. Attempt to reach it
-    // if the socket path looks like a TCP endpoint (http:// or https://).
-    if (!jwtSvid && workloadApiSocket) {
-      if (workloadApiSocket.startsWith('http://') || workloadApiSocket.startsWith('https://')) {
-        // TCP-based Workload API endpoint (e.g., Envoy SDS sidecar or
-        // SPIRE Agent configured with a TCP listener)
-        try {
-          const apiUrl = new URL('/v1/auth/jwt-svids', workloadApiSocket);
-          const response = await fetch(apiUrl.toString(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ audience: [audience] }),
-            signal: AbortSignal.timeout(10000),
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            // SPIRE REST API returns { svids: [{ spiffe_id, svid, ... }] }
-            if (data.svids && data.svids.length > 0 && data.svids[0].svid) {
-              jwtSvid = data.svids[0].svid;
-              acquisitionMethod = 'workload-api-http';
-            }
-          }
-        } catch {
-          // HTTP endpoint not reachable -- fall through to error
-        }
-      }
-      // Unix domain socket path (e.g., /run/spire/agent/sockets/api.sock)
-      // Standard Node fetch() cannot connect to UDS without a custom agent.
-      // This is a known limitation documented below. The svid_file approach
-      // is the recommended alternative.
-    }
-
-    if (!jwtSvid) {
-      const err = new Error(
-        'SPIFFE workload API not available. Set SPIFFE_ENDPOINT_SOCKET or provide svid_file path.'
-      );
-      err.code = 'spiffe_unavailable';
-
-      if (required) {
-        throw err;
-      }
-      return buildEmptySession();
-    }
-
-    // Parse the JWT-SVID to extract claims
-    let claims;
+    const trustConfigured = ['public_key_pem', 'public_key_file', 'jwks', 'jwks_file']
+      .some(key => config[key] != null);
+    if (!config.svid_file || (!required && (!audience || !trustConfigured))) return emptySession(profile);
+    let token;
     try {
-      const parsed = parseJwtClaims(jwtSvid);
-      claims = parsed.payload;
-    } catch (parseErr) {
-      const err = new Error(
-        `Failed to parse JWT-SVID: ${parseErr.message}`
-      );
-      err.code = 'spiffe_unavailable';
-      err.cause = parseErr;
-
-      if (required) {
-        throw err;
-      }
-      return buildEmptySession();
+      token = readFileSync(config.svid_file, 'utf8').trim();
+    } catch {
+      if (!required) return emptySession(profile);
+      throw providerError('spiffe_svid_unavailable', 'File-mounted JWT-SVID could not be read');
+    }
+    if (!token) {
+      if (!required) return emptySession(profile);
+      throw providerError('spiffe_svid_unavailable', 'File-mounted JWT-SVID is empty');
     }
 
-    // Extract SPIFFE-specific claims
-    const spiffeId = claims.sub || null;
-    const jwtAudience = claims.aud
-      ? (Array.isArray(claims.aud) ? claims.aud : [claims.aud])
-      : [audience];
-    const expiresAt = claims.exp
-      ? new Date(claims.exp * 1000).toISOString()
-      : null;
-    const issuedAt = claims.iat
-      ? new Date(claims.iat * 1000).toISOString()
-      : null;
-    const issuer = claims.iss || null;
-
-    return {
+    let verified;
+    try {
+      verified = verifyJwtSvid(token, {
+        ...config,
+        expected_issuer: profile?.subject?.issuer || config.issuer || null,
+      }, audience, {
+        clockToleranceS: config.clock_tolerance_s ?? 30,
+      });
+    } catch (error) {
+      if (!required) return emptySession(profile);
+      throw error;
+    }
+    const claims = verified.claims;
+    const trustLevel = profile?.trust?.level || 'supervised';
+    const principal = profile?.subject?.principal || claims.sub;
+    const session = {
       provider: 'spiffe-jwt-svid',
       subject: {
-        principal: subject.principal || spiffeId,
-        issuer: subject.issuer || issuer,
-        run_as: subject.run_as || null,
+        principal,
+        issuer: profile?.subject?.issuer || claims.iss || null,
+        run_as: profile?.subject?.run_as || null,
       },
-      instance: request.instanceId ? { id: request.instanceId, source: 'operator' } : null,
-      trust: {
-        declared_level: trustLevel,
-        effective_level: trustLevel,
-      },
+      instance: request?.instanceId ? { id: request.instanceId, source: 'operator' } : null,
+      trust: { declared_level: trustLevel, effective_level: trustLevel },
       delegation_chain: [{
-        kind: subject.kind || 'service',
-        principal: subject.principal || spiffeId || 'spiffe-workload',
+        kind: 'workload',
+        principal,
         grant: 'jwt-svid',
         validated: true,
       }],
@@ -338,171 +381,71 @@ const spiffeJwtSvidProvider = {
         all_grants_present: true,
       },
       credentials: {
-        access_token: {
+        jwt_svid: {
           kind: 'jwt-svid',
-          value: jwtSvid,
-          audience: jwtAudience.length === 1 ? jwtAudience[0] : jwtAudience,
-          scopes: auth.scopes || [],
-          expires_at: expiresAt,
+          value: token,
+          audience,
+          expires_at: new Date(claims.exp * 1000).toISOString(),
         },
       },
       provider_assertions: {
-        spiffe_id: spiffeId,
-        audience: jwtAudience,
-        issuer,
-        issued_at: issuedAt,
-        acquisition_method: acquisitionMethod,
-        svid_file: svidFile,
-        workload_api_socket: workloadApiSocket,
+        spiffe_id: claims.sub,
+        issuer: claims.iss || null,
+        audience,
+        issued_at: Number.isFinite(claims.iat) ? new Date(claims.iat * 1000).toISOString() : null,
+        acquisition_method: 'file',
+        signature_verified: true,
+        jwt_alg: verified.header.alg,
+        jwt_kid: verified.header.kid || null,
+        trust_source: verified.trustSource,
       },
       refresh: {
         supported: true,
-        expires_at: expiresAt,
+        expires_at: new Date(claims.exp * 1000).toISOString(),
       },
-      handoff: {
-        mode: 'none',
-        prepared: false,
-      },
+      handoff: { mode: 'none', prepared: false },
     };
+    sessionContexts.set(session, { request, ctx });
+    return session;
   },
 
-  /**
-   * Refresh a credential session by re-reading the JWT-SVID.
-   *
-   * SPIFFE JWT-SVIDs are short-lived and automatically rotated by the
-   * SPIRE agent. Re-reading the svid_file or re-requesting from the
-   * workload API will return the current valid SVID.
-   *
-   * @param {object} session - The current credential session.
-   * @param {object} [ctx]   - Resolution context.
-   * @returns {Promise<object>} A refreshed credential session.
-   */
-  async refreshSession(session, ctx) {
-    const svidFile = session.provider_assertions && session.provider_assertions.svid_file;
-    const workloadApiSocket = session.provider_assertions && session.provider_assertions.workload_api_socket;
-    const audience = session.provider_assertions && session.provider_assertions.audience;
-    const primaryAudience = Array.isArray(audience) ? audience[0] : audience;
-
-    return spiffeJwtSvidProvider.resolveSession({
-      profile: {
-        auth: {
-          provider_config: {
-            audience: primaryAudience,
-            svid_file: svidFile,
-            workload_api_socket: workloadApiSocket,
-          },
-        },
-        trust: session.trust ? { level: session.trust.declared_level } : undefined,
-        subject: session.subject,
-      },
-      instanceId: session.instance && session.instance.id,
-    }, ctx);
-  },
-
-  /**
-   * Describe a session for audit purposes. Redacts the JWT-SVID value
-   * and includes a credential summary.
-   *
-   * @param {object} session - The credential session.
-   * @param {object} _ctx    - Resolution context.
-   * @returns {object} Audit-safe session description.
-   */
-  describeSession(session, _ctx) {
-    const described = structuredClone(session);
-
-    if (described.credentials && described.credentials.access_token) {
-      described.credentials.access_token.value = '[REDACTED]';
+  refreshSession(session, ctx = {}) {
+    const prior = sessionContexts.get(session);
+    if (!prior) {
+      throw providerError('spiffe_refresh_unavailable', 'JWT-SVID refresh requires the original in-process profile context');
     }
+    return this.resolveSession(prior.request, { ...prior.ctx, ...ctx });
+  },
 
+  describeSession(session) {
+    const described = redactSession(session);
     described.credential_summary = buildCredentialSummary(session);
-
     return described;
   },
 
-  /**
-   * Materialize credentials for tool consumption.
-   *
-   * Processes each binding in the presentation, resolving source paths
-   * from the session and writing them to the specified target (env var
-   * or temp file).
-   *
-   * @param {object} session      - The credential session.
-   * @param {object} presentation - Presentation descriptor with bindings array.
-   * @param {object} _ctx         - Resolution context.
-   * @returns {object} Materialization result with env_vars, temp_files, and cleanup metadata.
-   */
-  materialize(session, presentation, _ctx) {
-    const envVars = {};
-    const tempFiles = [];
-    const bindings = (presentation && presentation.bindings) || [];
-
-    for (const binding of bindings) {
-      const source = binding.source;
-      const target = binding.target || {};
-      const format = binding.format || 'raw';
-
-      const rawValue = resolveSourcePath(session, source);
-      if (rawValue === undefined) continue;
-
-      const formatted = formatMaterializationValue(rawValue, format);
-
-      switch (target.kind) {
-        case 'env': {
-          const envName = target.name;
-          if (envName) {
-            envVars[envName] = formatted;
-          }
-          break;
-        }
-
-        case 'file': {
-          const prefix = target.prefix || 'agentcli-spiffe-cred';
-          const filePath = tempFilePath(prefix);
-          mkdirSync(tmpdir(), { recursive: true });
-          writeFileSync(filePath, formatted, { mode: 0o600 });
-          tempFiles.push({ path: filePath, binding_source: source });
-          break;
-        }
-
-        case 'none':
-        default:
-          break;
-      }
-    }
-
-    return {
-      materialized: true,
-      cleanup_required: tempFiles.length > 0,
-      env_vars: envVars,
-      temp_files: tempFiles,
-      stdin: null,
-    };
+  materialize(session, presentation) {
+    return materializeCredentialBindings(session, presentation, {
+      allowedTargetKinds: this.capabilities.presentation_kinds,
+      tempPrefix: 'agentcli-spiffe-jwt-svid',
+    });
   },
 
-  /**
-   * Clean up materialized state by deleting temporary files.
-   *
-   * @param {object} materialization - The materialization result from materialize().
-   * @param {object} _ctx            - Resolution context.
-   * @returns {{ cleaned: boolean, warnings: string[] }}
-   */
-  cleanup(materialization, _ctx) {
-    const warnings = [];
-    const files = (materialization && materialization.temp_files) || [];
+  cleanup(materialization) {
+    return cleanupMaterializedCredentials(materialization);
+  },
 
-    for (const entry of files) {
-      const filePath = typeof entry === 'string' ? entry : entry.path;
-      try {
-        unlinkSync(filePath);
-      } catch (err) {
-        warnings.push(`Failed to delete temp file "${filePath}": ${err.message}`);
-      }
-    }
-
-    return { cleaned: true, warnings };
+  validateDelegation(chain, policy = {}) {
+    const entries = Array.isArray(chain) ? chain : [];
+    const maxDepth = Number.isInteger(policy.max_depth) ? policy.max_depth : 1;
+    return {
+      valid: entries.length <= maxDepth && entries.every(entry => entry?.validated === true),
+      depth: entries.length,
+      acyclic: true,
+      all_grants_present: entries.every(entry => typeof entry?.grant === 'string' && entry.grant.length > 0),
+    };
   },
 };
 
 registerProvider(spiffeJwtSvidProvider);
 
-export { spiffeJwtSvidProvider };
+export { spiffeJwtSvidProvider, verifyJwtSvid };

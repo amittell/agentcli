@@ -4,13 +4,13 @@
  * Handles JWT verification for manifest authorization proofs using
  * pure Node.js built-in crypto -- no external dependencies.
  *
- * Supports RS256 and ES256 signature verification when a trusted
- * public key is provided. Without a trusted key, structural and
- * claims validation is still performed but cryptographic signature
- * verification is skipped.
+ * Supports RS256 and ES256 signature verification. Structural and claims
+ * validation is reported separately, but a JWT is never marked verified
+ * unless its cryptographic signature is verified by a trusted key.
  */
 
 import { createPublicKey, createVerify } from 'node:crypto';
+import { canonicalDigest } from '../canonical.js';
 import { registerVerifier } from './index.js';
 
 const DEFAULT_JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -26,6 +26,7 @@ const AUDIT_SAFE_CLAIMS = [
   'step_up_policy',
   'session_id',
   'request_id',
+  'manifest_digest',
 ];
 const jwksCache = new Map();
 
@@ -296,7 +297,11 @@ async function resolveJwtTrustedKey(proof, profile, ctx = {}) {
 export async function resolveJwtVerificationContext(proof, profile, ctx = {}) {
   const context = {
     ...ctx,
-    requireSignature: ctx.requireSignature ?? profile?.verify?.required === true,
+    manifestDigest: ctx.manifestDigest ?? (
+      ctx.manifest == null ? null : canonicalDigest(ctx.manifest)
+    ),
+    requireSignature: ctx.requireSignature ?? true,
+    requireManifestBinding: ctx.requireManifestBinding ?? true,
   };
   const resolved = await resolveJwtTrustedKey(proof, profile, context);
   return {
@@ -398,13 +403,13 @@ function validateDeclaredClaims(declaredClaims, payload) {
       if (!actualValue.includes(expectedValue)) {
         errors.push({
           field: `claims.${key}`,
-          message: `Claim "${jwtKey}" value does not include expected "${expectedValue}"`,
+          message: `Claim "${jwtKey}" does not satisfy the declared value`,
         });
       }
     } else if (actualValue !== expectedValue) {
       errors.push({
         field: `claims.${key}`,
-        message: `Claim "${jwtKey}" expected "${expectedValue}", got "${actualValue}"`,
+        message: `Claim "${jwtKey}" does not satisfy the declared value`,
       });
     }
   }
@@ -428,7 +433,7 @@ const jwtVerifier = {
    * @param {object} _ctx    - Validation context.
    * @returns {{ valid: boolean, errors?: Array<{ field: string, message: string }> }}
    */
-  validateProfile(profile, _ctx) {
+  validateProfile(profile, ctx = {}) {
     const errors = [];
 
     if (profile.issuer !== undefined && profile.issuer !== null) {
@@ -440,20 +445,25 @@ const jwtVerifier = {
       }
     }
 
-    if (profile.proof) {
-      if (!profile.proof.value_from) {
+    if (!profile.proof || !profile.proof.value_from) {
+      errors.push({
+        field: 'proof',
+        message: 'proof must use value_from with env, file, literal, or command source',
+      });
+    } else {
+      const vf = profile.proof.value_from;
+      const sources = ['env', 'file', 'literal', 'command']
+        .filter(source => vf[source] !== undefined);
+      if (sources.length !== 1) {
         errors.push({
-          field: 'proof',
-          message: 'proof must use value_from with env, file, literal, or command source',
+          field: 'proof.value_from',
+          message: 'value_from must specify exactly one of env, file, literal, or command',
         });
-      } else {
-        const vf = profile.proof.value_from;
-        if (!vf.env && !vf.file && !vf.literal && !vf.command) {
-          errors.push({
-            field: 'proof.value_from',
-            message: 'value_from must specify env, file, literal, or command source',
-          });
-        }
+      } else if (sources[0] === 'literal') {
+        errors.push({
+          field: 'proof.value_from.literal',
+          message: 'JWT proofs must be stored outside the manifest to bind its canonical digest',
+        });
       }
     }
 
@@ -472,6 +482,21 @@ const jwtVerifier = {
           field: 'jwks_uri',
           message: 'jwks_uri must be a non-empty string when present',
         });
+      } else {
+        try {
+          const uri = new URL(profile.jwks_uri);
+          if (uri.protocol !== 'https:' && ctx.allowInsecureJwks !== true) {
+            errors.push({
+              field: 'jwks_uri',
+              message: 'jwks_uri must use HTTPS',
+            });
+          }
+        } catch {
+          errors.push({
+            field: 'jwks_uri',
+            message: 'jwks_uri must be a valid URL',
+          });
+        }
       }
     }
 
@@ -481,17 +506,26 @@ const jwtVerifier = {
           field: 'public_key',
           message: 'public_key must be a non-empty string when present',
         });
+      } else {
+        try {
+          normalizeVerificationKey(profile.public_key);
+        } catch (error) {
+          errors.push({
+            field: 'public_key',
+            message: `public_key is not a valid verification key: ${error.message}`,
+          });
+        }
       }
     }
 
     if (
-      profile.verify?.required === true &&
       !isNonEmptyString(profile.public_key) &&
-      !isNonEmptyString(profile.jwks_uri)
+      !isNonEmptyString(profile.jwks_uri) &&
+      !ctx.trustedKey
     ) {
       errors.push({
-        field: 'verify.required',
-        message: 'verify.required for jwt proofs requires public_key or jwks_uri',
+        field: 'verify',
+        message: 'jwt proof verification requires public_key or jwks_uri',
       });
     }
 
@@ -504,8 +538,8 @@ const jwtVerifier = {
    * Verify a resolved JWT proof against the declared profile.
    *
    * Parses and validates JWT structure, checks expiry and not-before claims,
-   * validates declared claims, and optionally verifies the cryptographic
-   * signature when a trusted key is available.
+   * validates declared claims and the canonical manifest binding, then
+   * verifies the cryptographic signature with configured trust material.
    *
    * @param {string} proof   - The resolved JWT string.
    * @param {object} profile - The authorization proof profile.
@@ -515,6 +549,7 @@ const jwtVerifier = {
   verifyProof(proof, profile, ctx) {
     const context = ctx || {};
     const signatureRequired = Boolean(context.requireSignature);
+    const manifestBindingRequired = context.requireManifestBinding !== false;
 
     // Validate proof is a non-empty string
     if (!proof || typeof proof !== 'string') {
@@ -558,7 +593,7 @@ const jwtVerifier = {
       return {
         verified: false,
         method: 'jwt',
-        reason: `JWT issuer expected "${profile.issuer}", got "${payload.iss ?? '(missing)'}"`,
+        reason: 'JWT issuer does not match the declared issuer',
         claims_validated: false,
         signature_verified: false,
       };
@@ -569,7 +604,7 @@ const jwtVerifier = {
         return {
           verified: false,
           method: 'jwt',
-          reason: `JWT audience does not include expected "${profile.audience}"`,
+          reason: 'JWT audience does not satisfy the declared audience',
           claims_validated: false,
           signature_verified: false,
         };
@@ -636,6 +671,23 @@ const jwtVerifier = {
       }
     }
 
+    let manifestBound = !manifestBindingRequired;
+    let manifestBindingReason = null;
+    if (manifestBindingRequired) {
+      if (typeof context.manifestDigest !== 'string' || context.manifestDigest.length === 0) {
+        manifestBindingReason = 'trusted manifest digest is required for JWT authorization proof verification';
+      } else if (typeof payload.manifest_digest !== 'string') {
+        manifestBindingReason = 'JWT is missing required manifest_digest claim';
+      } else if (
+        payload.manifest_digest.replace(/^sha256:/, '') !==
+        context.manifestDigest.replace(/^sha256:/, '')
+      ) {
+        manifestBindingReason = 'JWT manifest_digest claim does not match the canonical manifest';
+      } else {
+        manifestBound = true;
+      }
+    }
+
     // Attempt signature verification
     let signatureVerified = false;
     let signatureReason = context.trustedKeyError || 'no trusted key available for signature verification';
@@ -660,26 +712,13 @@ const jwtVerifier = {
         decodedClaims[claim] = payload[claim];
       }
     }
-    // Include custom claims declared in the profile
-    if (profile.claims && typeof profile.claims === 'object') {
-      for (const key of Object.keys(profile.claims)) {
-        const jwtKey = CLAIM_MAPPINGS[key] || key;
-        if (payload[jwtKey] !== undefined && decodedClaims[jwtKey] === undefined) {
-          decodedClaims[jwtKey] = payload[jwtKey];
-        }
-      }
-    }
+    // Arbitrary claims may be validated, but only the explicit audit-safe
+    // allowlist above is retained. A manifest author cannot opt a credential
+    // or other sensitive custom claim into audit output by naming it here.
 
-    // Determine overall verification: all checks must pass
-    // Structure and claims are validated at this point.
-    // If a trusted key was provided, signature must also verify.
-    // If no trusted key, claims-only validation counts as verified (signature_verified remains false).
-    // If a trusted key was provided, signature must also pass.
-    const verified = signatureRequired
-      ? signatureVerified
-      : context.trustedKey
-        ? signatureVerified
-        : true;
+    // Claims-only parsing is useful diagnostics, not authorization. A JWT is
+    // verified only after cryptographic verification by a trusted key.
+    const verified = signatureVerified && manifestBound;
 
     const result = {
       verified,
@@ -689,6 +728,8 @@ const jwtVerifier = {
       claims_validated: true,
       signature_verified: signatureVerified,
       signature_required: signatureRequired,
+      manifest_binding_required: manifestBindingRequired,
+      manifest_bound: manifestBound,
       decoded_claims: decodedClaims,
       key_id: context.trustedKeyId || header.kid || null,
       key_source: context.trustedKeySource || null,
@@ -700,7 +741,10 @@ const jwtVerifier = {
       result.signature_verification_reason = signatureReason;
     }
     if (!verified) {
-      result.reason = signatureReason || 'JWT verification failed';
+      result.reason = [
+        !signatureVerified ? signatureReason : null,
+        !manifestBound ? manifestBindingReason : null,
+      ].filter(Boolean).join('; ') || 'JWT verification failed';
     }
 
     return result;
@@ -727,6 +771,8 @@ const jwtVerifier = {
       claims_validated: result.claims_validated,
       signature_verified: result.signature_verified,
       signature_required: result.signature_required,
+      manifest_binding_required: result.manifest_binding_required,
+      manifest_bound: result.manifest_bound,
       decoded_claims: result.decoded_claims || null,
       key_id: result.key_id || null,
       key_source: result.key_source || null,

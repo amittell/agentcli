@@ -1,5 +1,15 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { isatty } from 'node:tty';
 import { resolveManifestCandidate } from './home.js';
 
@@ -14,11 +24,17 @@ export async function loadJsonInput(
   { cwd = process.cwd(), env = process.env, stdin = process.stdin } = {}
 ) {
   if (!input) {
-    throw new Error('Missing input. Pass a file path or JSON string.');
+    throw Object.assign(
+      new Error('Missing input. Pass a file path or JSON string.'),
+      { code: 'invalid_argument' }
+    );
   }
   const resolvedPath = resolveManifestCandidate(input, { cwd, env });
   if (input === '-' && (stdin?.isTTY ?? isatty(0))) {
-    throw new Error('stdin is a TTY. Pipe JSON data or pass a file path.');
+    throw Object.assign(
+      new Error('stdin is a TTY. Pipe JSON data or pass a file path.'),
+      { code: 'invalid_argument' }
+    );
   }
   const raw = input === '-'
     ? await readStdinText(stdin)
@@ -27,7 +43,10 @@ export async function loadJsonInput(
       : looksLikeJsonLiteral(input)
         ? input
         : (() => {
-            throw new Error(`Input not found: ${input}. Pass a file path, a manifest name from AGENTCLI_HOME/manifests, or a JSON string.`);
+            throw Object.assign(
+              new Error(`Input not found: ${input}. Pass a file path, a manifest name from AGENTCLI_HOME/manifests, or a JSON string.`),
+              { code: 'invalid_argument' }
+            );
           })();
   try {
     return JSON.parse(raw);
@@ -42,7 +61,10 @@ export async function loadJsonInput(
 
 async function readStdinText(stream) {
   if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
-    throw new Error('stdin is not readable. Pipe JSON data or pass a file path.');
+    throw Object.assign(
+      new Error('stdin is not readable. Pipe JSON data or pass a file path.'),
+      { code: 'invalid_argument' }
+    );
   }
 
   let raw = '';
@@ -52,29 +74,94 @@ async function readStdinText(stream) {
   return raw;
 }
 
+function invalidOutput(message) {
+  return Object.assign(new Error(message), { code: 'invalid_argument' });
+}
+
+function isWithin(basePath, candidatePath) {
+  const pathFromBase = relative(basePath, candidatePath);
+  return pathFromBase === '' || (
+    pathFromBase !== '..' &&
+    !pathFromBase.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromBase)
+  );
+}
+
+function nearestExistingAncestor(candidatePath) {
+  let current = candidatePath;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+  return current;
+}
+
 export function resolveSafeOutputPath(outputPath, cwd = process.cwd()) {
   if (!outputPath) {
-    throw new Error('Missing output path.');
+    throw invalidOutput('Missing output path.');
   }
 
   const baseDir = resolve(cwd);
+  if (!existsSync(baseDir)) {
+    throw invalidOutput(`Current working directory does not exist: ${baseDir}`);
+  }
+  const baseRealPath = realpathSync(baseDir);
   const resolvedPath = resolve(baseDir, outputPath);
   const relativePath = relative(baseDir, resolvedPath);
 
   if (relativePath === '' || relativePath === '.') {
-    throw new Error('Output path must point to a file inside the current working directory.');
+    throw invalidOutput('Output path must point to a file inside the current working directory.');
   }
 
-  if (relativePath.startsWith('..')) {
-    throw new Error('Refusing to write outside the current working directory.');
+  if (!isWithin(baseDir, resolvedPath)) {
+    throw invalidOutput('Refusing to write outside the current working directory.');
+  }
+
+  const existingAncestor = nearestExistingAncestor(dirname(resolvedPath));
+  if (!existingAncestor) {
+    throw invalidOutput('Unable to resolve an existing parent directory for the output path.');
+  }
+  const realAncestor = realpathSync(existingAncestor);
+  if (!isWithin(baseRealPath, realAncestor)) {
+    throw invalidOutput('Refusing to write through a symlink outside the current working directory.');
+  }
+
+  if (existsSync(resolvedPath)) {
+    if (lstatSync(resolvedPath).isSymbolicLink()) {
+      throw invalidOutput('Refusing to overwrite a symbolic link.');
+    }
+    if (!isWithin(baseRealPath, realpathSync(resolvedPath))) {
+      throw invalidOutput('Refusing to overwrite a file outside the current working directory.');
+    }
   }
 
   return resolvedPath;
 }
 
 export function writeJsonOutput(outputPath, payload, { cwd = process.cwd() } = {}) {
-  const resolvedPath = resolveSafeOutputPath(outputPath, cwd);
+  let resolvedPath = resolveSafeOutputPath(outputPath, cwd);
   mkdirSync(dirname(resolvedPath), { recursive: true });
-  writeFileSync(resolvedPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  resolvedPath = resolveSafeOutputPath(outputPath, cwd);
+
+  let fd;
+  try {
+    fd = openSync(
+      resolvedPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ELOOP') {
+      throw invalidOutput('Refusing to overwrite a symbolic link.');
+    }
+    throw err;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
   return resolvedPath;
 }

@@ -3,12 +3,24 @@ export { handleJsonRpcRequest, serveJsonRpc } from './jsonrpc.js';
 export { validateManifest } from './validate.js';
 export { compileManifestToStandalone } from './compiler/standalone.js';
 export { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
-export { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation } from './apply.js';
+export {
+  applyManifestToScheduler,
+  createSchedulerCliRunner,
+  resolveSchedulerInvocation,
+  requiredSchedulerFieldVersion,
+  negotiateSchedulerFieldVersion,
+} from './apply.js';
 export { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from './capabilities.js';
-export { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
+export {
+  MANIFEST_SCHEMA,
+  MANIFEST_JSON_SCHEMA,
+  JSON_SCHEMAS,
+  MANIFEST_VERSION,
+} from './schema.js';
 export { TARGETS, getTarget, listTargets, registerTarget } from './targets.js';
 export { ensureAgentcliHome, getAgentcliPaths, resolveAgentcliHome, resolveManifestCandidate } from './home.js';
 export { normalizeShellExecution, renderShellExecution } from './shell.js';
+export { resolveCommandValue, resolveValueFrom, shellCommandInvocation } from './command.js';
 export {
   resolveSandboxSupport,
   needsSandboxEnforcement,
@@ -18,10 +30,18 @@ export {
 export { inspectSchedulerState, listInspectableEntities } from './inspect.js';
 export { describeTarget } from './describe.js';
 export { sanitizeForAgent } from './sanitize.js';
+export { sortKeysDeep, canonicalStringify, canonicalDigest, hashString, hashNullableString } from './canonical.js';
+export { AgentcliError, ERROR_CODES, ERROR_TYPES, makeError, normalizeError, errorTypeForCode } from './errors.js';
 export { expandManifestShorthands } from './shorthand.js';
 export { applyFieldMask, parseFieldMask } from './fields.js';
 export { loadJsonInput, writeJsonOutput, resolveSafeOutputPath } from './io.js';
-export { executeTask } from './exec.js';
+export {
+  executeTask,
+  inspectTaskIdentity,
+  validateTaskDelegation,
+  evaluateTaskAuthorization,
+  verifyTaskAuthorizationProof,
+} from './exec.js';
 export { runWorkflow } from './run.js';
 export {
   registerRuntimeAdapter,
@@ -42,7 +62,18 @@ export {
   approvalPolicyAutoRejects,
   verifyApprovalSignature,
 } from './approvals.js';
-export { resolveIdentity, resolveIdentityV2, resolveContract, resolveAuthorizationProof, resolveAuthorization, resolveEvidence } from './compiler/shared.js';
+export {
+  resolveIdentity,
+  resolveIdentityV2,
+  resolveContract,
+  resolveAuthorizationProof,
+  resolveAuthorization,
+  resolveEvidence,
+  buildEffectiveExecutionBinding,
+  computeEffectiveTaskHash,
+  commandBindingForShell,
+  canonicalExecutionBindingString,
+} from './compiler/shared.js';
 export { buildAttestationPayload, commandHash } from './attestation.js';
 export { createManifestScaffold, writeManifest } from './init.js';
 export { listRegistry, addToRegistry, showRegistryEntry, removeFromRegistry } from './registry.js';
@@ -94,9 +125,16 @@ export {
 } from './evidence/index.js';
 export {
   buildEvidencePayload,
+  buildCompleteEvidencePayload,
+  validateCompleteEvidencePayload,
+  validateEvidenceRecordBinding,
+  EVIDENCE_PAYLOAD_SCHEMA,
+  EVIDENCE_PAYLOAD_VERSION,
   serializePayload,
   collectComplianceContext,
 } from './evidence/payload.js';
+export { verifyEvidenceEnvelope } from './evidence/index.js';
+export { EVIDENCE_ENVELOPE_SCHEMA, EVIDENCE_ENVELOPE_VERSION } from './evidence/ssh.js';
 
 // -- Authorization proof verifiers (v0.2) --
 export {
@@ -104,6 +142,9 @@ export {
   getVerifier,
   listVerifiers,
   resolveVerifier,
+  validateAuthorizationProofProfile,
+  assertValidAuthorizationProofProfile,
+  verifyAuthorizationProof,
 } from './authorization-proof/index.js';
 
 // -- Authorization providers (v0.2) --

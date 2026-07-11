@@ -7,13 +7,43 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { canonicalStringify, hashString } from '../canonical.js';
 import { registerEvidenceProvider } from './index.js';
+import { validateCompleteEvidencePayload } from './payload.js';
 
 const SSH_KEY_CANDIDATES = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
 const NAMESPACE = 'agentcli';
+export const EVIDENCE_ENVELOPE_SCHEMA = 'agentcli.evidence.envelope';
+export const EVIDENCE_ENVELOPE_VERSION = 1;
+
+function signatureDocumentForEnvelope(envelope) {
+  return canonicalStringify({
+    schema: envelope.schema,
+    version: envelope.version,
+    method: envelope.method,
+    key_fingerprint: envelope.key_fingerprint,
+    principal: envelope.principal,
+    namespace: envelope.namespace,
+    payload_format: envelope.payload_format,
+    payload_digest: envelope.payload_digest,
+    signed_payload: envelope.signed_payload,
+  });
+}
 
 // -- Key discovery --
 
@@ -76,9 +106,9 @@ export function getKeyFingerprint(keyPath) {
  */
 export function resolveAllowedSigners({ env = process.env, statePath } = {}) {
   const explicit = env.AGENTCLI_ALLOWED_SIGNERS;
-  if (explicit && existsSync(explicit)) return explicit;
+  if (explicit && existsSync(explicit) && lstatSync(explicit).isFile()) return explicit;
 
-  if (statePath && existsSync(statePath)) return statePath;
+  if (statePath && existsSync(statePath) && lstatSync(statePath).isFile()) return statePath;
 
   return null;
 }
@@ -103,8 +133,24 @@ export function generateAllowedSigners({ principal, homeDir = homedir(), outputP
 
   if (lines.length === 0) return null;
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, lines.join('\n') + '\n', 'utf8');
+  const outputDirectory = dirname(outputPath);
+  mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(outputDirectory, 0o700);
+  let descriptor;
+  try {
+    descriptor = openSync(
+      outputPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    writeFileSync(descriptor, lines.join('\n') + '\n', 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  if (process.platform !== 'win32') chmodSync(outputPath, 0o600);
   return outputPath;
 }
 
@@ -127,7 +173,12 @@ const sshEvidenceProvider = {
     const signingKey = config.key_path || undefined;
 
     const keyPath = resolveSigningKey({ env, homeDir, signingKey });
-    return keyPath ? { keyPath } : null;
+    return keyPath
+      ? {
+          keyPath,
+          principal: config.principal || ctx.principal || 'agentcli',
+        }
+      : null;
   },
 
   /**
@@ -144,12 +195,43 @@ const sshEvidenceProvider = {
       return { attested: false, reason: 'no signing key available' };
     }
 
+    let parsedPayload;
+    try {
+      parsedPayload = JSON.parse(payload);
+    } catch (error) {
+      return { attested: false, reason: `evidence payload must be valid JSON: ${error.message}` };
+    }
+    const payloadValidation = validateCompleteEvidencePayload(parsedPayload);
+    if (!payloadValidation.valid) {
+      return {
+        attested: false,
+        reason: `incomplete evidence payload: ${payloadValidation.errors.join('; ')}`,
+      };
+    }
+    if (canonicalStringify(parsedPayload) !== payload) {
+      return { attested: false, reason: 'evidence payload must use canonical JSON serialization' };
+    }
+
+    const fingerprint = getKeyFingerprint(keyPath);
+    const envelope = {
+      schema: EVIDENCE_ENVELOPE_SCHEMA,
+      version: EVIDENCE_ENVELOPE_VERSION,
+      method: 'ssh-signature',
+      key_fingerprint: fingerprint,
+      principal: config.principal || 'agentcli',
+      namespace: NAMESPACE,
+      payload_format: 'canonical-json',
+      payload_digest: hashString(payload),
+      signed_payload: payload,
+    };
+    const signatureDocument = signatureDocumentForEnvelope(envelope);
+
     const result = spawnSync('ssh-keygen', [
       '-Y', 'sign',
       '-f', keyPath,
       '-n', NAMESPACE,
     ], {
-      input: payload,
+      input: signatureDocument,
       encoding: 'utf8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -168,15 +250,10 @@ const sshEvidenceProvider = {
       return { attested: false, reason: 'ssh-keygen produced no signature' };
     }
 
-    const fingerprint = getKeyFingerprint(keyPath);
-
     return {
       attested: true,
       envelope: {
-        method: 'ssh-signature',
-        key_fingerprint: fingerprint,
-        namespace: NAMESPACE,
-        signed_payload: payload,
+        ...envelope,
         signature,
       },
     };
@@ -195,7 +272,43 @@ const sshEvidenceProvider = {
       return { verified: false, reason: 'missing evidence envelope data' };
     }
 
-    const { allowedSignersPath, principal } = options;
+    if (
+      envelope.schema !== EVIDENCE_ENVELOPE_SCHEMA ||
+      envelope.version !== EVIDENCE_ENVELOPE_VERSION ||
+      envelope.method !== 'ssh-signature'
+    ) {
+      return { verified: false, reason: 'unsupported evidence envelope schema or version' };
+    }
+
+    if (envelope.payload_format !== 'canonical-json') {
+      return { verified: false, reason: 'unsupported evidence payload format' };
+    }
+
+    const payloadDigest = hashString(envelope.signed_payload);
+    if (envelope.payload_digest !== payloadDigest) {
+      return { verified: false, reason: 'evidence payload digest mismatch' };
+    }
+
+    let parsedPayload;
+    try {
+      parsedPayload = JSON.parse(envelope.signed_payload);
+    } catch (error) {
+      return { verified: false, reason: `invalid evidence payload JSON: ${error.message}` };
+    }
+
+    const payloadValidation = validateCompleteEvidencePayload(parsedPayload);
+    if (!payloadValidation.valid) {
+      return {
+        verified: false,
+        reason: `invalid signed evidence payload: ${payloadValidation.errors.join('; ')}`,
+      };
+    }
+    if (canonicalStringify(parsedPayload) !== envelope.signed_payload) {
+      return { verified: false, reason: 'signed evidence payload is not canonical JSON' };
+    }
+
+    const { allowedSignersPath } = options;
+    const principal = options.principal || envelope.principal;
 
     if (!allowedSignersPath || !existsSync(allowedSignersPath)) {
       return { verified: false, reason: 'allowed_signers file not found' };
@@ -205,7 +318,15 @@ const sshEvidenceProvider = {
       return { verified: false, reason: 'no principal specified for verification' };
     }
 
-    const tmpSigPath = join(tmpdir(), `agentcli-evidence-verify-${Date.now()}-${Math.random().toString(36).slice(2)}.sig`);
+    if (options.principal && envelope.principal && options.principal !== envelope.principal) {
+      return { verified: false, reason: 'evidence principal does not match expected principal' };
+    }
+
+    if (envelope.namespace !== NAMESPACE) {
+      return { verified: false, reason: 'evidence namespace does not match agentcli' };
+    }
+
+    const tmpSigPath = join(tmpdir(), `agentcli-evidence-verify-${randomUUID()}.sig`);
     try {
       writeFileSync(tmpSigPath, envelope.signature, 'utf8');
 
@@ -216,15 +337,31 @@ const sshEvidenceProvider = {
         '-n', envelope.namespace || NAMESPACE,
         '-s', tmpSigPath,
       ], {
-        input: envelope.signed_payload,
+        input: signatureDocumentForEnvelope(envelope),
         encoding: 'utf8',
         timeout: 10000,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
       if (result.status === 0) {
-        const fingerprint = envelope.key_fingerprint || null;
-        return { verified: true, principal, key_fingerprint: fingerprint };
+        const fingerprintMatch = `${result.stdout || ''}\n${result.stderr || ''}`
+          .match(/SHA256:[A-Za-z0-9+/=]+/);
+        const verifiedFingerprint = fingerprintMatch ? fingerprintMatch[0] : null;
+        if (
+          envelope.key_fingerprint &&
+          verifiedFingerprint &&
+          envelope.key_fingerprint !== verifiedFingerprint
+        ) {
+          return { verified: false, reason: 'evidence key fingerprint does not match verified signer' };
+        }
+        return {
+          verified: true,
+          principal,
+          key_fingerprint: verifiedFingerprint || envelope.key_fingerprint || null,
+          payload_digest: payloadDigest,
+          envelope_version: envelope.version,
+          payload: parsedPayload,
+        };
       }
 
       return {
@@ -248,7 +385,11 @@ const sshEvidenceProvider = {
       provider: 'ssh',
       method: envelope.method,
       attested: envelope.attested !== false,
+      envelope_schema: envelope.schema || null,
+      envelope_version: envelope.version || null,
+      payload_digest: envelope.payload_digest || null,
       key_fingerprint: envelope.key_fingerprint,
+      principal: envelope.principal || null,
       namespace: envelope.namespace,
     };
   },

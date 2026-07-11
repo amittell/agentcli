@@ -11,8 +11,10 @@ This document defines what it means to be compatible with the `agentcli` draft s
 Must:
 
 - parse manifest version `0.1`
+- parse manifest version `0.2`
 - validate required structure
 - reject invalid task invocation modes
+- reject unknown nested v0.2 fields and structurally invalid provider profiles
 
 Should:
 
@@ -25,6 +27,7 @@ Must implement everything in Profile A and also:
 - expose schema access
 - expose validation
 - support at least one compile target
+- emit JSON Schema Draft 2020-12 by default when advertising JSON Schema conformance
 
 Should:
 
@@ -42,6 +45,7 @@ Must implement everything in Profile B and also:
 - implement `agentcli.describe`
 - implement `agentcli.validate`
 - implement `agentcli.compile`
+- use JSON-RPC result envelopes for success and error envelopes with machine-readable `data.code` and `data.error_type` for failure
 
 ### Profile D: Runtime Adapter
 
@@ -50,12 +54,14 @@ Must:
 - accept a valid manifest-derived compile output
 - document backend-specific constraints
 - preserve task ordering and trigger semantics
+- expose or document an explicit capability map for security-relevant runtime behavior
 
 Should:
 
 - expose a manifest apply or upsert path
 - expose runtime inspection
 - document delivery, retry, and approval behavior separately from the core manifest
+- fail closed when a compiled contract requires an enforcement capability the runtime does not advertise
 
 ## Reference Implementation
 

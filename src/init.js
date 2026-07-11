@@ -1,7 +1,7 @@
-import { existsSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { validateManifest } from './validate.js';
+import { resolveSafeOutputPath, writeJsonOutput } from './io.js';
 
 const DEFAULT_WORKFLOW_ID = 'default';
 const DEFAULT_TASK_ID = 'run';
@@ -26,7 +26,7 @@ export function createManifestScaffold({
   const args = tool ? [] : ['hello from agentcli'];
 
   const manifest = {
-    version: '0.1',
+    version: '0.2',
     workflows: [
       {
         id: workflowId,
@@ -38,6 +38,12 @@ export function createManifestScaffold({
             target: { session_target: 'shell' },
             shell: { program, args },
             schedule: { cron: '0 * * * *' },
+            output: { format: 'text' },
+            contract: {
+              sandbox: 'permissive',
+              network: 'unrestricted',
+              audit: 'always',
+            },
           },
         ],
       },
@@ -62,7 +68,8 @@ export function createManifestScaffold({
 }
 
 export function writeManifest(manifest, { output, cwd = process.cwd() } = {}) {
-  const filePath = output || join(cwd, 'agentcli.json');
+  const requestedPath = output || 'agentcli.json';
+  const filePath = resolveSafeOutputPath(requestedPath, cwd);
 
   if (existsSync(filePath)) {
     throw Object.assign(
@@ -71,6 +78,5 @@ export function writeManifest(manifest, { output, cwd = process.cwd() } = {}) {
     );
   }
 
-  writeFileSync(filePath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-  return filePath;
+  return writeJsonOutput(requestedPath, manifest, { cwd });
 }

@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
-import { resolveCommandValue } from './command.js';
+import { resolveValueFrom } from './command.js';
+import { canonicalDigest } from './canonical.js';
 import {
   mergeAuthorizationProofProfile,
   normalizedTaskPlan,
@@ -17,36 +17,11 @@ import {
 import {
   SCHEDULER_FIELDS_V1,
   SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELDS_V03,
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
 export { shellCommandInvocation } from './command.js';
-export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELD_VERSIONS };
-
-function sortKeysDeep(value) {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(item => sortKeysDeep(item));
-  }
-
-  if (typeof value === 'object') {
-    const sorted = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = sortKeysDeep(value[key]);
-    }
-    return sorted;
-  }
-
-  return value;
-}
-
-function computeManifestDigest(manifest) {
-  return createHash('sha256')
-    .update(JSON.stringify(sortKeysDeep(manifest)))
-    .digest('hex');
-}
+export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03, SCHEDULER_FIELD_VERSIONS };
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -151,6 +126,30 @@ export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } 
   return projected;
 }
 
+export function requiredSchedulerFieldVersion(jobs = []) {
+  if (jobs.some(job => SCHEDULER_FIELDS_V03.some(field => job[field] != null))) return 3;
+  if (jobs.some(job => SCHEDULER_FIELDS_V02.some(field => job[field] != null))) return 2;
+  return 1;
+}
+
+export function negotiateSchedulerFieldVersion(jobs, advertisedVersion = '1') {
+  const requiredVersion = requiredSchedulerFieldVersion(jobs);
+  const parsedVersion = Number.parseInt(String(advertisedVersion), 10);
+  if (!Number.isInteger(parsedVersion) || parsedVersion < requiredVersion) {
+    throw Object.assign(
+      new Error(
+        `Scheduler handoff version ${JSON.stringify(advertisedVersion)} cannot preserve fields requiring version ${requiredVersion}`
+      ),
+      {
+        code: 'unsupported_capability',
+        required_handoff_version: String(requiredVersion),
+        advertised_handoff_version: advertisedVersion == null ? null : String(advertisedVersion),
+      }
+    );
+  }
+  return String(Math.min(parsedVersion, 3));
+}
+
 function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
   const fields = (SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1)
     .filter(f => f !== 'id' && f !== 'origin');
@@ -174,6 +173,8 @@ function jobRequiresCapabilityNegotiation(job) {
     job.identity || job.identity_ref || job.authorization || job.authorization_ref
     || job.evidence || job.evidence_ref || job.child_credential_policy
     || job.contract_required_trust_level || job.authorization_proof || job.authorization_proof_ref
+    || (job.approval_required && !job.parent_id) || job.approval_approver_scope
+    || job.output_format
   );
 }
 
@@ -247,7 +248,8 @@ export async function applyManifestToScheduler(
     schedulerBin = '',
     dbPath = '',
     cwd = process.cwd(),
-    env = process.env
+    env = process.env,
+    allowValueFromCommand = false
   } = {}
 ) {
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
@@ -271,7 +273,6 @@ export async function applyManifestToScheduler(
   if (hasV02Features) {
     const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
-    handoffVersion = effectiveResult.handoff_version || '1';
 
     const { errors: capabilityErrors, warnings } = validateManifestCapabilities(compiled, effectiveResult);
     capabilityWarnings = warnings;
@@ -281,6 +282,10 @@ export async function applyManifestToScheduler(
         { code: 'unsupported_capability', capability_errors: capabilityErrors }
       );
     }
+    handoffVersion = negotiateSchedulerFieldVersion(
+      compiled.jobs,
+      effectiveResult.handoff_version || '1'
+    );
     if (capabilityWarnings.length > 0) {
       for (const warning of capabilityWarnings) {
         process.stderr.write(`warning: ${warning.message}\n`);
@@ -292,56 +297,43 @@ export async function applyManifestToScheduler(
   // v0.2: Authorization proof verification for backends lacking the capability
   if (!effectiveFeatures.authorization_proof_verification && manifest.authorization_proof_profiles?.length > 0) {
     // Target cannot verify proofs at runtime; verify locally during apply
-    const { readFileSync } = await import('node:fs');
-    const { resolveVerifier } = await import('./authorization-proof/index.js');
-    const { resolveJwtVerificationContext } = await import('./authorization-proof/jwt.js');
+    const {
+      assertValidAuthorizationProofProfile,
+      verifyAuthorizationProof,
+    } = await import('./authorization-proof/index.js');
     await import('./authorization-proof/none.js');
     await import('./authorization-proof/jwt.js');
     await import('./authorization-proof/detached-signature.js');
     await import('./authorization-proof/certificate.js');
-    const manifestDigest = computeManifestDigest(manifest);
+    const manifestDigest = canonicalDigest(manifest);
 
     for (const job of compiled.jobs) {
       const proof = resolvedProofsByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
-      if (!proof?.ref || proof.verify?.required !== true) continue;
+      if (!proof?.ref) continue;
+      const mustVerify = proof.method !== 'none' || proof.verify?.required === true;
+      if (!mustVerify) continue;
 
-      const verifier = resolveVerifier(proof.method || 'none');
-
-      let proofValue = null;
-      if (proof.proof?.value_from?.env) {
-        proofValue = env[proof.proof.value_from.env] || null;
-      } else if (proof.proof?.value_from?.file) {
-        try {
-          proofValue = readFileSync(proof.proof.value_from.file, 'utf8').trim();
-        } catch {
-          proofValue = null;
-        }
-      } else if (proof.proof?.value_from?.literal) {
-        proofValue = proof.proof.value_from.literal;
-      } else if (proof.proof?.value_from?.command) {
-        proofValue = resolveCommandValue(proof.proof.value_from.command, { env, cwd });
-      }
-
-      if (!proofValue) {
+      const verifier = assertValidAuthorizationProofProfile(proof, { env, cwd });
+      let proofValue;
+      try {
+        proofValue = resolveValueFrom(proof.proof?.value_from, {
+          env,
+          cwd,
+          allowCommand: allowValueFromCommand,
+        });
+      } catch (error) {
         throw Object.assign(
-          new Error(`Authorization proof not available for profile "${proof.ref}" (value_from did not resolve)`),
+          new Error(`Authorization proof not available for profile "${proof.ref}": ${error.message}`),
           { code: 'authorization_proof_failed' }
         );
       }
 
-      let verificationContext = {
+      const result = await verifyAuthorizationProof(proofValue, proof, {
+        manifest,
         env,
+        cwd,
         manifestDigest,
-      };
-      if (proof.method === 'jwt') {
-        verificationContext = await resolveJwtVerificationContext(
-          proofValue,
-          proof,
-          verificationContext,
-        );
-      }
-
-      const result = await verifier.verifyProof(proofValue, proof, verificationContext);
+      });
       if (!result.verified) {
         throw Object.assign(
           new Error(`Authorization proof verification failed for profile "${proof.ref}": ${result.reason || 'verification failed'}`),

@@ -15,7 +15,7 @@ If you own both products, the clean story is:
 
 - `agentcli` is the control plane for workflow authoring, identity, validation, local execution, local approval gates for direct `exec`, and discovery
 - `openclaw-scheduler` is the durable runtime for schedule execution, retries, cron-triggered approval queues, delivery, and persistent state
-- the same manifest can be authored and tested in `agentcli`, then compiled and applied into `openclaw-scheduler`; approval declarations (`approval.policy`, `approval.risk_level`) are honored by both layers
+- the same manifest can be authored and tested in `agentcli`, then compiled and applied into `openclaw-scheduler`; local approval declarations are enforced by `exec`, while durable enforcement is accepted only when the scheduler explicitly advertises the required gate, scope, and handoff capabilities
 
 That means users do not have to choose between them.
 
@@ -40,6 +40,7 @@ Use `agentcli` to:
 - validate manifests
 - compile standalone plans
 - expose schema and describe to agents
+- run governed shell tasks and shell-only DAGs locally without adding a durable runtime
 
 This is the lowest-friction entry point.
 
@@ -59,6 +60,8 @@ Use `openclaw-scheduler` to:
 - run the durable schedule loop
 - manage retries, approvals, delivery, and queue state
 - store runtime state in SQLite
+
+`agentcli apply` treats live scheduler capability values as authoritative and falls back to conservative static declarations only when a value is unavailable. It rejects jobs that require unsupported root approval gates, approver scopes, structured output formats, trust, authorization, proof, evidence, or credential handoff. It also rejects inline `shell.env` and `shell.stdin`; durable secrets must be resolved at dispatch through an identity provider.
 
 Current reference example:
 
@@ -188,7 +191,7 @@ The main current risks are:
 
 - the standard is still draft
 - only one production-grade runtime adapter exists today
-- some backend-specific areas, especially approvals, still need richer negotiation
+- runtime compatibility depends on explicit capability negotiation, especially for root approvals, approver scope, structured output, and handoff v3
 
 ### Avoiding heavy single-prompt jobs
 

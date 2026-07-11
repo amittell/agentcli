@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (2026-07-11)
+
+- security: manual approvals now bind the canonical manifest and complete effective execution configuration, enforce `approver_scope` and `timeout_s`, reject unexpected unsigned records, and fail without writing a grant when signing fails
+- security: approval checks now run before proof commands, provider calls, sandbox probes, credential materialization, signing, and all other live side effects
+- security: `exec --dry-run` is now a static preview that performs no proof, provider, network, sandbox, signing, evidence, verification, or audit side effects
+- security: JWT, detached-signature, and certificate authorization proofs require cryptographic verification and canonical manifest binding; `verify.required: false` no longer permits presence-only or claims-only success
+- security: evidence uses a complete versioned canonical payload, persists the verification envelope, binds manifest and effective execution metadata, and detects cross-execution transplantation
+- security: sandbox, allowed-path, and network restrictions fail closed when unavailable; child processes inherit only a small operational allowlist and require every other ambient variable to be explicitly declared or provider-materialized
+- security: identity providers validate configuration before network access, enforce delegation and handoff capabilities, use safer endpoint and file handling, and clean up materialized credentials across failure paths
+- validation: v0.2 nested objects reject unknown fields, provider-specific structural validation runs during manifest validation, and the default schema output is JSON Schema Draft 2020-12 with `--legacy` opt-in
+- CLI and JSON-RPC: strict flag parsing rejects unknown, duplicate, missing-value, and misplaced flags; RPC responses use stable result/error envelopes and add read-only targets, paths, audit, approvals, and registry discovery methods
+- execution: disabled tasks and branches are skipped by `agentcli run`; audit identifiers are collision-resistant and malformed audit lines are skipped with warnings
+- conversion and merge: v0.1 conversion maps unverifiable legacy attestations to `method: "none"`; merge preserves all v0.2 profile collections and detects conflicting profile definitions
+- scheduler: live capability values override static fallback values, handoff v3 preserves governed approval and output fields, auto-reject jobs compile disabled, and apply refuses inline `shell.env` or `shell.stdin`
+- examples: repaired invalid runtime timeout placement and fail-closed proof and credential-cache declarations; all published JSON examples are validated in the test suite
+- maintenance: minimum Node version is now 22.13.0 and CI also tests Node 24 with a pinned `openclaw-scheduler` integration checkout
+- dependencies: pinned patched `brace-expansion` and `flatted` releases; `npm audit` reports no known vulnerabilities
+
 ## 0.3.2 (2026-04-21)
 
 - fix: `verifyApprovalSignature` now performs a tamper check against the stored `signature.signed_payload`. Previously the canonical payload was rebuilt from the current grant but then discarded; post-sign edits to `approver`, `reason`, `expires_at`, or `task_hash` fields in `approvals.ndjson` would not be detected (the ssh provider only checks signature-against-signed_payload). The rebuilt payload is now compared to `signature.signed_payload` and divergence returns `verified: false` with reason "grant fields do not match signed payload (possible tampering)"
@@ -16,8 +34,8 @@
 
 ## 0.3.0 (2026-04-21)
 
-- local approval gate enforcement in `agentcli exec`: tasks with `approval.policy: "manual"` refuse to execute unless a matching, unconsumed, unrevoked, unexpired approval record is present (`error_type: approval_required`)
-- `approval.policy: "auto-reject"` refuses execution even when an approval record exists (`error_type: approval_auto_rejected`)
+- local approval gate enforcement in `agentcli exec`: tasks with `approval.policy: "manual"` refuse to execute unless a matching, unconsumed, unrevoked, unexpired approval record is present (detailed `code: approval_required`; closed `error_type: validation_error`)
+- `approval.policy: "auto-reject"` refuses execution even when an approval record exists (detailed `code: approval_auto_rejected`; closed `error_type: validation_error`)
 - approval grants are bound to a canonical task hash over `{workflow_id, task_id, shell.program, shell.args, shell.cwd, identity.ref, approval.policy, approval.risk_level}`; drift in any of those fields invalidates prior approvals
 - `--dry-run` bypasses the approval gate (no approval consumed, no gate enforced)
 - successful gated executions include `approval_used: {approval_id, approver, reason, risk_level, granted_at, expires_at, signature_verified, signature: {method, key_fingerprint}}` in both the result payload and the audit record
@@ -28,7 +46,7 @@
 - new `--approval-id <id>` flag on `exec` to target a specific pending grant when more than one matches
 - new append-only state file at `~/.agentcli/state/approvals.ndjson` (grant, consume, revoke events); path exposed by `agentcli paths`
 - new module `src/approvals.js` exports `grantApproval`, `listApprovals`, `findValidApproval`, `consumeApproval`, `revokeApproval`, `computeTaskApprovalHash`, `approvalPolicyRequiresApproval`, `approvalPolicyAutoRejects`, `verifyApprovalSignature`
-- approval signature verification reuses existing ssh allowed-signers chain (`~/.agentcli/state/allowed_signers`); tampered grants are refused (`error_type: approval_signature_invalid`)
+- approval signature verification reuses existing ssh allowed-signers chain (`~/.agentcli/state/allowed_signers`); tampered grants are refused with detailed `code: approval_signature_invalid` and closed `error_type: validation_error`
 - scope: local single-machine enforcement only; durable multi-actor cron-triggered approvals remain owned by openclaw-scheduler
 
 ## 0.2.2 (2026-04-08)

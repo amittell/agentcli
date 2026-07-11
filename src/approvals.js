@@ -1,12 +1,18 @@
 import {
-  appendFileSync, readFileSync, existsSync, mkdirSync,
-  openSync, closeSync, writeSync, unlinkSync, statSync,
+  chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync,
+  mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { getProvider, resolveProvider } from './signing/index.js';
 import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
 import { getAgentcliPaths } from './home.js';
+import { canonicalStringify } from './canonical.js';
+import {
+  buildEffectiveExecutionBinding,
+  computeEffectiveTaskHash,
+} from './compiler/shared.js';
+import { expandManifestShorthands } from './shorthand.js';
 
 // Concurrency: `claimApproval` is the atomic public primitive that
 // enforceApprovalGate uses. It acquires an fs-lock on <approvals>.lock
@@ -17,7 +23,7 @@ import { getAgentcliPaths } from './home.js';
 // approval_required. Locks older than LOCK_STALE_MS are treated as
 // abandoned (crashed holder) and removed.
 
-const APPROVAL_RECORD_VERSION = 1;
+const APPROVAL_RECORD_VERSION = 2;
 const DEFAULT_TTL_S = 3600;
 const LOCK_SUFFIX = '.lock';
 const LOCK_TIMEOUT_MS = 5000;
@@ -38,13 +44,22 @@ function withApprovalsLock(approvalsPath, fn, {
   pollMs = LOCK_POLL_MS,
   now = () => Date.now(),
 } = {}) {
-  mkdirSync(dirname(approvalsPath), { recursive: true });
+  const stateDirectory = dirname(approvalsPath);
+  mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(stateDirectory, 0o700);
   const lockPath = `${approvalsPath}${LOCK_SUFFIX}`;
   const deadline = now() + timeoutMs;
   let fd;
   while (true) {
     try {
-      fd = openSync(lockPath, 'wx');
+      fd = openSync(
+        lockPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW || 0),
+        0o600
+      );
       writeSync(fd, `${process.pid}\n`);
       break;
     } catch (err) {
@@ -87,31 +102,72 @@ export function approvalPolicyAutoRejects(approval) {
   return approval?.policy === 'auto-reject';
 }
 
-function canonicalStringify(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalStringify(value[k])}`).join(',')}}`;
+export function computeTaskApprovalHash({
+  binding,
+  manifest,
+  expanded: suppliedExpanded,
+  workflow: suppliedWorkflow,
+  workflowId,
+  task: suppliedTask,
+  taskId,
+  cwd = process.cwd(),
+} = {}) {
+  if (binding) return computeEffectiveTaskHash(binding);
+
+  const expanded = suppliedExpanded || (manifest ? expandManifestShorthands(manifest) : null);
+  const workflows = expanded?.workflows || [];
+  const workflow = suppliedWorkflow || (
+    workflowId
+      ? workflows.find(candidate => candidate.id === workflowId)
+      : workflows.length === 1
+        ? workflows[0]
+        : null
+  );
+  const compatibilityWorkflow = !workflow && suppliedTask && workflowId
+    ? { id: workflowId, name: workflowId, tasks: [suppliedTask] }
+    : workflow;
+  const task = suppliedTask || compatibilityWorkflow?.tasks?.find(candidate => candidate.id === taskId);
+  if (!compatibilityWorkflow || !task) {
+    throw Object.assign(
+      new Error('manifest/workflow/task or a prebuilt binding is required to compute an approval hash'),
+      { code: 'invalid_argument' }
+    );
+  }
+
+  return computeEffectiveTaskHash(buildEffectiveExecutionBinding({
+    manifest,
+    expanded,
+    workflow: compatibilityWorkflow,
+    task,
+    cwd,
+  }));
 }
 
-export function computeTaskApprovalHash({ workflowId, task }) {
-  const material = {
-    workflow_id: workflowId,
-    task_id: task.id,
-    shell: {
-      program: task.shell?.program ?? null,
-      args: task.shell?.args ?? [],
-      cwd: task.shell?.cwd ?? null,
-    },
-    identity_ref: task.identity?.ref ?? null,
-    approval_policy: task.approval?.policy ?? (task.approval?.required ? 'manual' : null),
-    approval_risk_level: task.approval?.risk_level ?? null,
-  };
-  return `sha256:${createHash('sha256').update(canonicalStringify(material)).digest('hex')}`;
+export function approverMatchesScope(approver, scope) {
+  if (!scope) return true;
+  if (typeof approver !== 'string' || approver.length === 0) return false;
+  const separator = scope.indexOf(':');
+  const kind = separator === -1 ? 'exact' : scope.slice(0, separator);
+  const expected = separator === -1 ? scope : scope.slice(separator + 1);
+  if (!expected) return false;
+  if (kind === 'principal' || kind === 'user' || kind === 'exact') {
+    return approver === expected;
+  }
+  if (kind === 'domain') {
+    const at = approver.lastIndexOf('@');
+    return at > 0 && approver.slice(at + 1).toLowerCase() === expected.toLowerCase();
+  }
+  return approver === scope;
 }
 
 function readApprovalsLog(approvalsPath) {
   if (!approvalsPath || !existsSync(approvalsPath)) return [];
+  if (lstatSync(approvalsPath).isSymbolicLink()) {
+    throw Object.assign(
+      new Error('Refusing to read approvals from a symbolic link'),
+      { code: 'approval_log_invalid' }
+    );
+  }
   const content = readFileSync(approvalsPath, 'utf8').trim();
   if (!content) return [];
   const events = [];
@@ -128,9 +184,29 @@ function readApprovalsLog(approvalsPath) {
   return events;
 }
 
+function appendApprovalEventUnlocked(event, approvalsPath) {
+  let descriptor;
+  try {
+    descriptor = openSync(
+      approvalsPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_APPEND |
+        fsConstants.O_CREAT |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    writeSync(descriptor, JSON.stringify(event) + '\n', null, 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  if (process.platform !== 'win32') chmodSync(approvalsPath, 0o600);
+}
+
 function writeApprovalEvent(event, { approvalsPath }) {
-  mkdirSync(dirname(approvalsPath), { recursive: true });
-  appendFileSync(approvalsPath, JSON.stringify(event) + '\n', 'utf8');
+  return withApprovalsLock(
+    approvalsPath,
+    () => appendApprovalEventUnlocked(event, approvalsPath)
+  );
 }
 
 function generateApprovalId() {
@@ -191,6 +267,8 @@ export function listApprovals({ env = process.env, status: statusFilter, workflo
       signature: grant.signature
         ? { method: grant.signature.method, key_fingerprint: grant.signature.key_fingerprint }
         : null,
+      approver_scope: grant.approver_scope ?? null,
+      unsigned_explicit: grant.unsigned_explicit === true,
     });
   }
   records.sort((a, b) => (a.granted_at < b.granted_at ? -1 : 1));
@@ -244,17 +322,13 @@ export function claimApproval({
     });
     if (!grant) return null;
     const consumedAt = new Date(now()).toISOString();
-    appendFileSync(
-      paths.approvals,
-      JSON.stringify({
-        v: APPROVAL_RECORD_VERSION,
-        kind: 'consume',
-        approval_id: grant.approval_id,
-        execution_id: executionId,
-        consumed_at: consumedAt,
-      }) + '\n',
-      'utf8'
-    );
+    appendApprovalEventUnlocked({
+      v: APPROVAL_RECORD_VERSION,
+      kind: 'consume',
+      approval_id: grant.approval_id,
+      execution_id: executionId,
+      consumed_at: consumedAt,
+    }, paths.approvals);
     return grant;
   }, lockOptions);
 }
@@ -267,6 +341,8 @@ function buildApprovalSignaturePayload(grant) {
     workflow_id: grant.workflow_id,
     task_id: grant.task_id,
     task_hash: grant.task_hash,
+    risk_level: grant.risk_level ?? null,
+    approver_scope: grant.approver_scope ?? null,
     approver: grant.approver,
     reason: grant.reason ?? null,
     granted_at: grant.granted_at,
@@ -275,7 +351,11 @@ function buildApprovalSignaturePayload(grant) {
 }
 
 export function verifyApprovalSignature(grant, { env = process.env } = {}) {
-  if (!grant.signature) return { verified: null, reason: 'unsigned' };
+  if (!grant.signature) {
+    return grant.unsigned_explicit === true
+      ? { verified: null, reason: 'signing explicitly disabled' }
+      : { verified: false, reason: 'approval record is unexpectedly unsigned' };
+  }
   const provider = getProvider(grant.signature.method?.replace(/-signature$/, '') || 'ssh');
   if (!provider) return { verified: false, reason: `unknown signer "${grant.signature.method}"` };
 
@@ -321,7 +401,7 @@ export function grantApproval({
   taskId,
   approver,
   reason,
-  ttlS = DEFAULT_TTL_S,
+  ttlS,
   signer,
   signingKey,
   env = process.env,
@@ -336,7 +416,8 @@ export function grantApproval({
   if (!approver) {
     throw Object.assign(new Error('approver is required (pass --by <principal>)'), { code: 'invalid_argument' });
   }
-  const workflows = Array.isArray(manifest.workflows) ? manifest.workflows : [];
+  const expanded = expandManifestShorthands(manifest);
+  const workflows = Array.isArray(expanded.workflows) ? expanded.workflows : [];
   const workflow = workflowId
     ? workflows.find(w => w.id === workflowId)
     : (workflows.length === 1 ? workflows[0] : null);
@@ -369,9 +450,35 @@ export function grantApproval({
     );
   }
 
-  const taskHash = computeTaskApprovalHash({ workflowId: workflow.id, task });
+  const approverScope = task.approval.approver_scope ?? null;
+  if (!approverMatchesScope(approver, approverScope)) {
+    throw Object.assign(
+      new Error(`approver "${approver}" does not satisfy approval.approver_scope "${approverScope}"`),
+      { code: 'approval_scope_mismatch', approver_scope: approverScope }
+    );
+  }
+
+  const taskTimeoutS = task.approval.timeout_s ?? null;
+  const effectiveTtlS = ttlS ?? taskTimeoutS ?? DEFAULT_TTL_S;
+  if (!Number.isInteger(effectiveTtlS) || effectiveTtlS < 1) {
+    throw Object.assign(new Error('approval TTL must be an integer >= 1'), { code: 'invalid_argument' });
+  }
+  if (taskTimeoutS != null && effectiveTtlS > taskTimeoutS) {
+    throw Object.assign(
+      new Error(`approval TTL ${effectiveTtlS}s exceeds task approval.timeout_s ${taskTimeoutS}s`),
+      { code: 'invalid_argument' }
+    );
+  }
+
+  const binding = buildEffectiveExecutionBinding({
+    manifest,
+    expanded,
+    workflow,
+    task,
+  });
+  const taskHash = computeTaskApprovalHash({ binding });
   const grantedAt = new Date(now).toISOString();
-  const expiresAt = new Date(now + ttlS * 1000).toISOString();
+  const expiresAt = new Date(now + effectiveTtlS * 1000).toISOString();
   const approvalId = generateApprovalId();
 
   const grant = {
@@ -382,25 +489,42 @@ export function grantApproval({
     task_id: task.id,
     task_hash: taskHash,
     risk_level: task.approval.risk_level ?? null,
+    approver_scope: approverScope,
     approver,
     reason: reason ?? null,
     granted_at: grantedAt,
     expires_at: expiresAt,
     signature: null,
+    unsigned_explicit: false,
   };
 
   const provider = resolveProvider({ signer, env });
-  if (provider.name !== 'none') {
-    const config = provider.resolve({ env, signingKey });
-    if (config) {
-      const payload = buildApprovalSignaturePayload(grant);
-      const sigResult = provider.sign(payload, config);
-      if (sigResult.signed) {
-        grant.signature = sigResult.attestation;
-      } else {
-        grant.signature = null;
-      }
+  const unsignedExplicit = provider.name === 'none' && (signer === 'none' || env.AGENTCLI_SIGNER === 'none');
+  if (provider.name === 'none') {
+    if (!unsignedExplicit) {
+      throw Object.assign(
+        new Error('unsigned approvals require an explicit signer="none" selection'),
+        { code: 'approval_signature_invalid' }
+      );
     }
+    grant.unsigned_explicit = true;
+  } else {
+    const config = provider.resolve({ env, signingKey });
+    if (!config) {
+      throw Object.assign(
+        new Error(`signing provider "${provider.name}" has no usable signing credentials`),
+        { code: 'approval_signature_invalid' }
+      );
+    }
+    const payload = buildApprovalSignaturePayload(grant);
+    const sigResult = provider.sign(payload, config);
+    if (!sigResult.signed) {
+      throw Object.assign(
+        new Error(`approval signing failed: ${sigResult.reason || 'provider did not return a signature'}`),
+        { code: 'approval_signature_invalid' }
+      );
+    }
+    grant.signature = sigResult.attestation;
   }
 
   const paths = getAgentcliPaths({ env });
@@ -412,6 +536,7 @@ export function grantApproval({
     task_id: task.id,
     task_hash: taskHash,
     risk_level: task.approval.risk_level ?? null,
+    approver_scope: approverScope,
     approver,
     reason: reason ?? null,
     granted_at: grantedAt,
@@ -419,6 +544,7 @@ export function grantApproval({
     signature: grant.signature
       ? { method: grant.signature.method, key_fingerprint: grant.signature.key_fingerprint }
       : null,
+    unsigned_explicit: grant.unsigned_explicit,
   };
 }
 

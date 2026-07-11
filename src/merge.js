@@ -1,4 +1,12 @@
 import { validateManifest } from './validate.js';
+import { canonicalStringify } from './canonical.js';
+
+const PROFILE_COLLECTIONS = [
+  'identity_profiles',
+  'authorization_proof_profiles',
+  'authorization_profiles',
+  'evidence_profiles',
+];
 
 export function mergeManifests(manifests) {
   if (!Array.isArray(manifests) || manifests.length < 2) {
@@ -20,6 +28,8 @@ export function mergeManifests(manifests) {
 
   const seenWorkflowIds = new Map();
   const mergedWorkflows = [];
+  const mergedProfiles = Object.fromEntries(PROFILE_COLLECTIONS.map(key => [key, []]));
+  const seenProfiles = Object.fromEntries(PROFILE_COLLECTIONS.map(key => [key, new Map()]));
 
   for (const [index, manifest] of manifests.entries()) {
     for (const workflow of manifest.workflows) {
@@ -34,10 +44,33 @@ export function mergeManifests(manifests) {
       seenWorkflowIds.set(workflow.id, index);
       mergedWorkflows.push(structuredClone(workflow));
     }
+
+    for (const collection of PROFILE_COLLECTIONS) {
+      for (const profile of manifest[collection] || []) {
+        const existing = seenProfiles[collection].get(profile.id);
+        if (existing) {
+          if (canonicalStringify(existing.profile) !== canonicalStringify(profile)) {
+            throw Object.assign(
+              new Error(
+                `Conflicting ${collection} id "${profile.id}": appears with different definitions in manifest ${existing.index + 1} and manifest ${index + 1}`
+              ),
+              { code: 'validation_error' }
+            );
+          }
+          continue;
+        }
+        const cloned = structuredClone(profile);
+        seenProfiles[collection].set(profile.id, { profile: cloned, index });
+        mergedProfiles[collection].push(cloned);
+      }
+    }
   }
 
   const merged = {
-    version: '0.1',
+    version: '0.2',
+    ...Object.fromEntries(
+      Object.entries(mergedProfiles).filter(([, profiles]) => profiles.length > 0)
+    ),
     workflows: mergedWorkflows,
   };
 

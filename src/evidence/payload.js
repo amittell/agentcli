@@ -5,6 +5,344 @@
  * serialization utilities for deterministic signing.
  */
 
+import {
+  canonicalDigest,
+  canonicalStringify,
+  hashNullableString,
+  hashString,
+} from '../canonical.js';
+
+export const EVIDENCE_PAYLOAD_SCHEMA = 'agentcli.evidence.payload';
+export const EVIDENCE_PAYLOAD_VERSION = 1;
+const SENSITIVE_FIELD = /(?:^|_)(?:access_token|refresh_token|id_token|token|secret|password|private_key|credentials?|cookie|client_assertion|api_key|authorization_header)(?:_|$)/i;
+
+function redactSensitiveEvidence(value, key = '') {
+  if (SENSITIVE_FIELD.test(key)) {
+    return {
+      redacted: true,
+      value_hash: value == null ? null : canonicalDigest(value),
+    };
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => redactSensitiveEvidence(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        redactSensitiveEvidence(entryValue, entryKey),
+      ])
+    );
+  }
+  return value;
+}
+
+function withoutRawCommandInputs(command = {}) {
+  const {
+    env,
+    stdin,
+    env_hash: providedEnvHash,
+    stdin_hash: providedStdinHash,
+    args,
+    args_hashes: providedArgsHashes,
+    ...safeCommand
+  } = command;
+
+  return {
+    ...safeCommand,
+    args_hashes: providedArgsHashes ?? (
+      Array.isArray(args) ? args.map(value => hashString(value)) : null
+    ),
+    args_count: safeCommand.args_count ?? (Array.isArray(args) ? args.length : null),
+    env_hash: providedEnvHash ?? (env == null ? null : canonicalDigest(env)),
+    stdin_hash: providedStdinHash ?? hashNullableString(stdin),
+  };
+}
+
+function withoutRawOutputs(value = {}) {
+  const {
+    stdout,
+    stderr,
+    structured,
+    stdout_hash: providedStdoutHash,
+    stderr_hash: providedStderrHash,
+    structured_hash: providedStructuredHash,
+    ...safeValue
+  } = value;
+  return {
+    ...safeValue,
+    stdout_hash: providedStdoutHash ?? hashNullableString(stdout),
+    stderr_hash: providedStderrHash ?? hashNullableString(stderr),
+    structured_hash: providedStructuredHash ?? (
+      structured == null ? null : canonicalDigest(structured)
+    ),
+  };
+}
+
+function requiredString(value, field) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+/**
+ * Build the complete payload used by versioned execution evidence.
+ *
+ * Raw command environment values and stdin are never retained. Their hashes
+ * bind the signed evidence to the exact inputs without turning the audit log
+ * into a secret store.
+ */
+export function buildCompleteEvidencePayload({
+  executionId,
+  timestamp,
+  source,
+  manifest,
+  manifestDigest,
+  effectiveTask,
+  effectiveTaskHash,
+  declaredIdentity = null,
+  resolvedIdentity = null,
+  authorizationProof = null,
+  authorization = null,
+  actorContext = null,
+  contract = null,
+  command,
+  result,
+  verify = null,
+  complianceContext = {},
+} = {}) {
+  requiredString(executionId, 'executionId');
+  requiredString(timestamp, 'timestamp');
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new TypeError('source must be an object');
+  }
+  if (!command || typeof command !== 'object' || Array.isArray(command)) {
+    throw new TypeError('command must be an object');
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new TypeError('result must be an object');
+  }
+
+  const computedManifestDigest = manifest == null ? null : canonicalDigest(manifest);
+  const computedTaskHash = effectiveTask == null ? null : canonicalDigest(effectiveTask);
+  if (manifestDigest && computedManifestDigest && manifestDigest !== computedManifestDigest) {
+    throw new TypeError('manifestDigest does not match the provided manifest');
+  }
+  if (effectiveTaskHash && computedTaskHash && effectiveTaskHash !== computedTaskHash) {
+    throw new TypeError('effectiveTaskHash does not match the provided effectiveTask');
+  }
+  const resolvedManifestDigest = manifestDigest ?? computedManifestDigest;
+  const resolvedTaskHash = effectiveTaskHash ?? computedTaskHash;
+  if (!resolvedManifestDigest) {
+    throw new TypeError('manifest or manifestDigest is required');
+  }
+  if (!resolvedTaskHash) {
+    throw new TypeError('effectiveTask or effectiveTaskHash is required');
+  }
+
+  return {
+    schema: EVIDENCE_PAYLOAD_SCHEMA,
+    version: EVIDENCE_PAYLOAD_VERSION,
+    execution_id: executionId,
+    timestamp,
+    source,
+    bindings: {
+      manifest_digest: resolvedManifestDigest,
+      effective_task_hash: resolvedTaskHash,
+    },
+    declared_identity: redactSensitiveEvidence(declaredIdentity),
+    resolved_identity: redactSensitiveEvidence(resolvedIdentity),
+    authorization_proof: redactSensitiveEvidence(authorizationProof),
+    authorization: redactSensitiveEvidence(authorization),
+    actor_context: redactSensitiveEvidence(actorContext),
+    contract,
+    command: withoutRawCommandInputs(command),
+    result: withoutRawOutputs(result),
+    verify: verify == null ? null : withoutRawOutputs(verify),
+    compliance_context: complianceContext,
+  };
+}
+
+export function validateCompleteEvidencePayload(payload) {
+  const errors = [];
+  const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { valid: false, errors: ['payload must be an object'] };
+  }
+  if (payload.schema !== EVIDENCE_PAYLOAD_SCHEMA) {
+    errors.push(`schema must be "${EVIDENCE_PAYLOAD_SCHEMA}"`);
+  }
+  if (payload.version !== EVIDENCE_PAYLOAD_VERSION) {
+    errors.push(`version must be ${EVIDENCE_PAYLOAD_VERSION}`);
+  }
+  for (const field of ['execution_id', 'timestamp']) {
+    if (typeof payload[field] !== 'string' || payload[field].length === 0) {
+      errors.push(`${field} must be a non-empty string`);
+    }
+  }
+  if (!payload.source || typeof payload.source !== 'object' || Array.isArray(payload.source)) {
+    errors.push('source must be an object');
+  } else if (
+    typeof payload.source.workflow_id !== 'string' ||
+    typeof payload.source.task_id !== 'string' ||
+    !payload.source.workflow_id ||
+    !payload.source.task_id
+  ) {
+    errors.push('source must contain non-empty workflow_id and task_id');
+  }
+  if (
+    !payload.bindings ||
+    typeof payload.bindings.manifest_digest !== 'string' ||
+    typeof payload.bindings.effective_task_hash !== 'string'
+  ) {
+    errors.push('bindings must contain manifest_digest and effective_task_hash');
+  } else {
+    for (const field of ['manifest_digest', 'effective_task_hash']) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(payload.bindings[field])) {
+        errors.push(`bindings.${field} must be a SHA-256 digest`);
+      }
+    }
+  }
+  if (!payload.command || typeof payload.command !== 'object' || Array.isArray(payload.command)) {
+    errors.push('command must be an object');
+  } else {
+    if (typeof payload.command.program !== 'string' || !payload.command.program) {
+      errors.push('command.program must be a non-empty string');
+    }
+    if (!Array.isArray(payload.command.args_hashes)) {
+      errors.push('command.args_hashes must be an array');
+    }
+    if (!Number.isInteger(payload.command.args_count) || payload.command.args_count < 0) {
+      errors.push('command.args_count must be a non-negative integer');
+    }
+    if (!hasOwn(payload.command, 'env_hash')) {
+      errors.push('command.env_hash is required');
+    } else if (!/^sha256:[a-f0-9]{64}$/.test(payload.command.env_hash)) {
+      errors.push('command.env_hash must be a SHA-256 digest');
+    }
+    if (!hasOwn(payload.command, 'stdin_hash')) {
+      errors.push('command.stdin_hash is required');
+    } else if (
+      payload.command.stdin_hash !== null &&
+      !/^sha256:[a-f0-9]{64}$/.test(payload.command.stdin_hash)
+    ) {
+      errors.push('command.stdin_hash must be null or a SHA-256 digest');
+    }
+  }
+  if (!payload.result || typeof payload.result !== 'object' || Array.isArray(payload.result)) {
+    errors.push('result must be an object');
+  } else {
+    for (const field of ['exit_code', 'timed_out', 'duration_ms', 'output_hash']) {
+      if (!hasOwn(payload.result, field)) errors.push(`result.${field} is required`);
+    }
+    if (
+      typeof payload.result.output_hash !== 'string' ||
+      !/^sha256:[a-f0-9]{64}$/.test(payload.result.output_hash)
+    ) {
+      errors.push('result.output_hash must be a SHA-256 digest');
+    }
+  }
+  if (!hasOwn(payload, 'verify')) {
+    errors.push('verify field is required');
+  }
+  if (!hasOwn(payload, 'authorization_proof')) {
+    errors.push('authorization_proof field is required');
+  }
+  if (!hasOwn(payload, 'authorization')) {
+    errors.push('authorization field is required');
+  }
+  if (!hasOwn(payload, 'declared_identity')) {
+    errors.push('declared_identity field is required');
+  }
+  if (!hasOwn(payload, 'resolved_identity')) {
+    errors.push('resolved_identity field is required');
+  }
+  for (const field of ['actor_context', 'contract', 'compliance_context']) {
+    if (!hasOwn(payload, field)) errors.push(`${field} field is required`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Confirm that a verified signed payload belongs to its surrounding audit
+ * record. This prevents transplanting a valid evidence envelope onto a
+ * different execution record.
+ */
+export function validateEvidenceRecordBinding(payload, record) {
+  const errors = [];
+  const equalCanonical = (left, right) => canonicalStringify(left) === canonicalStringify(right);
+  if (!payload || typeof payload !== 'object' || !record || typeof record !== 'object') {
+    return { valid: false, errors: ['payload and audit record must be objects'] };
+  }
+  if (payload.execution_id !== record.execution_id) {
+    errors.push('execution_id does not match the audit record');
+  }
+  if (payload.timestamp !== record.timestamp) {
+    errors.push('timestamp does not match the audit record');
+  }
+  if (
+    payload.source?.workflow_id !== record.source?.workflow_id ||
+    payload.source?.task_id !== record.source?.task_id
+  ) {
+    errors.push('source does not match the audit record');
+  }
+  if (payload.bindings?.manifest_digest !== record.manifest_digest) {
+    errors.push('manifest digest does not match the audit record');
+  }
+  if (payload.bindings?.effective_task_hash !== record.effective_task_hash) {
+    errors.push('effective task hash does not match the audit record');
+  }
+  const recordOutputHash = record.result?.output_hash ?? record.hashes?.result ?? null;
+  if (payload.result?.output_hash !== recordOutputHash) {
+    errors.push('result output hash does not match the audit record');
+  }
+
+  const signedFieldMappings = [
+    ['declared_identity', 'declared_identity'],
+    ['resolved_identity', 'resolved_identity'],
+    ['authorization_proof', 'authorization_proof'],
+    ['authorization', 'authorization'],
+    ['actor_context', 'actor_context'],
+    ['contract', 'contract'],
+  ];
+  for (const [payloadField, recordField] of signedFieldMappings) {
+    if (!equalCanonical(
+      payload[payloadField],
+      redactSensitiveEvidence(record[recordField] ?? null)
+    )) {
+      errors.push(`${recordField} does not match the signed evidence`);
+    }
+  }
+
+  const expectedVerify = record.verify == null ? null : withoutRawOutputs(record.verify);
+  if (!equalCanonical(payload.verify, expectedVerify)) {
+    errors.push('verify result does not match the signed evidence');
+  }
+
+  for (const field of [
+    'program', 'cwd', 'args_count', 'args_hashes', 'env_keys', 'env_hashes',
+    'stdin_present', 'stdin_hash',
+  ]) {
+    const signedValue = field === 'stdin_present' && payload.command?.[field] === undefined
+      ? payload.command?.stdin_hash != null
+      : payload.command?.[field] ?? null;
+    if (!equalCanonical(signedValue, record.command?.[field] ?? null)) {
+      errors.push(`command.${field} does not match the signed evidence`);
+    }
+  }
+
+  for (const field of [
+    'exit_code', 'signal', 'timed_out', 'duration_ms', 'stdout_bytes',
+    'stderr_bytes', 'output_hash',
+  ]) {
+    if (!equalCanonical(payload.result?.[field] ?? null, record.result?.[field] ?? null)) {
+      errors.push(`result.${field} does not match the signed evidence`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
 /**
  * Build a structured evidence payload from execution context.
  *
@@ -83,37 +421,9 @@ export function buildEvidencePayload({
  */
 export function serializePayload(payload, format = 'canonical-json') {
   if (format === 'canonical-json') {
-    return JSON.stringify(sortKeysDeep(payload));
+    return canonicalStringify(payload);
   }
   return JSON.stringify(payload);
-}
-
-/**
- * Recursively sort all object keys in a value.
- * Arrays preserve element order; objects get alphabetically sorted keys.
- *
- * @param {*} value - The value to sort.
- * @returns {*} A new value with all object keys sorted.
- */
-function sortKeysDeep(value) {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(item => sortKeysDeep(item));
-  }
-
-  if (typeof value === 'object') {
-    const sorted = {};
-    const keys = Object.keys(value).sort();
-    for (const key of keys) {
-      sorted[key] = sortKeysDeep(value[key]);
-    }
-    return sorted;
-  }
-
-  return value;
 }
 
 /**

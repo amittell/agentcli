@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { normalizeShellExecution, renderShellExecution } from '../shell.js';
+import { canonicalDigest, canonicalStringify, hashNullableString, hashString } from '../canonical.js';
 
 function isObjectLike(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -155,6 +156,11 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
     ...(isObjectLike(workflowAuth.inputs) ? workflowAuth.inputs : {}),
     ...(isObjectLike(taskAuth.inputs) ? taskAuth.inputs : {}),
   };
+  const delegationPolicy = {
+    max_depth: taskDelegation.max_depth ?? workflowDelegation.max_depth ?? null,
+    allowed_delegators: taskDelegation.allowed_delegators ?? workflowDelegation.allowed_delegators ?? null,
+    require_grant_per_hop: taskDelegation.require_grant_per_hop ?? workflowDelegation.require_grant_per_hop ?? null,
+  };
   const auth = {
     mode: taskAuth.mode ?? workflowAuth.mode ?? null,
     scopes: taskAuth.scopes ?? workflowAuth.scopes ?? null,
@@ -163,11 +169,9 @@ export function resolveIdentityV2(workflowIdentity, taskIdentity) {
     cache: taskAuth.cache ?? workflowAuth.cache ?? null,
     refresh: taskAuth.refresh ?? workflowAuth.refresh ?? null,
     required: taskAuth.required ?? workflowAuth.required ?? null,
-    delegation_policy: {
-      max_depth: taskDelegation.max_depth ?? workflowDelegation.max_depth ?? null,
-      allowed_delegators: taskDelegation.allowed_delegators ?? workflowDelegation.allowed_delegators ?? null,
-      require_grant_per_hop: taskDelegation.require_grant_per_hop ?? workflowDelegation.require_grant_per_hop ?? null,
-    },
+    delegation_policy: Object.values(delegationPolicy).some(value => value != null)
+      ? delegationPolicy
+      : null,
     provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
     inputs: Object.keys(inputs).length > 0 ? inputs : null,
   };
@@ -343,6 +347,11 @@ export function mergeIdentityProfile(profile, identity) {
     ...(isObjectLike(baseAuth.inputs) ? baseAuth.inputs : {}),
     ...(isObjectLike(declarationAuth.inputs) ? declarationAuth.inputs : {}),
   };
+  const delegationPolicy = {
+    max_depth: declarationAuth.delegation_policy?.max_depth ?? baseAuth.delegation_policy?.max_depth ?? null,
+    allowed_delegators: declarationAuth.delegation_policy?.allowed_delegators ?? baseAuth.delegation_policy?.allowed_delegators ?? null,
+    require_grant_per_hop: declarationAuth.delegation_policy?.require_grant_per_hop ?? baseAuth.delegation_policy?.require_grant_per_hop ?? null,
+  };
 
   return {
     ref: declaration.ref ?? base.id ?? null,
@@ -365,11 +374,9 @@ export function mergeIdentityProfile(profile, identity) {
       cache: declarationAuth.cache ?? baseAuth.cache ?? null,
       refresh: declarationAuth.refresh ?? baseAuth.refresh ?? null,
       required: declarationAuth.required ?? baseAuth.required ?? null,
-      delegation_policy: {
-        max_depth: declarationAuth.delegation_policy?.max_depth ?? baseAuth.delegation_policy?.max_depth ?? null,
-        allowed_delegators: declarationAuth.delegation_policy?.allowed_delegators ?? baseAuth.delegation_policy?.allowed_delegators ?? null,
-        require_grant_per_hop: declarationAuth.delegation_policy?.require_grant_per_hop ?? baseAuth.delegation_policy?.require_grant_per_hop ?? null,
-      },
+      delegation_policy: Object.values(delegationPolicy).some(value => value != null)
+        ? delegationPolicy
+        : null,
       provider_config: Object.keys(providerConfig).length > 0 ? providerConfig : null,
       inputs: Object.keys(inputs).length > 0 ? inputs : null,
     },
@@ -406,6 +413,11 @@ export function mergeAuthorizationProofProfile(profile, declaration) {
     audience: base.audience ?? null,
     jwks_uri: base.jwks_uri ?? null,
     public_key: base.public_key ?? null,
+    allowed_signers: base.allowed_signers ?? null,
+    principal: base.principal ?? null,
+    namespace: base.namespace ?? null,
+    ca_certificate: base.ca_certificate ?? null,
+    ca_certificate_from: base.ca_certificate_from ?? null,
     proof: base.proof ?? null,
     claims: Object.keys(claims).length > 0 ? claims : null,
     verify: {
@@ -491,10 +503,181 @@ function resolveIntent(task) {
 
 function resolveOutput(task) {
   return {
+    format: task.output?.format ?? null,
     preview_bytes: task.output?.preview_bytes ?? 2000,
     offload: task.output?.offload ?? 'auto',
     retrieve: task.output?.retrieve ?? 'on-demand',
   };
+}
+
+function hashObject(value) {
+  return value && typeof value === 'object' ? canonicalDigest(value) : null;
+}
+
+function bindIdentity(identity) {
+  if (!identity) return null;
+  return {
+    ref: identity.ref ?? null,
+    scope: identity.scope ?? null,
+    provider: identity.provider ?? null,
+    subject: identity.subject
+      ? {
+          kind: identity.subject.kind ?? null,
+          principal: identity.subject.principal ?? null,
+          display_name: identity.subject.display_name ?? null,
+          run_as: identity.subject.run_as ?? null,
+          issuer: identity.subject.issuer ?? null,
+          delegation_mode: identity.subject.delegation_mode ?? null,
+          attributes_hash: hashObject(identity.subject.attributes),
+        }
+      : null,
+    auth: identity.auth
+      ? {
+          mode: identity.auth.mode ?? null,
+          scopes: identity.auth.scopes ?? null,
+          audience: identity.auth.audience ?? null,
+          resource: identity.auth.resource ?? null,
+          cache: identity.auth.cache ?? null,
+          refresh: identity.auth.refresh ?? null,
+          required: identity.auth.required ?? null,
+          delegation_policy: identity.auth.delegation_policy ?? null,
+          provider_config_hash: hashObject(identity.auth.provider_config),
+          inputs_hash: hashObject(identity.auth.inputs),
+        }
+      : null,
+    trust: identity.trust ?? null,
+    presentation: identity.presentation ?? null,
+  };
+}
+
+function bindAuthorizationProof(proof) {
+  if (!proof) return null;
+  return {
+    ref: proof.ref ?? null,
+    method: proof.method ?? null,
+    issuer: proof.issuer ?? null,
+    audience: proof.audience ?? null,
+    jwks_uri: proof.jwks_uri ?? null,
+    public_key_hash: hashNullableString(proof.public_key),
+    allowed_signers: proof.allowed_signers ?? null,
+    principal: proof.principal ?? null,
+    namespace: proof.namespace ?? null,
+    ca_certificate_hash: hashNullableString(proof.ca_certificate),
+    ca_certificate_from_hash: hashObject(proof.ca_certificate_from),
+    proof_hash: hashObject(proof.proof),
+    claims_hash: hashObject(proof.claims),
+    verify: proof.verify ?? null,
+  };
+}
+
+function bindAuthorization(authorization) {
+  if (!authorization) return null;
+  return {
+    ref: authorization.ref ?? null,
+    provider: authorization.provider ?? null,
+    provider_config_hash: hashObject(authorization.provider_config),
+    on_error: authorization.on_error ?? null,
+    request: authorization.request ?? null,
+    decision: authorization.decision ?? null,
+  };
+}
+
+function bindEvidence(evidence) {
+  if (!evidence) return null;
+  return {
+    ref: evidence.ref ?? null,
+    provider: evidence.provider ?? null,
+    methods: evidence.methods ?? null,
+    provider_config_hash: hashObject(evidence.provider_config),
+    payload: evidence.payload ?? null,
+    verify: evidence.verify ?? null,
+  };
+}
+
+export function commandBindingForShell(shell, { cwd = process.cwd() } = {}) {
+  const normalized = normalizeShellExecution(shell || {});
+  const envHashes = {};
+  for (const key of Object.keys(normalized.env || {}).sort()) {
+    envHashes[key] = hashString(normalized.env[key]);
+  }
+  return {
+    program: normalized.program,
+    args_hashes: (normalized.args || []).map(arg => hashString(arg)),
+    args_count: (normalized.args || []).length,
+    cwd: normalized.cwd || cwd,
+    env_keys: Object.keys(envHashes),
+    env_hashes: envHashes,
+    stdin_hash: hashNullableString(normalized.stdin),
+  };
+}
+
+export function buildEffectiveExecutionBinding({
+  manifest = null,
+  expanded = manifest,
+  workflow,
+  task,
+  cwd = process.cwd(),
+} = {}) {
+  if (!workflow || !task) {
+    throw new TypeError('workflow and task are required to build an execution binding');
+  }
+
+  const resolvedIdentity = resolveIdentity(workflow, task);
+  const identityProfile = resolvedIdentity?.ref
+    ? expanded?.identity_profiles?.find(profile => profile.id === resolvedIdentity.ref) ?? null
+    : null;
+  const identity = mergeIdentityProfile(identityProfile, resolvedIdentity);
+
+  const proofRef = resolveAuthorizationProof(workflow, task);
+  const proofProfile = proofRef?.ref
+    ? expanded?.authorization_proof_profiles?.find(profile => profile.id === proofRef.ref) ?? null
+    : null;
+  const proof = proofRef ? mergeAuthorizationProofProfile(proofProfile, proofRef) : null;
+
+  const authorizationRef = resolveAuthorization(workflow, task);
+  const authorizationProfile = authorizationRef?.ref
+    ? expanded?.authorization_profiles?.find(profile => profile.id === authorizationRef.ref) ?? null
+    : null;
+  const authorization = authorizationRef
+    ? mergeAuthorizationProfile(authorizationProfile, authorizationRef)
+    : null;
+
+  const evidenceRef = resolveEvidence(workflow, task);
+  const evidenceProfile = evidenceRef?.ref
+    ? expanded?.evidence_profiles?.find(profile => profile.id === evidenceRef.ref) ?? null
+    : null;
+  const evidence = evidenceRef ? mergeEvidenceProfile(evidenceProfile, evidenceRef) : null;
+
+  return {
+    binding_version: 1,
+    manifest_version: expanded?.version ?? manifest?.version ?? null,
+    manifest_digest: expanded ? canonicalDigest(expanded) : null,
+    source: { workflow_id: workflow.id, task_id: task.id },
+    enabled: task.enabled ?? true,
+    target: task.target ?? null,
+    command: task.shell ? commandBindingForShell(task.shell, { cwd }) : null,
+    prompt_hash: hashNullableString(task.prompt),
+    runtime: { timeout_ms: task.runtime?.timeout_ms ?? null },
+    approval: approvalPolicyForTask(task),
+    identity: bindIdentity(identity),
+    contract: resolveContract(workflow, task),
+    authorization_proof: bindAuthorizationProof(proof),
+    authorization: bindAuthorization(authorization),
+    evidence: bindEvidence(evidence),
+    child_credential_policy: resolveChildCredentialPolicy(workflow, task),
+    verify: resolveVerify(workflow, task),
+    output: resolveOutput(task),
+    intent: resolveIntent(task),
+    delete_after_run: task.delete_after_run ?? null,
+  };
+}
+
+export function computeEffectiveTaskHash(binding) {
+  return canonicalDigest(binding);
+}
+
+export function canonicalExecutionBindingString(binding) {
+  return canonicalStringify(binding);
 }
 
 function resolveBudgets(task) {

@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
+import { JSON_SCHEMAS, MANIFEST_SCHEMA, MANIFEST_VERSION } from './schema.js';
 import { loadJsonInput, writeJsonOutput } from './io.js';
 import { validateManifest } from './validate.js';
 import { describeTarget } from './describe.js';
@@ -13,7 +13,13 @@ import {
   resolveEffectiveFeatures,
   validateManifestCapabilities,
 } from './capabilities.js';
-import { executeTask } from './exec.js';
+import {
+  evaluateTaskAuthorization,
+  executeTask,
+  inspectTaskIdentity,
+  validateTaskDelegation,
+  verifyTaskAuthorizationProof,
+} from './exec.js';
 import { runWorkflow } from './run.js';
 import { readAuditLog } from './audit.js';
 import { grantApproval, listApprovals, revokeApproval } from './approvals.js';
@@ -36,13 +42,13 @@ agentcli <command> [args]
 Commands:
   version
   init [--tool program] [--output path] [--workflow-id id] [--task-id id]
-  schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse|scheduler-job|standalone-plan|rpc-request|rpc-response]
+  schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse|scheduler-job|standalone-plan|rpc-request|rpc-response] [--legacy]
   describe [manifest|workflow|task|targets|commands|rpc]
   targets
   paths
   validate <path-or-json|->
   compile <path-or-json|-> [--target standalone|openclaw-scheduler] [--write path] [--explain]
-  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name] [--check-capabilities]
+  apply <path-or-json|-> [--db path] [--scheduler-prefix path|--scheduler-bin path] [--dry-run] [--explain] [--adopt-by id|name] [--check-capabilities] [--allow-proof-command]
   exec <path-or-json|-> <task-id> [--workflow id] [--dry-run] [--timeout ms]
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
        [--instance-id id] [--require-evidence] [--require-authorization]
@@ -104,9 +110,193 @@ Environment:
 `;
 }
 
+const BOOLEAN_FLAG = 'boolean';
+const VALUE_FLAG = 'value';
+
+const GLOBAL_FLAGS = Object.freeze({
+  json: BOOLEAN_FLAG,
+  pretty: BOOLEAN_FLAG,
+  ndjson: BOOLEAN_FLAG,
+  version: BOOLEAN_FLAG,
+  home: VALUE_FLAG,
+});
+
+const COMMAND_FLAGS = Object.freeze({
+  init: { tool: VALUE_FLAG, output: VALUE_FLAG, 'workflow-id': VALUE_FLAG, 'task-id': VALUE_FLAG },
+  schema: { legacy: BOOLEAN_FLAG },
+  compile: { target: VALUE_FLAG, write: VALUE_FLAG, explain: BOOLEAN_FLAG },
+  apply: {
+    db: VALUE_FLAG,
+    'scheduler-prefix': VALUE_FLAG,
+    'scheduler-bin': VALUE_FLAG,
+    'dry-run': BOOLEAN_FLAG,
+    explain: BOOLEAN_FLAG,
+    'adopt-by': VALUE_FLAG,
+    'check-capabilities': BOOLEAN_FLAG,
+    'allow-proof-command': BOOLEAN_FLAG,
+  },
+  inspect: { db: VALUE_FLAG, fields: VALUE_FLAG, limit: VALUE_FLAG, sanitize: VALUE_FLAG },
+  exec: {
+    workflow: VALUE_FLAG,
+    'dry-run': BOOLEAN_FLAG,
+    timeout: VALUE_FLAG,
+    signer: VALUE_FLAG,
+    'signing-key': VALUE_FLAG,
+    'evidence-provider': VALUE_FLAG,
+    'instance-id': VALUE_FLAG,
+    'require-evidence': BOOLEAN_FLAG,
+    'require-authorization': BOOLEAN_FLAG,
+    'identity-debug': BOOLEAN_FLAG,
+    'presentation-debug': BOOLEAN_FLAG,
+    'approval-id': VALUE_FLAG,
+    db: VALUE_FLAG,
+    'scheduler-prefix': VALUE_FLAG,
+    'scheduler-bin': VALUE_FLAG,
+  },
+  run: {
+    workflow: VALUE_FLAG,
+    root: VALUE_FLAG,
+    'all-roots': BOOLEAN_FLAG,
+    'dry-run': BOOLEAN_FLAG,
+    timeout: VALUE_FLAG,
+    signer: VALUE_FLAG,
+    'signing-key': VALUE_FLAG,
+    'evidence-provider': VALUE_FLAG,
+    'instance-id': VALUE_FLAG,
+    'require-evidence': BOOLEAN_FLAG,
+    'require-authorization': BOOLEAN_FLAG,
+    'identity-debug': BOOLEAN_FLAG,
+    'presentation-debug': BOOLEAN_FLAG,
+  },
+  audit: { limit: VALUE_FLAG },
+  approve: {
+    workflow: VALUE_FLAG,
+    by: VALUE_FLAG,
+    reason: VALUE_FLAG,
+    'ttl-s': VALUE_FLAG,
+    signer: VALUE_FLAG,
+    'signing-key': VALUE_FLAG,
+  },
+  approvals: {
+    status: VALUE_FLAG,
+    workflow: VALUE_FLAG,
+    task: VALUE_FLAG,
+    by: VALUE_FLAG,
+    reason: VALUE_FLAG,
+  },
+  verify: { 'allowed-signers': VALUE_FLAG },
+  registry: { name: VALUE_FLAG },
+  import: { name: VALUE_FLAG },
+  merge: { output: VALUE_FLAG },
+  convert: { output: VALUE_FLAG, write: VALUE_FLAG },
+  identity: { workflow: VALUE_FLAG },
+  'authorization-proof': { workflow: VALUE_FLAG },
+  authorization: { workflow: VALUE_FLAG },
+  whoami: { workflow: VALUE_FLAG },
+  serve: { db: VALUE_FLAG },
+});
+
+function argumentError(message) {
+  return Object.assign(new Error(message), { code: 'invalid_argument' });
+}
+
+function longFlag(arg) {
+  const separator = arg.indexOf('=');
+  if (separator === -1) return { key: arg.slice(2), inlineValue: undefined };
+  return { key: arg.slice(2, separator), inlineValue: arg.slice(separator + 1) };
+}
+
+function detectCommand(argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--') return argv[index + 1];
+    if (arg === '-v') return '-v';
+    if (arg === '-h') return '-h';
+    if (!arg.startsWith('--')) return arg;
+
+    const { key, inlineValue } = longFlag(arg);
+    if (GLOBAL_FLAGS[key] === VALUE_FLAG && inlineValue === undefined) index += 1;
+  }
+  return undefined;
+}
+
+function commandFlagSpecification(command) {
+  const normalizedCommand = command === '-v' ? 'version' : command === '-h' ? 'help' : command;
+  return { ...GLOBAL_FLAGS, ...(COMMAND_FLAGS[normalizedCommand] || {}) };
+}
+
+function assertPositionalCount(command, positionals) {
+  if (command == null) {
+    if (positionals.length > 0) throw argumentError(`Unexpected argument: ${positionals[0]}`);
+    return;
+  }
+
+  const exact = {
+    version: 1,
+    '-v': 1,
+    help: 1,
+    '-h': 1,
+    init: 1,
+    targets: 1,
+    paths: 1,
+    'skill-path': 1,
+    validate: 2,
+    compile: 2,
+    apply: 2,
+    exec: 3,
+    run: 2,
+    audit: 1,
+    approve: 3,
+    verify: 2,
+    import: 2,
+    convert: 2,
+    whoami: 3,
+    serve: 1,
+  };
+  if (exact[command] !== undefined && positionals.length > exact[command]) {
+    throw argumentError(`Command "${command}" expects ${exact[command] - 1} positional argument(s); received ${positionals.length - 1}`);
+  }
+
+  const ranges = {
+    schema: [1, 2],
+    describe: [1, 2],
+    inspect: [1, 2],
+    approvals: [2, 3],
+    signing: [2, 2],
+    registry: [2, 3],
+    merge: [3, Number.POSITIVE_INFINITY],
+    identity: [2, 4],
+    'authorization-proof': [2, 4],
+    authorization: [2, 4],
+    evidence: [2, 3],
+  };
+  const range = ranges[command];
+  if (range && positionals.length > range[1]) {
+    throw argumentError(`Command "${command}" received an invalid number of positional arguments`);
+  }
+
+  const subcommandCounts = {
+    approvals: { list: 2, revoke: 3 },
+    signing: { providers: 2 },
+    registry: { list: 2, add: 3, show: 3, remove: 3 },
+    identity: { providers: 2, schema: 3, resolve: 4, 'validate-delegation': 4 },
+    'authorization-proof': { methods: 2, schema: 3, verify: 4 },
+    authorization: { providers: 2, schema: 3, evaluate: 4 },
+    evidence: { providers: 2, schema: 3 },
+  };
+  const expectedForSubcommand = subcommandCounts[command]?.[positionals[1]];
+  if (expectedForSubcommand !== undefined && positionals.length > expectedForSubcommand) {
+    throw argumentError(
+      `Command "${command} ${positionals[1]}" expects ${expectedForSubcommand - 2} positional argument(s); received ${positionals.length - 2}`
+    );
+  }
+}
+
 function parseArgs(argv) {
   const positionals = [];
   const flags = Object.create(null);
+  const detectedCommand = detectCommand(argv);
+  const flagSpecification = commandFlagSpecification(detectedCommand);
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -119,32 +309,49 @@ function parseArgs(argv) {
       continue;
     }
 
-    const [key, inlineValue] = arg.slice(2).split('=', 2);
-    if (inlineValue !== undefined) {
-      flags[key] = inlineValue;
+    const { key, inlineValue } = longFlag(arg);
+    const flagType = flagSpecification[key];
+    if (!flagType) {
+      throw argumentError(`Unknown flag for ${detectedCommand || 'help'}: --${key}`);
+    }
+    if (Object.hasOwn(flags, key)) {
+      throw argumentError(`Flag may only be specified once: --${key}`);
+    }
+
+    if (flagType === BOOLEAN_FLAG) {
+      if (inlineValue !== undefined) {
+        throw argumentError(`Boolean flag --${key} does not accept a value`);
+      }
+      flags[key] = true;
       continue;
     }
 
-    const next = argv[index + 1];
-    if (next && !next.startsWith('--')) {
-      flags[key] = next;
-      index += 1;
-    } else {
-      flags[key] = true;
+    if (inlineValue !== undefined) {
+      if (inlineValue === '') throw argumentError(`--${key} requires a non-empty value`);
+      flags[key] = inlineValue;
+      continue;
     }
+    const next = argv[index + 1];
+    if (next === undefined || next.startsWith('--')) {
+      throw argumentError(`--${key} requires a value`);
+    }
+    flags[key] = next;
+    index += 1;
   }
 
+  assertPositionalCount(positionals[0], positionals);
   return { positionals, flags };
 }
 
-function pickSchema(name) {
+function pickSchema(name, { legacy = false } = {}) {
   const aliases = {
     'scheduler-job': 'schedulerJob',
     'standalone-plan': 'standalonePlan',
     'rpc-request': 'rpcRequest',
     'rpc-response': 'rpcResponse'
   };
-  const schema = MANIFEST_SCHEMA[aliases[name] || name || 'manifest'];
+  const schemas = legacy ? MANIFEST_SCHEMA : JSON_SCHEMAS;
+  const schema = schemas[aliases[name] || name || 'manifest'];
   if (!schema) {
     throw Object.assign(
       new Error(`Unknown schema target: ${name}`),
@@ -194,7 +401,8 @@ export async function runCli(
     cwd = process.cwd(),
     env = process.env,
     stdin = process.stdin,
-    stdout = process.stdout
+    stdout = process.stdout,
+    throwOnValidationFailure = false,
   } = {}
 ) {
   const { positionals, flags } = parseArgs(argv);
@@ -228,7 +436,11 @@ export async function runCli(
 
   switch (command) {
     case 'schema':
-      return formatOutput({ ok: true, schema: pickSchema(positionals[1]) }, { mode: outputMode, pretty });
+      return formatOutput({
+        ok: true,
+        schema_format: flags.legacy ? 'agentcli-legacy' : 'json-schema-draft-2020-12',
+        schema: pickSchema(positionals[1], { legacy: Boolean(flags.legacy) }),
+      }, { mode: outputMode, pretty });
     case 'describe':
       return formatOutput({ ok: true, description: describeTarget(positionals[1]) }, { mode: outputMode, pretty });
     case 'targets':
@@ -260,7 +472,11 @@ export async function runCli(
     }
     case 'validate': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
-      return formatOutput(validateManifest(manifest), { mode: outputMode, pretty });
+      const validation = validateManifest(manifest);
+      if (!validation.ok && throwOnValidationFailure) {
+        cliError('Manifest validation failed', 'validation_error', { validation });
+      }
+      return formatOutput(validation, { mode: outputMode, pretty });
     }
     case 'compile': {
       const manifest = await loadJsonInput(positionals[1], { cwd, env: derivedEnv, stdin });
@@ -319,6 +535,7 @@ export async function runCli(
         dbPath: flags.db || defaultDbPath,
         schedulerPrefix: flags['scheduler-prefix'] || defaultSchedulerPrefix,
         schedulerBin: flags['scheduler-bin'] || defaultSchedulerBin,
+        allowValueFromCommand: Boolean(flags['allow-proof-command']),
         cwd,
         env: derivedEnv
       });
@@ -436,11 +653,23 @@ export async function runCli(
           { code: 'invalid_argument' }
         );
       }
+      const malformed = [];
       const records = readAuditLog({
         auditPath: paths.audit,
         limit: rawLimit ? Number(rawLimit) : undefined,
+        onMalformed: ({ lineNumber }) => {
+          malformed.push({
+            line_number: lineNumber,
+            message: 'malformed audit record skipped',
+          });
+        },
       });
-      return formatOutput({ ok: true, count: records.length, records }, { mode: outputMode, pretty });
+      return formatOutput({
+        ok: true,
+        count: records.length,
+        records,
+        warnings: malformed,
+      }, { mode: outputMode, pretty });
     }
     case 'approve': {
       const manifestInput = positionals[1];
@@ -522,14 +751,84 @@ export async function runCli(
         );
       }
       const paths = getAgentcliPaths({ env: derivedEnv });
-      const records = readAuditLog({ auditPath: paths.audit });
+      const malformed = [];
+      const records = readAuditLog({
+        auditPath: paths.audit,
+        onMalformed: ({ lineNumber }) => malformed.push(lineNumber),
+      });
       const record = records.find(r => r.execution_id === executionId);
       if (!record) {
+        const malformedNote = malformed.length > 0
+          ? ` (${malformed.length} malformed audit record(s) skipped)`
+          : '';
         throw Object.assign(
-          new Error(`Execution not found in audit log: ${executionId}`),
+          new Error(`Execution not found in audit log: ${executionId}${malformedNote}`),
           { code: 'invalid_argument' }
         );
       }
+
+      if (record.evidence?.envelope) {
+        const envelope = record.evidence.envelope;
+        const principal = envelope.principal || record.principal_used || record.identity?.principal || null;
+        let verifyOptions = { principal };
+        if (envelope.method === 'ssh-signature') {
+          if (!principal) {
+            return formatOutput({
+              ok: true,
+              execution_id: executionId,
+              verified: false,
+              reason: 'no principal recorded for the evidence envelope',
+              source: 'evidence-envelope',
+            }, { mode: outputMode, pretty });
+          }
+          let allowedSignersPath = flags['allowed-signers']
+            || resolveAllowedSigners({ env: derivedEnv, statePath: paths.allowed_signers });
+          if (!allowedSignersPath) {
+            allowedSignersPath = generateAllowedSigners({
+              principal,
+              outputPath: paths.allowed_signers,
+            });
+            if (!allowedSignersPath) {
+              return formatOutput({
+                ok: true,
+                execution_id: executionId,
+                verified: false,
+                reason: 'no allowed_signers file and no SSH public keys found to generate one',
+                source: 'evidence-envelope',
+              }, { mode: outputMode, pretty });
+            }
+          }
+          verifyOptions = { ...verifyOptions, allowedSignersPath };
+        }
+
+        const { verifyEvidenceEnvelope } = await import('./evidence/index.js');
+        const { validateEvidenceRecordBinding } = await import('./evidence/payload.js');
+        const verifyResult = await verifyEvidenceEnvelope(envelope, verifyOptions, {
+          cwd,
+          env: derivedEnv,
+        });
+        const auditBinding = validateEvidenceRecordBinding(verifyResult.payload, record);
+        const verified = verifyResult.verified === true && auditBinding.valid;
+        const reason = verifyResult.reason || (
+          auditBinding.valid
+            ? null
+            : `evidence envelope does not bind this audit record: ${auditBinding.errors.join('; ')}`
+        );
+        return formatOutput({
+          ok: true,
+          execution_id: executionId,
+          verified,
+          principal: verifyResult.principal || principal,
+          method: envelope.method,
+          key_fingerprint: verifyResult.key_fingerprint || envelope.key_fingerprint || null,
+          payload_digest: verifyResult.payload_digest || envelope.payload_digest || null,
+          envelope_version: verifyResult.envelope_version || envelope.version || null,
+          audit_binding_verified: auditBinding.valid,
+          source: 'evidence-envelope',
+          ...(reason ? { reason } : {}),
+        }, { mode: outputMode, pretty });
+      }
+
       if (!record.attestation) {
         return formatOutput({
           ok: true,
@@ -752,7 +1051,13 @@ export async function runCli(
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
         if (!taskId) cliError('Usage: agentcli identity resolve <manifest> <task-id> [--workflow id]');
-        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
+        const result = await inspectTaskIdentity(manifest, {
+          workflowId,
+          taskId,
+          identityDebug: true,
+          cwd,
+          env: derivedEnv,
+        });
         return formatOutput({ ok: true, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, principal_used: result.principal_used }, { mode: outputMode, pretty });
       }
       if (subcommand === 'validate-delegation') {
@@ -760,8 +1065,14 @@ export async function runCli(
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
         if (!taskId) cliError('Usage: agentcli identity validate-delegation <manifest> <task-id> [--workflow id]');
-        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
-        return formatOutput({ ok: true, delegation: result.resolved_identity?.delegation_validation || null }, { mode: outputMode, pretty });
+        const result = await validateTaskDelegation(manifest, {
+          workflowId,
+          taskId,
+          identityDebug: true,
+          cwd,
+          env: derivedEnv,
+        });
+        return formatOutput({ ok: true, delegation: result.delegation || null }, { mode: outputMode, pretty });
       }
       return cliError('Unknown identity subcommand. Available: providers, schema, resolve, validate-delegation');
     }
@@ -792,8 +1103,18 @@ export async function runCli(
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
         if (!taskId) cliError('Usage: agentcli authorization-proof verify <manifest> <task-id> [--workflow id]');
-        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, cwd, env: derivedEnv });
-        return formatOutput({ ok: true, authorization_proof: result.authorization_proof || null }, { mode: outputMode, pretty });
+        const result = await verifyTaskAuthorizationProof(manifest, {
+          workflowId,
+          taskId,
+          cwd,
+          env: derivedEnv,
+        });
+        return formatOutput({
+          ok: true,
+          authorization_proof: result.authorization_proof || null,
+          effective_task_hash: result.effective_task_hash,
+          manifest_digest: result.manifest_digest,
+        }, { mode: outputMode, pretty });
       }
       return cliError('Unknown authorization-proof subcommand. Available: methods, schema, verify');
     }
@@ -820,7 +1141,12 @@ export async function runCli(
         const taskId = positionals[3];
         const workflowId = flags.workflow || null;
         if (!taskId) cliError('Usage: agentcli authorization evaluate <manifest> <task-id> [--workflow id]');
-        const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, requireAuthorization: true, cwd, env: derivedEnv });
+        const result = await evaluateTaskAuthorization(manifest, {
+          workflowId,
+          taskId,
+          cwd,
+          env: derivedEnv,
+        });
         return formatOutput({ ok: true, authorization: result.authorization || null }, { mode: outputMode, pretty });
       }
       return cliError('Unknown authorization subcommand. Available: providers, schema, evaluate');
@@ -850,7 +1176,13 @@ export async function runCli(
       const taskId = positionals[2];
       const workflowId = flags.workflow || null;
       if (!taskId) cliError('Usage: agentcli whoami <manifest> <task-id> [--workflow id]');
-      const result = await executeTask(manifest, { workflowId, taskId, dryRun: true, identityDebug: true, cwd, env: derivedEnv });
+      const result = await inspectTaskIdentity(manifest, {
+        workflowId,
+        taskId,
+        identityDebug: true,
+        cwd,
+        env: derivedEnv,
+      });
       return formatOutput({ ok: true, principal_used: result.principal_used, declared_identity: result.declared_identity || result.identity, resolved_identity: result.resolved_identity || null, trust: result.trust || null }, { mode: outputMode, pretty });
     }
     case 'serve': {

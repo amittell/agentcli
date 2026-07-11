@@ -114,6 +114,8 @@
       "id": "ci-approval",
       "method": "jwt",
       "issuer": "https://ci.example.com",
+      "audience": "agentcli",
+      "jwks_uri": "https://ci.example.com/.well-known/jwks.json",
       "proof": {
         "value_from": { "env": "CI_DEPLOY_TOKEN" }
       },
@@ -121,7 +123,7 @@
         "audience": "agentcli",
         "subject": "deploy-pipeline"
       },
-      "verify": { "required": false }
+      "verify": { "required": true }
     }
   ],
   "evidence_profiles": [

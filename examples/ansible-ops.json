@@ -71,7 +71,8 @@
             "required_trust_level": "restricted",
             "audit": "always"
           },
-          "reliability": { "overlap_policy": "skip", "timeout_ms": 120000 }
+          "runtime": { "timeout_ms": 120000 },
+          "reliability": { "overlap_policy": "skip" }
         },
         {
           "id": "playbook-dry-run",
@@ -88,7 +89,8 @@
             "audit": "always"
           },
           "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
-          "reliability": { "overlap_policy": "skip", "timeout_ms": 300000 }
+          "runtime": { "timeout_ms": 300000 },
+          "reliability": { "overlap_policy": "skip" }
         },
         {
           "id": "playbook-apply",
@@ -110,7 +112,8 @@
             "timeout_s": 3600
           },
           "delivery": { "mode": "announce-always", "channel": "telegram", "to": "@ops_channel" },
-          "reliability": { "overlap_policy": "skip", "timeout_ms": 600000 },
+          "runtime": { "timeout_ms": 600000 },
+          "reliability": { "overlap_policy": "skip" },
           "verify": {
             "shell": "ansible all -i inventory/production -m ping --one-line | grep -v SUCCESS && exit 1 || exit 0",
             "timeout_seconds": 60,

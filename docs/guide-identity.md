@@ -134,10 +134,10 @@ Preview what agentcli will do without executing the command:
 agentcli exec manifest.json call-api --dry-run
 ```
 
-Add `--identity-debug` to see the resolved (redacted) identity session:
+Dry-run does not resolve a provider or materialize credentials. It shows the merged, audit-safe identity declaration and marks live phases skipped. Use the dedicated identity command when you intentionally want provider-backed resolution without running the task:
 
 ```bash
-agentcli exec manifest.json call-api --dry-run --identity-debug
+agentcli identity resolve manifest.json call-api
 ```
 
 ### Making auth optional
@@ -493,10 +493,10 @@ export UPSTREAM_TOKEN="eyJhbGciOi..."
 agentcli exec manifest.json call-downstream
 ```
 
-Preview without executing:
+Resolve the identity without executing the task:
 
 ```bash
-agentcli exec manifest.json call-downstream --dry-run --identity-debug
+agentcli identity resolve manifest.json call-downstream
 ```
 
 ### When to use this provider
@@ -703,10 +703,10 @@ export AWS_SECRET_ACCESS_KEY="wJalr..."
 agentcli exec manifest.json list-buckets
 ```
 
-Preview the assumed role session:
+Resolve the assumed role session without executing the task:
 
 ```bash
-agentcli exec manifest.json list-buckets --dry-run --identity-debug
+agentcli identity resolve manifest.json list-buckets
 ```
 
 ### When to use this provider
@@ -900,10 +900,10 @@ since standard Node `fetch()` does not support UDS connections.
 agentcli exec manifest.json call-peer
 ```
 
-Preview identity resolution:
+Resolve identity without executing the task:
 
 ```bash
-agentcli exec manifest.json call-peer --dry-run --identity-debug
+agentcli identity resolve manifest.json call-peer
 ```
 
 ### When to use this provider
@@ -1011,10 +1011,10 @@ export AGENTCLI_ENTRA_CLIENT_ASSERTION="eyJhbGciOi..."
 agentcli exec manifest.json query-graph
 ```
 
-Preview the resolved identity session:
+Resolve the identity session without executing the task:
 
 ```bash
-agentcli exec manifest.json query-graph --dry-run --identity-debug
+agentcli identity resolve manifest.json query-graph
 ```
 
 ### When to use this provider
@@ -1162,32 +1162,21 @@ The `contract` block also answers "what execution boundary is this task supposed
 
 ### What local `agentcli exec` enforces today
 
-Local `agentcli exec` fully enforces some contract checks, and records others as advisory intent:
+Local `agentcli exec` enforces the contract before spawning:
 
-- `allowed_paths`: enforced
+- `allowed_paths`: verifies the effective working directory, resolves symlinks, and requires an enforceable filesystem sandbox
 - `required_trust_level` + `trust_enforcement`: enforced
 - `audit`: enforced
-- `sandbox`: enforced on macOS when `sandbox-exec` is available; advisory on other OSes
-- `network`: enforced on macOS when `sandbox-exec` is available for `restricted` and `none`; advisory on other OSes
+- `sandbox: strict`: requires supported operating-system isolation
+- `network: restricted` or `network: none`: requires supported network isolation
 
-That is why you may see warnings such as:
-
-```text
-contract.sandbox is "strict" but no supported local sandbox runner is available; execution proceeds without OS-level sandbox enforcement
-```
-
-or:
-
-```text
-contract.network is "none" but no supported local sandbox runner is available; execution proceeds without OS-level network enforcement
-```
-
-These warnings do not mean the manifest is invalid. They mean the declaration is valid, but the local machine does not currently have a supported sandbox backend for that boundary.
+If a restrictive sandbox, allowed-path, or network boundary cannot be enforced, execution fails with a sandbox or contract error. It never warns and proceeds outside the requested boundary. `sandbox: permissive` with `network: unrestricted` and no `allowed_paths` explicitly accepts execution without strong isolation.
 
 Use this rule of thumb:
 
-- local testing: `permissive` / `unrestricted` is usually fine
-- macOS local enforcement: use `strict`, `restricted`, or `none` and let `sandbox-exec` enforce the boundary
+- local static preview: use `exec --dry-run`; it does not probe sandbox support
+- live local execution without isolation: explicitly use `permissive` and `unrestricted` with no `allowed_paths`
+- restrictive execution: use a supported macOS sandbox boundary or run agentcli inside a container or another operating-system isolation layer
 - other OSes: keep the contract declaration, but rely on a backend or environment that can enforce it until an OS-specific adapter is available
 - if you want no warning during local runs on an unsupported machine, use `sandbox: "none"` and `network: "unrestricted"`
 
@@ -1347,7 +1336,7 @@ Presentation supports a `cleanup` field that controls when temporary files are d
 }
 ```
 
-Cleanup runs after execution completes, including on dry runs where materialization occurred.
+Cleanup runs after live inspection or execution completes. Static dry-runs never materialize credentials and therefore have no provider artifacts to clean up.
 
 ## Evidence and Attestation
 
@@ -1373,9 +1362,7 @@ Define an evidence profile at the top level of the manifest:
 ]
 ```
 
-The `bind` array controls which execution fields are included in the signed payload.
-Available bind targets: `execution_id`, `declared_identity`, `resolved_identity`,
-`authorization_proof`, `authorization`, `contract`, `command`, `result`.
+The evidence declaration selects additional sections and context, while the stored envelope always retains the complete versioned binding needed for verification. That canonical binding includes the manifest digest, effective task hash, execution id, audit-safe identity and command descriptors, result, and postcondition. Raw credentials, stdin, stdout, and stderr are excluded.
 
 ### Reference the evidence profile from a task
 
@@ -1664,11 +1651,11 @@ curl -X POST https://auth.example.com/oauth/token \
 ### "Authorization proof verification failed"
 
 The authorization proof (JWT, detached signature, or certificate) did not pass verification.
-Check that the proof value is current and matches the expected claims. Use `--dry-run` to
-inspect the proof verification result without executing:
+Check that the proof value is current, cryptographically valid, bound to the canonical manifest,
+and matches the expected claims. Use the dedicated verification command without executing the task:
 
 ```bash
-agentcli exec manifest.json my-task --dry-run
+agentcli authorization-proof verify manifest.json my-task
 ```
 
 ### "Authorization denied"
@@ -1682,14 +1669,15 @@ Use these flags to get more detail during troubleshooting:
 
 | Flag | What it shows |
 |---|---|
-| `--dry-run` | Full execution plan without running the command |
-| `--identity-debug` | Redacted identity session and credential summary |
-| `--presentation-debug` | Materialization summary (env keys, temp file counts) |
+| `--dry-run` | Static execution plan; all live phases are skipped |
+| `--identity-debug` | Redacted identity session and credential summary during a live or dedicated identity operation |
+| `--presentation-debug` | Materialization summary during a live operation |
 
 Example:
 
 ```bash
-agentcli exec manifest.json my-task --dry-run --identity-debug --presentation-debug
+agentcli exec manifest.json my-task --dry-run
+agentcli identity resolve manifest.json my-task
 ```
 
 ### Validating identity resolution without execution
@@ -1715,7 +1703,7 @@ Recommended pattern:
 1. Put the normal CLI or service credential in an `identity_profile`.
 2. Put org, delegation, run, and non-secret verification references in `identity.subject.attributes`.
 3. Require a short-lived signed JWT in `authorization_proof` for sensitive tasks.
-4. Use `jwks_uri` or `public_key` so `verify.required: true` enforces signature-backed verification.
+4. Use `jwks_uri` or `public_key`; every JWT proof requires signature verification and a canonical manifest digest claim regardless of `verify.required`.
 5. If you use OPA, request the `actor` and `step_up` sections so policy can see the actor chain and verification summary without reading raw tokens.
 
 The dedicated example manifest is:

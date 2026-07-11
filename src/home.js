@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -37,7 +37,8 @@ function readBundledSample() {
 export function ensureAgentcliHome({ env = process.env, homeDir = homedir(), force = false } = {}) {
   const paths = getAgentcliPaths({ env, homeDir });
   for (const dir of [paths.root, paths.manifests, paths.output, paths.state, paths.registry]) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
   }
 
   const created = [];
@@ -58,13 +59,24 @@ Typical flow:
 3. Run: agentcli compile <name> --target openclaw-scheduler --explain
 4. Run: agentcli apply <name> --db ~/.openclaw/scheduler/scheduler.db --scheduler-prefix ~/.openclaw/scheduler --dry-run
 `;
-    writeFileSync(paths.readme, readme, 'utf8');
+    writeFileSync(paths.readme, readme, { encoding: 'utf8', mode: 0o600 });
+    if (process.platform !== 'win32') chmodSync(paths.readme, 0o600);
     created.push(paths.readme);
   }
 
   if (force || !existsSync(paths.sampleManifest)) {
-    writeFileSync(paths.sampleManifest, `${readBundledSample().trim()}\n`, 'utf8');
+    writeFileSync(paths.sampleManifest, `${readBundledSample().trim()}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    if (process.platform !== 'win32') chmodSync(paths.sampleManifest, 0o600);
     created.push(paths.sampleManifest);
+  }
+
+  if (process.platform !== 'win32') {
+    for (const file of [paths.readme, paths.sampleManifest]) {
+      if (existsSync(file)) chmodSync(file, 0o600);
+    }
   }
 
   return {

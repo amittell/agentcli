@@ -28,7 +28,7 @@
     "agentcli": "bin/agentcli.js"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "test": "node --test",
@@ -78,5 +78,9 @@
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.2",
     "globals": "^17.4.0"
+  },
+  "overrides": {
+    "brace-expansion": "^5.0.6",
+    "flatted": "^3.4.2"
   }
 }

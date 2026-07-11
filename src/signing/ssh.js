@@ -1,5 +1,16 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -96,9 +107,9 @@ export function signPayload(payload, { keyPath }) {
 
 export function resolveAllowedSigners({ env = process.env, statePath } = {}) {
   const explicit = env.AGENTCLI_ALLOWED_SIGNERS;
-  if (explicit && existsSync(explicit)) return explicit;
+  if (explicit && existsSync(explicit) && lstatSync(explicit).isFile()) return explicit;
 
-  if (statePath && existsSync(statePath)) return statePath;
+  if (statePath && existsSync(statePath) && lstatSync(statePath).isFile()) return statePath;
 
   return null;
 }
@@ -117,8 +128,24 @@ export function generateAllowedSigners({ principal, homeDir = homedir(), outputP
 
   if (lines.length === 0) return null;
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, lines.join('\n') + '\n', 'utf8');
+  const outputDirectory = dirname(outputPath);
+  mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(outputDirectory, 0o700);
+  let descriptor;
+  try {
+    descriptor = openSync(
+      outputPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    writeFileSync(descriptor, lines.join('\n') + '\n', 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  if (process.platform !== 'win32') chmodSync(outputPath, 0o600);
   return outputPath;
 }
 

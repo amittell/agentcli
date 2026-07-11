@@ -78,14 +78,16 @@ agentcli exec manifest.json deploy --timeout 30000
 ```
 
 Exec enforces contracts before spawning:
-- Rejects `shell.cwd` outside `allowed_paths`
-- Warns about sandbox/network constraints not yet enforced at OS level
+- Enforces `allowed_paths` with symlink-safe path resolution and an operating-system sandbox
+- Fails closed when strict sandbox, allowed-path, or restricted/none network controls are unavailable
 - Respects `runtime.timeout_ms`
 - Enforces `approval.policy` locally (see "Approval Gates" below)
 
 The audit log (`~/.agentcli/state/audit.ndjson`) records every execution with identity, contract, timing, output hash, and (for gated tasks) `approval_used` details. Read it with `agentcli audit` or `agentcli audit --limit 10`.
 
-The audit record never includes environment variable values or stdin content (these may contain secrets). It records env key names and a boolean for stdin presence.
+The audit record never includes raw arguments, environment values, stdin, stdout, or stderr. It records audit-safe hashes and descriptors. Child processes inherit only a small operational allowlist; every other ambient variable requires explicit `shell.env` declaration or identity-provider materialization.
+
+Never place credentials in `shell.args` or prompts. Arguments may be visible in process listings and prompts may be persisted by a durable runtime. Use identity-provider env, file, or stdin materialization.
 
 ## Approval Gates
 
@@ -93,7 +95,7 @@ When a task declares `approval.policy: "manual"`, `agentcli exec` refuses to run
 
 ```
 agentcli exec manifest.json deploy-prod
-# -> { "ok": false, "error_type": "approval_required", ... }
+# -> { "ok": false, "code": "approval_required", "error_type": "validation_error", ... }
 
 agentcli approve manifest.json deploy-prod --by alex --reason "tuesday deploy"
 # -> { "ok": true, "approval": { "approval_id": "...", "signature": {...} } }
@@ -102,16 +104,16 @@ agentcli exec manifest.json deploy-prod
 # -> { "ok": true, "approval_used": { "approval_id": "...", "approver": "alex", ... } }
 
 agentcli exec manifest.json deploy-prod
-# -> { "ok": false, "error_type": "approval_required", ... }   # single-use: consumed
+# -> { "ok": false, "code": "approval_required", "error_type": "validation_error", ... }   # single-use: consumed
 ```
 
 Properties of the local gate:
 
 - **Single-use.** Each grant is consumed before `spawnSync` (fail-closed: a crashed execution still consumes the grant). Retrying requires a new approval.
-- **Hash-bound.** The grant is tied to a canonical hash over `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `approval.policy`, and `approval.risk_level`. Editing any of those invalidates prior grants.
-- **Dry-run bypasses.** `--dry-run` runs without needing or consuming an approval.
-- **ssh-signed by default.** Grants carry a signature over the canonical payload, verified against `~/.agentcli/state/allowed_signers`. Tampered grants are refused (`error_type: approval_signature_invalid`).
-- **`auto-reject` is absolute.** A task with `approval.policy: "auto-reject"` is refused even with an approval record (`error_type: approval_auto_rejected`).
+- **Complete-binding hash.** The grant binds the canonical manifest and effective execution configuration, including hashed command inputs, profiles, contract, proof, evidence, output, postcondition, approver scope, and timeout. Any bound change invalidates the grant.
+- **Static dry-run.** `--dry-run` neither needs nor consumes an approval and performs no proof, provider, sandbox, signing, evidence, postcondition, or audit side effects.
+- **ssh-signed by default.** Grants carry a signature over the canonical payload, verified against `~/.agentcli/state/allowed_signers`. Tampered grants are refused with detailed `code: approval_signature_invalid` and closed `error_type: validation_error`.
+- **`auto-reject` is absolute.** A task with `approval.policy: "auto-reject"` is refused even with an approval record, using detailed `code: approval_auto_rejected` and closed `error_type: validation_error`.
 
 Grants live in `~/.agentcli/state/approvals.ndjson` (append-only: grant, consume, and revoke events). List them with `agentcli approvals list`; revoke with `agentcli approvals revoke <approval-id>`.
 

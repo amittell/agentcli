@@ -210,11 +210,11 @@ All budget fields, when present, must be integers >= 1.
 | `required` | boolean | No | -- | Whether approval is required. Superseded by `policy` when both are present. |
 | `policy` | string | No | `manual`, `auto-approve`, `auto-reject` | Approval gate policy. Takes precedence over `required`. |
 | `risk_level` | string | No | `low`, `medium`, `high` | Risk classification. |
-| `approver_scope` | string (token) | No | -- | Scope or group that may approve. Restricted token. |
+| `approver_scope` | string (token) | No | -- | Exact approver, `principal:<value>`, `user:<value>`, or `domain:<value>`. Restricted token. |
 | `timeout_s` | integer | No | >= 1 | Approval timeout in seconds. |
 | `auto` | string | No | `approve`, `reject` | Direct override for auto-resolution on timeout. Explicit value takes precedence over inference from `policy`. |
 
-`agentcli exec` enforces `policy` locally (see spec.md): `manual` requires a matching record in `~/.agentcli/state/approvals.ndjson` created via `agentcli approve`, `auto-reject` refuses unconditionally, `auto-approve` or absent runs freely. `--dry-run` bypasses the gate. The approval record is bound to a canonical hash over `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `policy`, and `risk_level`.
+`agentcli exec` enforces `policy` locally (see spec.md): `manual` requires a matching record in `~/.agentcli/state/approvals.ndjson` created via `agentcli approve`, `auto-reject` refuses unconditionally, and `auto-approve` or absent runs freely. The approval record binds the canonical manifest and complete effective execution configuration, including hashed command inputs, resolved profiles, contract, proof, evidence, output, and postcondition. `approver_scope` and `timeout_s` are enforced at grant and consumption. Unexpected unsigned records fail verification; only an explicit `--signer none` grant is accepted unsigned. `--dry-run` is static and does not consume or enforce the gate.
 
 ---
 
@@ -284,7 +284,7 @@ When `ref` is present, the referenced profile is loaded first, then inline field
 
 Runs a shell command after the main task succeeds. Workflow-level `verify` acts as the default for tasks; a task-level `verify` replaces the workflow block and omitted optional fields fall back to built-in defaults.
 
-In the v0.2 execution pipeline, `verify` runs after evidence generation. Evidence and attestation therefore describe the main command result; the `verify` outcome is recorded separately and can still flip the final task status according to `on_failure`. If operators need end-to-end proof that includes the verification step, model that requirement in the evidence payload rather than assuming `verify` is part of the attested result.
+In the v0.2 execution pipeline, `verify` runs before evidence generation. The complete evidence payload binds the main result and the postcondition outcome. A verify failure can fail the task or become a warning according to `on_failure`.
 
 | Field | Type | Required | Values | Description |
 |-------|------|----------|--------|-------------|
@@ -318,6 +318,8 @@ In the v0.2 execution pipeline, `verify` runs after evidence generation. Evidenc
 | `delegation_policy` | object | No | -- | Delegation constraints. See [delegation_policy](#identity-auth-delegation-policy-fields). |
 | `provider_config` | object | No | -- | Provider-specific configuration. Free-form. |
 | `inputs` | object | No | -- | Named values using `value_from` indirection. Each value is a [value_from](#value_from-fields) object. |
+
+Caching, automatic refresh, and credential handoff are capability-gated. If a profile requests one of these behaviors and the selected executor/provider cannot implement it, validation or execution fails closed instead of silently degrading.
 
 ### Identity Auth Delegation Policy Fields
 
@@ -417,9 +419,9 @@ Each element in the `bindings` array is an object with these fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `required` | boolean | No | Whether verification must succeed before execution proceeds. |
+| `required` | boolean | No | Must not be true for `method: "none"`. Every non-`none` method is always verified. |
 
-For `jwt`, `verify.required: true` requires either `public_key` or `jwks_uri`.
+For `jwt`, `public_key` or `jwks_uri` is required and the signed claims must include the canonical manifest digest. Detached-signature and certificate profiles likewise require their method-specific trust material and manifest binding. Use `method: "none"` for an intentionally unverifiable declaration.
 
 ---
 
@@ -437,7 +439,7 @@ For `jwt`, `verify.required: true` requires either `public_key` or `jwks_uri`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `required` | boolean | No | Whether verification is required for this scope. |
+| `required` | boolean | No | Scope policy overlay. It cannot weaken verification for a non-`none` method. |
 
 ---
 
@@ -549,6 +551,8 @@ Current include values are:
 |-------|------|----------|-------------|
 | `required` | boolean | No | Whether evidence verification is required for this scope. |
 
+Generated evidence uses a complete versioned canonical payload bound to the manifest digest, effective task hash, execution id, audit-safe identity and command descriptors, result, and postcondition. Raw credentials, stdin, stdout, and stderr are excluded. Verification rejects payload changes and cross-execution transplantation.
+
 ---
 
 ## Contract Fields
@@ -564,6 +568,8 @@ Workflow-level `contract` acts as a default for tasks. Task-level overrides key 
 | `audit` | string | No | `none`, `on-failure`, `always` | Audit trail strategy. Default: `always` for exec. |
 | `required_trust_level` | string | No | `untrusted`, `restricted`, `supervised`, `autonomous` | Minimum trust level for execution (v0.2). Must not exceed the resolved identity's `trust.constraints.max_autonomy`. |
 | `trust_enforcement` | string | No | `none`, `advisory`, `strict` | How trust level mismatches are handled (v0.2). Default: `none`. |
+
+For direct shell execution, restrictive sandbox, allowed-path, and network requests must be enforceable on the current host or execution fails closed. `exec --dry-run` does not probe that host boundary; it returns a static plan and marks live phases skipped.
 
 ---
 
@@ -610,7 +616,7 @@ Used for credential and proof inputs that must not be hardcoded. At least one so
 | `env` | string | No | Environment variable name. |
 | `file` | string | No | File path. The file should have restrictive permissions. |
 | `literal` | string | No | Inline value. Use sparingly. Not allowed in all contexts. |
-| `command` | string | No | Shell command to run. stdout is captured. 30s timeout. |
+| `command` | string | No | Shell command to run. stdout is captured with a 30s timeout. Proof commands run only after local approval; scheduler apply disables them by default and requires explicit caller opt-in. |
 
 ---
 

@@ -1,6 +1,6 @@
 # Runtime Integration Backlog
 
-Date: 2026-03-28
+Date: 2026-07-11
 
 ## Purpose
 
@@ -25,7 +25,7 @@ Do not:
 
 Allowed inside `agentcli` (non-durable, single-machine scope):
 
-- local enforcement of `approval.policy` for direct `exec` via single-use, ssh-signed, task-hash-bound grants in an append-only ndjson state file (`approvals.ndjson`). This is an authoring-time policy enforced at local execution time; it is not a queue, has no timeout resolver, no multi-actor routing, and no cron coupling.
+- local enforcement of `approval.policy` for direct `exec` via single-use, signed grants bound to the complete effective execution configuration in an append-only ndjson state file (`approvals.ndjson`). This is an authoring-time policy enforced at local execution time; it is not a queue, has no timeout resolver, no multi-actor routing, and no cron coupling.
 
 ## Current State
 
@@ -33,6 +33,15 @@ Allowed inside `agentcli` (non-durable, single-machine scope):
 - `openclaw-scheduler` is already a real runtime for `shell`, `isolated`, and `main` execution targets.
 - `openclaw-scheduler` currently depends on OpenClaw gateway/session APIs for prompt-task execution.
 - OpenClaw already exposes the gateway/session runtime surface the scheduler builds on: typed WebSocket control-plane APIs, device/auth handshakes, session lifecycle APIs, and built-in cron/heartbeat automation.
+
+Current control-plane hardening:
+
+- local approvals bind the complete effective execution configuration, enforce scope and timeout, and run before all live side effects
+- scheduler apply queries live capabilities and treats reported values as authoritative, with conservative static fallback values only for unavailable keys
+- scheduler handoff versions 1, 2, and 3 are explicit; version 3 carries approval risk, approver scope, and output format
+- root approval gates, approver scope, structured output, proof, authorization, trust, evidence, and credential handoff fail capability negotiation when required support is absent
+- scheduler compilation refuses raw `shell.env` and `shell.stdin` persistence and compiles `auto-reject` jobs disabled
+- CI provisions a pinned scheduler checkout so missing cross-repository integration cannot silently skip the suite
 
 ## Scheduling Boundary
 
@@ -55,13 +64,15 @@ To avoid duplicating automation semantics across all three repos:
 
 Owner: `agentcli` + `openclaw-scheduler`
 
-Problem:
+Status: implemented in the `agentcli` control plane. Each scheduler release remains responsible for accurately advertising its runtime surface.
+
+Original problem:
 
 - `agentcli` hardcodes target capability flags for `openclaw-scheduler`.
 - `apply` currently compensates locally when runtime capabilities are missing.
 - Capability drift will get worse as `openclaw-scheduler` adds more `v0.2` support.
 
-Backlog:
+Implemented contract:
 
 1. Add a machine-readable scheduler capability endpoint/command.
 2. Version the capability payload separately from human-facing docs.
@@ -73,7 +84,7 @@ Backlog:
    - `credential_handoff`
    - `evidence_generation`
    - `runtime_identity_resolution`
-4. Make `agentcli apply` optionally query the runtime before execution.
+4. Make `agentcli apply` query the runtime before governed execution.
 5. Fall back to conservative static flags only when the runtime is unreachable or too old.
 6. Emit clear mismatch errors when the manifest requires a capability the runtime does not advertise.
 
@@ -112,6 +123,8 @@ Acceptance criteria:
 ## Workstream C: Harden the Handoff Boundary
 
 Owner: `agentcli` + `openclaw-scheduler`
+
+Status: versioned field projection through handoff v3 and negative capability tests are implemented in `agentcli`; runtime releases must opt into each version and feature.
 
 Problem:
 
@@ -213,6 +226,8 @@ Acceptance criteria:
 ## Workstream G: Cross-Repo Testing
 
 Owner: `agentcli` + `openclaw-scheduler` + OpenClaw (where available)
+
+Status: CI checks out an exact scheduler commit, verifies its capability command, and runs the agentcli scheduler integration tests. Broader gateway-backed end-to-end scenarios remain future cross-repository work.
 
 Backlog:
 

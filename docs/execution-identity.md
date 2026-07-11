@@ -4,21 +4,21 @@
 
 This document describes the execution identity architecture for `agentcli` manifest spec `0.2`.
 
-Implementation status as of 2026-03-23:
+Implementation status as of 2026-07-11:
 
-- Phases 1-6 are complete
+- The local execution pipeline is complete from static binding through approval, proof, identity, authorization, sandbox enforcement, execution, postcondition, evidence, audit, and cleanup
 - All eleven identity providers are shipped: none, env-bearer, file-bearer, oidc-client-credentials, oidc-token-exchange, azure-managed-identity, aws-sts-assume-role, gcp-workload-identity, spiffe-jwt-svid, entra-agent-id, stripe-api-key
 - Authorization providers: none, opa
 - Evidence providers: none, ssh
 - Authorization proof verifiers: none, jwt, detached-signature, certificate
 - All provider targets from the original spec are implemented, including `entra-agent-id`
-- v0.1 backward compatibility is preserved: v0.1 manifests execute through the original code path unchanged
+- v0.1 compatibility is preserved through its synchronous execution path, with shared security guarantees for static dry-run, approval ordering, child-environment sanitization, and audit-safe command metadata
 
 This spec is normative for `0.2` and backward-compatible with `0.1`.
 
 ## Problem
 
-`agentcli` currently has the beginnings of an identity model:
+`agentcli` provides an execution identity model built around:
 
 - `identity` fields on workflows and tasks
 - `contract` fields on workflows and tasks
@@ -26,16 +26,7 @@ This spec is normative for `0.2` and backward-compatible with `0.1`.
 - attestation signing
 - append-only audit records
 
-That is directionally correct, but the current architecture is still incomplete.
-
-Current limitations:
-
-- `identity` is mostly declarative metadata, not a first-class runtime abstraction
-- signing providers are treated as the main identity extension point, even though signing and authentication are different concerns
-- manifest-time identity declaration and execution-time proof are partially conflated
-- credential acquisition is not modeled generically
-- credential presentation to tools is not modeled explicitly
-- compile targets do not yet preserve enough structured identity intent for richer runtimes
+The implementation separates identity providers, authorization proof verifiers, authorization providers, signing providers, and evidence providers. It validates provider profiles before network access, materializes credentials only after approval, capability-gates caching, refresh, delegation, and handoff, and cleans up provider artifacts on success or failure. Compile targets preserve audit-safe identity intent while removing raw provider inputs and credential values.
 
 This matters because agent workflows increasingly need:
 
@@ -94,7 +85,7 @@ The IETF published `draft-klrc-aiagent-auth-00` in March 2026, defining the Agen
 - Prefer structured machine-readable data over prose.
 - Never require raw secrets in manifests.
 - Make audit and evidence first-class outputs, not side effects.
-- Make dangerous fallbacks explicit.
+- Reject dangerous or unenforceable fallbacks by default.
 - Compose existing standards rather than inventing new protocols. The IETF AIMS framework validates this: "No new authentication protocol is needed specifically for AI agents."
 - Distinguish stable subject identity, runtime instance attribution, and per-run execution identifiers. `execution_id` is universal; instance attribution is additional runtime metadata when available.
 - Model delegation chains explicitly so that authority provenance is traceable and auditable.
@@ -421,8 +412,8 @@ An identity profile defines subject intent, authentication requirements, and cre
     ],
     "audience": null,
     "resource": null,
-    "cache": "memory",
-    "refresh": "auto",
+    "cache": "none",
+    "refresh": "never",
     "required": true,
     "delegation_policy": {
       "max_depth": 3,
@@ -555,6 +546,8 @@ Rules for `auth.cache`:
 - `state` introduces credentials at rest; operators SHOULD prefer `memory` unless cross-run reuse is required
 - cached sessions MUST still be validated against the current manifest profile before reuse; if the profile has changed, the cache entry MUST be invalidated
 - `auth.cache` defaults to `none` when not specified
+
+The local shell executor advertises no credential cache, refresh, or downstream handoff boundary. Local profiles therefore use `cache: "none"`, `refresh: "never"`, and `handoff: "none"`; requesting more fails closed. A durable runtime may support other values only when its capability response and selected provider both advertise them.
 
 Proposed enums for `auth.refresh`:
 
@@ -816,7 +809,7 @@ Each authorization proof profile MUST contain:
 
 Proposed enums for `method`:
 
-- `jwt` -- the proof is a signed JWT; verification checks the signature against the declared `issuer`'s JWKS or a configured public key. When `verify.required` is `true`, the profile MUST provide `jwks_uri` or `public_key`.
+- `jwt` -- the proof is a signed JWT; verification checks the signature against the declared `issuer`'s JWKS or a configured public key, requires `jwks_uri` or `public_key`, and binds a canonical manifest digest claim
 - `detached-signature` -- the proof is a detached signature over the manifest payload (or a specified subset); verification checks the signature against a configured public key or allowed_signers file
 - `certificate` -- the proof is a certificate chain; verification checks the chain against a configured trust anchor
 - `none` -- no proof is attached; this is valid only when `verify.required` is `false` and exists for development or opt-out scenarios
@@ -838,15 +831,16 @@ The valid claim names depend on the `method`:
 - for `detached-signature`: claims are not applicable; if present, they are ignored
 - for `certificate`: `subject` (DN or SAN), `issuer` (CA DN); the verifier SHOULD validate declared claims against the certificate fields
 
-Custom claims (e.g., `workflow_scope`) are method-specific and validated by the verifier. Unknown claims that the verifier cannot validate SHOULD cause a warning, not a hard failure, unless `verify.required` is `true` and the verifier's policy treats unknown claims as errors.
+Custom claims (e.g., `workflow_scope`) are method-specific and validated by the verifier. A declared claim that the verifier cannot validate MUST NOT be treated as verified.
 
 Rules:
 
 - authorization proof profiles describe manifest-time proof only; they MUST NOT be used for runtime credential acquisition
 - authorization proof values MAY use `value_from` indirection and MUST NOT require inline raw secrets in the manifest
-- `verify.required: true` means the execution stage responsible for verification MUST reject the execution unit if the proof cannot be verified; this is local `exec`, `apply` for backends that lack `authorization_proof_verification`, or a capable backend runtime
-- authorization proof verification happens before execution-time identity resolution
-- for local `exec`, authorization proof verification occurs during Phase 1
+- every method other than `none` MUST verify cryptographically and bind the canonical manifest, regardless of `verify.required`; missing trust material or binding rejects the execution unit
+- `method: "none"` is the explicit representation for an informational or unverifiable legacy declaration
+- authorization proof verification happens after the local approval gate and before execution-time identity resolution
+- for local `exec`, authorization proof verification occurs during Phase 1 after Phase 0.5 approval
 - for backend targets, verification occurs at execution time only when the target advertises `authorization_proof_verification`; otherwise `apply` MUST verify each resolved execution unit's proof before handoff and MUST persist only audit-safe verification summaries bound to the corresponding manifest digest and execution-unit scope
 - compiled artifacts and persisted backend specs MUST NOT embed raw authorization proof values unless the target explicitly models secure proof retrieval and verification
 - authorization proof metadata included in audit records MUST be audit-safe and MUST NOT expose raw tokens or detached signature payloads
@@ -1232,6 +1226,8 @@ When `auth.cache` is `state`, the same reuse rules apply across workflow runs, w
 
 When `auth.cache` is `none`, a fresh session is always resolved. This is the safest default and SHOULD be used when tasks have different scopes or audiences even if they reference the same profile.
 
+The reuse rules above apply only to runtimes that explicitly advertise credential caching. The local `agentcli exec` and `run` paths do not cache sessions.
+
 ### Merge Rules
 
 - scalar values replace parent values
@@ -1615,7 +1611,23 @@ The current `ssh` and `none` signing providers map cleanly to this model.
 
 ## Execution Lifecycle
 
-`agentcli exec` should evolve into the following pipeline.
+`agentcli exec` implements the following pipeline.
+
+### Phase 0: Static Preparation
+
+- load and validate the manifest
+- expand shorthands and select the workflow and task
+- compute the canonical manifest digest and secret-safe effective execution binding
+- return immediately for `--dry-run`, with every live phase marked `skipped`
+
+A dry run does not consume an approval, run proof commands, resolve providers, contact network endpoints, probe a sandbox, materialize credentials, sign evidence, run postconditions, or write audit records.
+
+### Phase 0.5: Approval and Runtime Boundary
+
+- reject `auto-reject` tasks or atomically consume a matching manual approval
+- verify approval signature, complete effective execution hash, approver scope, and timeout
+- resolve signing configuration and require requested sandbox, path, and network enforcement
+- complete this phase before proof commands, provider calls, or credential work
 
 ### Phase 1: Manifest Loading
 
@@ -1654,6 +1666,7 @@ The current `ssh` and `none` signing providers map cleanly to this model.
 
 - evaluate allowed paths
 - evaluate network and sandbox expectations
+- fail closed when a restrictive boundary is requested but unavailable
 - evaluate audit policy
 - when `contract.required_trust_level` is present, evaluate the resolved trust level against it before execution
 - when trust matches the contract floor, continue normally
@@ -1698,7 +1711,7 @@ Credentials are resolved in Phase 2 and materialized in Phase 3. Once a tool beg
 This is a known limitation for local exec with long-running tasks. Mitigations:
 
 - operators SHOULD ensure credential lifetimes exceed expected task duration
-- for tasks with unpredictable duration, providers SHOULD issue credentials with generous lifetimes or operators SHOULD use `auth.refresh: "auto"` so that pre-execution refresh extends the window
+- for tasks with unpredictable duration, providers SHOULD issue credentials with sufficient lifetimes; a durable runtime MAY use `auth.refresh: "auto"` only when both runtime and provider advertise refresh support
 - `agentcli` records `credentials.expires_at` in the audit record so that operators can detect tasks that ran past credential expiry
 - future runtime backends MAY implement mid-execution refresh when the backend models long-lived sessions natively
 
@@ -1709,27 +1722,22 @@ This is a known limitation for local exec with long-running tasks. Mitigations:
 - compute command and result hashes
 - parse structured output when requested
 
-### Phase 6: Evidence
-
-- build canonical evidence payload
-- collect compliance context metadata if configured (model version, policy version, tool versions)
-- attest the execution if configured
-- verify evidence if required by policy
-
-Evidence verification occurs after execution (Phase 5) has already completed. A verification failure does not undo execution. Instead:
-
-- `evidence.verified` is set to `false` in the audit record
-- when `verify.required` is `true` in the evidence profile, a verification failure causes `agentcli exec` to return a non-zero exit code even if the tool itself succeeded; the audit record includes the tool's actual result alongside the verification failure
-- when `verify.required` is `false`, a verification failure is recorded as a warning but does not affect the exit code
-- the evidence envelope (including the failed verification status) is always written to the audit record so that operators can investigate
-
-### Phase 6.5: Post-execution Verify
+### Phase 6: Post-execution Verify
 
 - only enter this phase when the main command exited successfully and a workflow/task `verify` block resolves
 - run the declared verify shell in the task's effective execution context
-- treat `verify` as an operator-local postcondition separate from evidence attestation; the attested evidence payload reflects the main command result, not the later verify shell outcome
+- record the postcondition outcome for the subsequent evidence binding
 - when `verify.on_failure` is `error`, return a non-zero status after cleanup and audit
 - when `verify.on_failure` is `warn`, record the verify failure as a warning without changing the exit code
+
+### Phase 6.5: Evidence
+
+- build a complete versioned canonical evidence payload after post-execution verification
+- bind the manifest digest, effective task hash, execution id, audit-safe identity and command metadata, result, and postcondition
+- exclude raw credentials, stdin, stdout, and stderr
+- collect configured compliance context, attest, and verify the envelope
+- reject required evidence that cannot be produced or verified and record the failure safely
+- detect payload changes and an envelope transplanted to another execution
 
 ### Phase 7: Audit
 
@@ -1741,6 +1749,7 @@ Evidence verification occurs after execution (Phase 5) has already completed. A 
 - include trust level and authorization decision
 - include runtime instance attribution when available
 - include handoff mode
+- include the complete evidence envelope needed for later independent verification
 
 ### Phase 8: Cleanup
 
@@ -1905,7 +1914,7 @@ Rules for resolution failures:
 
 ### Authorization Proof Failure Records
 
-When manifest authorization proof verification (Phase 1) fails and `verify.required` is `true`, the runtime MUST reject the manifest before identity resolution begins. A failure record SHOULD still be written to audit:
+When a non-`none` manifest authorization proof fails verification in Phase 1, the runtime MUST reject the task before identity resolution begins. A failure record SHOULD still be written to audit according to the audit policy:
 
 ```json
 {
@@ -1930,10 +1939,10 @@ When manifest authorization proof verification (Phase 1) fails and `verify.requi
 
 Rules:
 
-- when authorization proof verification fails with `verify.required: true`, all subsequent phases (2-8) are skipped except audit (Phase 7)
+- when a non-`none` authorization proof fails verification, all subsequent live phases are skipped except audit and cleanup
 - `declared_identity` is `null` because identity resolution never began
 - the `authorization_proof.error` field contains a human-readable reason that MUST NOT expose raw proof values
-- when `verify.required` is `false` and verification fails, the failure is recorded as a warning and execution proceeds normally
+- `verify.required: false` does not weaken a cryptographic method; only `method: "none"` opts out of cryptographic verification
 
 ### Audit Rules
 
@@ -2013,7 +2022,7 @@ It MUST NOT:
 
 ### Target Capability Model
 
-Future target capabilities SHOULD distinguish:
+Target capabilities distinguish:
 
 - `identity_declaration`
 - `runtime_identity_resolution`
@@ -2024,10 +2033,13 @@ Future target capabilities SHOULD distinguish:
 - `credential_handoff`
 - `authorization_proof_verification`
 - `authorization_hook`
+- `root_approval_gate`
+- `approval_scope_enforcement`
+- `structured_output_format`
 
 ## CLI Design
 
-### Proposed Commands
+### Current Commands
 
 - `agentcli authorization-proof methods`
 - `agentcli authorization-proof schema <method>`
@@ -2064,7 +2076,7 @@ No CLI flag should elevate or directly override the resolved trust level for an 
 
 ## JSON-RPC Design
 
-### Proposed Methods
+### Current Methods
 
 - `agentcli.authorizationProof.methods`
 - `agentcli.authorizationProof.schema`
@@ -2078,7 +2090,14 @@ No CLI flag should elevate or directly override the resolved trust level for an 
 - `agentcli.authorization.evaluate`
 - `agentcli.evidence.providers`
 - `agentcli.evidence.schema`
-- `agentcli.exec`
+- `agentcli.targets`
+- `agentcli.paths`
+- `agentcli.audit`
+- `agentcli.approvals.list`
+- `agentcli.registry.list`
+- `agentcli.registry.show`
+
+See [protocol.md](protocol.md) for the authoritative parameter and envelope definitions.
 - `agentcli.audit`
 
 ### Result Shapes
@@ -2348,7 +2367,7 @@ Implementation note: All eleven identity providers are fully implemented and fun
 
 - [DONE] v0.1 to v0.2 conversion utility (`src/convert.js`, CLI `agentcli convert`, RPC `agentcli.convert`)
 - [DONE] v0.2 example manifest (`examples/identity-v2.json`)
-- [DONE] v0.2 test coverage -- 365 total tests including 12 end-to-end integration tests (credential materialization, trust enforcement, authorization proof rejection, evidence generation, file-bearer e2e, validation of malformed profiles)
+- [DONE] v0.2 test coverage for credential materialization, trust enforcement, authorization proof rejection, evidence generation, file-bearer behavior, and malformed profile validation
 - [DONE] scheduler schema updated with v0.2 flat fields
 - [DONE] comprehensive v0.2 profile validation in `validateManifest` (identity profiles, authorization proof profiles, authorization profiles, evidence profiles, cross-reference validation for dangling refs)
 - [DONE] v0.1 to v0.2 converter produces proper profile refs (not inline identity blocks)
@@ -2359,7 +2378,7 @@ The following decisions were made during implementation and differ from or exten
 
 #### v0.1/v0.2 Dual-Path Execution
 
-`exec.js` detects the manifest version and dispatches to entirely separate code paths rather than using a single unified path with conditionals. Detection logic: `manifest.version === '0.2' || Boolean(manifest.identity_profiles)`. This guarantees zero behavioral change for v0.1 manifests and avoids accidental regressions from v0.2 logic affecting v0.1 execution.
+`exec.js` detects the manifest version and dispatches to separate code paths rather than using a single unified path with conditionals. Detection logic: `manifest.version === '0.2' || Boolean(manifest.identity_profiles)`. The v0.1 path remains synchronous while sharing current security guarantees for static dry-run, approval-before-side-effects ordering, child-environment sanitization, and audit-safe bindings.
 
 #### `src/signing/` Preserved Alongside `src/evidence/`
 
@@ -2387,7 +2406,7 @@ Each provider file auto-registers with its registry on import (e.g., `import './
 
 #### JWT Verifier Signature Verification
 
-The JWT authorization proof verifier performs structural validation, temporal checks (exp/nbf), issuer and audience matching, and declared-claim checks without external dependencies. Cryptographic signature verification (RS256, ES256) is supported through either a configured `public_key` or a fetched `jwks_uri`, using Node's built-in `crypto.createVerify`. When `verify.required` is `true`, execution is rejected unless signature verification succeeds.
+The JWT authorization proof verifier performs structural validation, temporal checks (exp/nbf), issuer and audience matching, declared-claim checks, canonical manifest binding, and cryptographic signature verification without external dependencies. RS256 and ES256 use either a configured `public_key` or fetched `jwks_uri` through Node's built-in crypto APIs. Every JWT proof is rejected unless signature and manifest binding succeed, regardless of `verify.required`.
 
 #### Certificate Verifier Uses `crypto.X509Certificate`
 
@@ -2399,7 +2418,7 @@ The `file-bearer` identity provider checks file permissions via `statSync` and w
 
 #### Conversion Utility Attestation Mapping
 
-The v0.1 to v0.2 conversion utility maps legacy `identity.attestation` strings to `authorization_proof_profiles` entries by inferring the method from the attestation string content: strings containing "oidc" or "jwt" map to method `jwt`, strings containing "ssh" or "signature" map to `detached-signature`, strings containing "cert" or "x509" map to `certificate`, and all others map to `none`. Generated profile IDs use a `legacy-` prefix for traceability (e.g., `legacy-ssh-signature`).
+The v0.1 to v0.2 conversion utility maps legacy `identity.attestation` strings to informational `authorization_proof_profiles` entries with `method: "none"`. It preserves provenance without inventing public keys, trust anchors, signatures, or canonical manifest bindings that were absent from the source. Generated profile IDs use a `legacy-` prefix for traceability.
 
 #### Sync/Async Dual Dispatch in executeTask
 
@@ -2411,7 +2430,7 @@ When Phase 2 (identity resolution) fails, the runtime writes an audit record wit
 
 #### Authorization Proof Failure Audit Records
 
-When Phase 1 (authorization proof verification) fails with `verify.required: true`, the runtime writes an audit record with the merged declared identity, actor context, and proof verification summary before throwing. This captures pre-execution authorization failures in the audit trail.
+When Phase 1 authorization proof verification fails for any non-`none` method, the runtime writes an audit-safe failure record according to policy and throws before identity resolution. `verify.required: false` does not weaken a cryptographic method.
 
 #### OPA Authorization Provider
 
@@ -2423,7 +2442,7 @@ The `oidc-token-exchange` provider (`src/identity/oidc-token-exchange.js`) is th
 
 #### Scheduler Target Capability Defaults
 
-The openclaw-scheduler target declares `authorization_proof_verification: false` and `authorization_hook: false` because the scheduler runtime itself does not yet implement these capabilities. When these are false, `apply.js` verifies authorization proofs locally during apply (for proofs marked `verify.required: true`) and rejects manifests that declare authorization blocks. These flags can be flipped to `true` when the scheduler runtime adds native support.
+The openclaw-scheduler target uses conservative static defaults for security-sensitive capabilities. During apply, values reported by the live runtime are authoritative, including explicit `false`. If `authorization_proof_verification` is false, `apply.js` verifies every non-`none` proof locally before handoff. Authorization, trust, evidence, root approval, approver scope, structured output, and credential handoff declarations fail capability negotiation when the effective runtime feature map cannot enforce them.
 
 ## Rejected Alternatives
 

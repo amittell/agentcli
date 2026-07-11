@@ -51,7 +51,7 @@ function isValidGuidIfApplicable(value) {
  * @param {object} [env]     - Environment variable map, defaults to process.env.
  * @returns {string|null} The resolved value, or null if unresolvable.
  */
-function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd() } = {}) {
+function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd(), commandEnv = env } = {}) {
   if (!valueFrom) return null;
   if (valueFrom.env) {
     return env[valueFrom.env] || null;
@@ -64,7 +64,7 @@ function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd() } 
     }
   }
   if (valueFrom.command) {
-    return resolveCommandValue(valueFrom.command, { env, cwd });
+    return resolveCommandValue(valueFrom.command, { env, commandEnv, cwd });
   }
   return null;
 }
@@ -84,7 +84,7 @@ function resolveValueFrom(valueFrom, env = process.env, { cwd = process.cwd() } 
  * @param {string} blueprintAppId - The blueprint application ID (used for IMDS resource).
  * @returns {Promise<string|null>} The resolved client assertion, or null.
  */
-async function resolveClientAssertion(profile, env, blueprintAppId, cwd) {
+async function resolveClientAssertion(profile, env, blueprintAppId, cwd, commandEnv = env) {
   // 1. Environment variable
   const envAssertion = env.AGENTCLI_ENTRA_CLIENT_ASSERTION;
   if (typeof envAssertion === 'string' && envAssertion.length > 0) {
@@ -96,7 +96,7 @@ async function resolveClientAssertion(profile, env, blueprintAppId, cwd) {
 
   // 2. inputs.client_assertion.value_from
   if (inputs.client_assertion && inputs.client_assertion.value_from) {
-    const resolved = resolveValueFrom(inputs.client_assertion.value_from, env, { cwd });
+    const resolved = resolveValueFrom(inputs.client_assertion.value_from, env, { cwd, commandEnv });
     if (resolved) return resolved;
   }
 
@@ -105,7 +105,7 @@ async function resolveClientAssertion(profile, env, blueprintAppId, cwd) {
     return providerConfig.client_assertion;
   }
   if (providerConfig.client_assertion && typeof providerConfig.client_assertion === 'object' && providerConfig.client_assertion.value_from) {
-    const resolved = resolveValueFrom(providerConfig.client_assertion.value_from, env, { cwd });
+    const resolved = resolveValueFrom(providerConfig.client_assertion.value_from, env, { cwd, commandEnv });
     if (resolved) return resolved;
   }
 
@@ -277,6 +277,7 @@ const entraAgentIdProvider = {
   async resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
     const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
     const profile = request.profile || {};
     const providerConfig = (profile.auth && profile.auth.provider_config) || {};
     const auth = profile.auth || {};
@@ -293,7 +294,7 @@ const entraAgentIdProvider = {
     const subject = profile.subject || {};
 
     // 1. Resolve client assertion
-    const clientAssertion = await resolveClientAssertion(profile, env, blueprintAppId, cwd);
+    const clientAssertion = await resolveClientAssertion(profile, env, blueprintAppId, cwd, commandEnv);
 
     if (!clientAssertion) {
       const err = new Error(
@@ -429,11 +430,13 @@ const entraAgentIdProvider = {
     }
 
     const env = (ctx && ctx.env) || process.env;
+    const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
 
     // Resolve client assertion for the downscope request
     const clientAssertion = await resolveClientAssertion({
       auth: { provider_config: assertions },
-    }, env, blueprintAppId);
+    }, env, blueprintAppId, cwd, commandEnv);
 
     if (!clientAssertion) {
       return { prepared: false, reason: 'client assertion not available for downscope token request' };

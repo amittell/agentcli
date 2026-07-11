@@ -1,11 +1,30 @@
-import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, mkdirSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { validateManifest } from './validate.js';
 import { getAgentcliPaths } from './home.js';
 
 function registryDir({ env = process.env } = {}) {
   const paths = getAgentcliPaths({ env });
-  mkdirSync(paths.registry, { recursive: true });
+  if (existsSync(paths.registry) && lstatSync(paths.registry).isSymbolicLink()) {
+    throw Object.assign(
+      new Error('Refusing to use a registry directory that is a symbolic link'),
+      { code: 'invalid_argument' }
+    );
+  }
+  mkdirSync(paths.registry, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(paths.registry, 0o700);
   return paths.registry;
 }
 
@@ -28,6 +47,9 @@ export function listRegistry({ env } = {}) {
     const name = file.replace(/\.json$/, '');
     const filePath = join(dir, file);
     try {
+      if (lstatSync(filePath).isSymbolicLink()) {
+        return { name, workflows: [], parse_error: true, symlink_refused: true };
+      }
       const manifest = JSON.parse(readFileSync(filePath, 'utf8'));
       const workflows = (manifest.workflows || []).map(w => ({
         id: w.id,
@@ -57,7 +79,14 @@ export function addToRegistry(manifestOrPath, { name, env, cwd = process.cwd() }
       );
     }
 
-    manifest = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    try {
+      manifest = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    } catch (error) {
+      throw Object.assign(
+        new Error(`Invalid JSON in registry source ${resolvedPath}: ${error.message}`),
+        { code: 'parse_error' }
+      );
+    }
     derivedName = basename(resolvedPath, extname(resolvedPath));
   } else {
     manifest = manifestOrPath;
@@ -75,10 +104,31 @@ export function addToRegistry(manifestOrPath, { name, env, cwd = process.cwd() }
   const entryName = name || derivedName;
   const dir = registryDir({ env });
   const filePath = entryPath(dir, entryName);
+  const overwritten = existsSync(filePath);
+  if (overwritten && lstatSync(filePath).isSymbolicLink()) {
+    throw Object.assign(
+      new Error(`Refusing to overwrite symbolic-link registry entry: "${entryName}"`),
+      { code: 'invalid_argument' }
+    );
+  }
 
-  writeFileSync(filePath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  let descriptor;
+  try {
+    descriptor = openSync(
+      filePath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    writeFileSync(descriptor, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  if (process.platform !== 'win32') chmodSync(filePath, 0o600);
 
-  return { name: entryName, path: filePath, overwritten: false };
+  return { name: entryName, path: filePath, overwritten };
 }
 
 export function showRegistryEntry(name, { env } = {}) {
@@ -91,8 +141,21 @@ export function showRegistryEntry(name, { env } = {}) {
       { code: 'invalid_argument' }
     );
   }
+  if (lstatSync(filePath).isSymbolicLink()) {
+    throw Object.assign(
+      new Error(`Refusing to read symbolic-link registry entry: "${name}"`),
+      { code: 'invalid_argument' }
+    );
+  }
 
-  return JSON.parse(readFileSync(filePath, 'utf8'));
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw Object.assign(
+      new Error(`Invalid JSON in registry entry "${name}": ${error.message}`),
+      { code: 'parse_error' }
+    );
+  }
 }
 
 export function removeFromRegistry(name, { env } = {}) {
