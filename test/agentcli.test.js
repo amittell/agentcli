@@ -4061,8 +4061,15 @@ test('exec allows cwd under an allowed path', () => {
         }]
       }]
     };
-    const result = executeTask(manifest, { taskId: 't' });
-    assert.equal(result.ok, true);
+    if (resolveSandboxSupport()) {
+      const result = executeTask(manifest, { taskId: 't' });
+      assert.equal(result.ok, true);
+    } else {
+      assert.throws(
+        () => executeTask(manifest, { taskId: 't' }),
+        error => error.code === 'sandbox_enforcement_unavailable'
+      );
+    }
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
