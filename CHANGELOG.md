@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2026-07-11)
+## 0.4.0 (2026-07-11)
 
 - security: manual approvals now bind the canonical manifest and complete effective execution configuration, enforce `approver_scope` and `timeout_s`, reject unexpected unsigned records, and fail without writing a grant when signing fails
 - security: approval checks now run before proof commands, provider calls, sandbox probes, credential materialization, signing, and all other live side effects
@@ -12,7 +12,7 @@
 - validation: v0.2 nested objects reject unknown fields, provider-specific structural validation runs during manifest validation, and the default schema output is JSON Schema Draft 2020-12 with `--legacy` opt-in
 - CLI and JSON-RPC: strict flag parsing rejects unknown, duplicate, missing-value, and misplaced flags; RPC responses use stable result/error envelopes and add read-only targets, paths, audit, approvals, and registry discovery methods
 - execution: disabled tasks and branches are skipped by `agentcli run`; audit identifiers are collision-resistant and malformed audit lines are skipped with warnings
-- conversion and merge: v0.1 conversion maps unverifiable legacy attestations to `method: "none"`; merge preserves all v0.2 profile collections and detects conflicting profile definitions
+- conversion and merge: v0.1 conversion maps unverifiable legacy attestations to `method: "none"`; merge preserves same-version semantics and v0.2 profile collections, rejects mixed manifest versions, and detects conflicting profile definitions
 - scheduler: live capability values override static fallback values, handoff v3 preserves governed approval and output fields, auto-reject jobs compile disabled, and apply refuses inline `shell.env` or `shell.stdin`
 - examples: repaired invalid runtime timeout placement and fail-closed proof and credential-cache declarations; all published JSON examples are validated in the test suite
 - maintenance: minimum Node version is now 22.13.0 and CI also tests Node 24 with a pinned `openclaw-scheduler` integration checkout

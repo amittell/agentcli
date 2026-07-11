@@ -1,6 +1,6 @@
 {
   "name": "@amittell/agentcli",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Control plane for governed agent and CLI workflows with portable manifests, identity, approvals, and evidence.",
   "type": "module",
   "main": "./src/index.js",

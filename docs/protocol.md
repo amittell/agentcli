@@ -63,7 +63,7 @@ Purpose:
 
 Result:
 
-- `{ "ok": true, "package_version": "0.3.2", "manifest_version": "0.2" }`
+- `{ "ok": true, "package_version": "0.4.0", "manifest_version": "0.2" }`
 
 ### `agentcli.schema`
 

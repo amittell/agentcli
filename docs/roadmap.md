@@ -1,5 +1,7 @@
 # Roadmap
 
+The `v0.1` and `v0.2` headings below are manifest specification milestones, not npm package versions. Future work is intentionally unversioned until its compatibility boundary is defined.
+
 ## v0.1
 
 - Manifest schema
@@ -40,7 +42,7 @@
 - Draft 2020-12 JSON Schema output, strict nested validation, strict CLI flags, and read-only JSON-RPC discovery methods
 - Scheduler handoff v3, authoritative live capabilities, governed feature gates, auto-reject disabling, and refusal to persist inline shell credentials
 
-## v0.3
+## Future identity and runtime expansion
 
 - Additional Entra Agent ID governance features (Conditional Access policy integration, agent lifecycle hooks)
 - Mid-execution credential refresh for long-running tasks (runtime-managed session renewal)
@@ -51,7 +53,7 @@
 - Streaming watch / tail surfaces for runtime state
 - Scheduler lineage and causality queries
 
-## v0.4
+## Future integration surfaces
 
 - MCP server
 - Event streaming / NDJSON output
