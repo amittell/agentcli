@@ -176,7 +176,7 @@ const sshEvidenceProvider = {
    *
    * @param {object} config - Provider configuration (may contain key_path from value_from resolution).
    * @param {object} ctx    - Execution context (may contain env, homeDir).
-   * @returns {{ keyPath: string }|null} Resolved credentials, or null if no key found.
+   * @returns {{ keyPath: string, principal: string }|null} Resolved credentials, or null if no key found.
    */
   resolve(config = {}, ctx = {}) {
     const env = ctx.env || process.env;
