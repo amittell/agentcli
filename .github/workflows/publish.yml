@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENCLAW_SCHEDULER_REF: ac9ea643a8efc68e9f81c8d93125467ca62140b5
-      SCHEDULER_PATH: ${{ runner.temp }}/openclaw-scheduler
     steps:
       - uses: actions/checkout@v5
       - name: Check out pinned openclaw-scheduler
@@ -21,6 +20,8 @@ jobs:
           repository: amittell/openclaw-scheduler
           ref: ac9ea643a8efc68e9f81c8d93125467ca62140b5
           path: openclaw-scheduler
+      - name: Configure scheduler fixture path
+        run: echo "SCHEDULER_PATH=$RUNNER_TEMP/openclaw-scheduler" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
