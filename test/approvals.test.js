@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, statSync, symlinkSync, utimesSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, statSync, symlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Worker } from 'node:worker_threads';
@@ -21,6 +21,10 @@ import {
 import { executeTask } from '../src/exec.js';
 import { readAuditLog } from '../src/audit.js';
 import { getAgentcliPaths } from '../src/home.js';
+import {
+  buildEffectiveExecutionBinding,
+  canonicalExecutionBindingString,
+} from '../src/compiler/shared.js';
 
 function makeManifest({ approval, program = 'printf', args = ['ok'] } = {}) {
   return {
@@ -111,6 +115,153 @@ test('task hash is stable and binds shell+identity+risk', () => {
   const task3 = { ...task, approval: { policy: 'manual', risk_level: 'low' } };
   const h4 = computeTaskApprovalHash({ workflowId: 'test-wf', task: task3 });
   assert.notEqual(h1, h4);
+});
+
+test('task hash binds effective cwd, operational environment, timeout, and instance without raw values', () => {
+  const firstCwd = mkdtempSync(join(tmpdir(), 'agentcli-approval-cwd-a-'));
+  const secondCwd = mkdtempSync(join(tmpdir(), 'agentcli-approval-cwd-b-'));
+  try {
+    const manifest = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    manifest.workflows[0].tasks[0].shell.cwd = '.';
+    const workflow = manifest.workflows[0];
+    const task = workflow.tasks[0];
+    const envA = { PATH: '/approval/path-a', HOME: '/approval/home-a' };
+    const envB = { PATH: '/approval/path-b', HOME: '/approval/home-a' };
+    const base = {
+      manifest,
+      expanded: manifest,
+      workflow,
+      task,
+      env: envA,
+      cwd: firstCwd,
+      timeoutMs: 1000,
+      instanceId: 'instance-a',
+    };
+    const binding = buildEffectiveExecutionBinding(base);
+    const serialized = canonicalExecutionBindingString(binding);
+
+    assert.notEqual(computeTaskApprovalHash(base), computeTaskApprovalHash({ ...base, cwd: secondCwd }));
+    assert.notEqual(computeTaskApprovalHash(base), computeTaskApprovalHash({ ...base, env: envB }));
+    assert.notEqual(computeTaskApprovalHash(base), computeTaskApprovalHash({ ...base, timeoutMs: 2000 }));
+    assert.notEqual(computeTaskApprovalHash(base), computeTaskApprovalHash({ ...base, instanceId: 'instance-b' }));
+    assert.equal(serialized.includes('/approval/path-a'), false);
+    assert.equal(serialized.includes('/approval/home-a'), false);
+    assert.match(binding.command.env_hashes.PATH, /^sha256:[a-f0-9]{64}$/);
+  } finally {
+    rmSync(firstCwd, { recursive: true, force: true });
+    rmSync(secondCwd, { recursive: true, force: true });
+  }
+});
+
+test('exec refuses approvals minted for a different cwd, PATH, or timeout', async () => {
+  const { env, cleanup } = isolatedEnv();
+  const firstCwd = mkdtempSync(join(tmpdir(), 'agentcli-approval-exec-a-'));
+  const secondCwd = mkdtempSync(join(tmpdir(), 'agentcli-approval-exec-b-'));
+  try {
+    const manifest = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    manifest.workflows[0].tasks[0].shell.cwd = '.';
+
+    grantApproval({
+      manifest,
+      taskId: 'echo-task',
+      approver: 'alice',
+      cwd: firstCwd,
+      env,
+    });
+    await assert.rejects(
+      executeTask(manifest, { taskId: 'echo-task', cwd: secondCwd, env }),
+      error => error.code === 'approval_required'
+    );
+
+    const pathA = { ...env, PATH: '/approval/path-a' };
+    const pathB = { ...env, PATH: '/approval/path-b' };
+    grantApproval({
+      manifest,
+      taskId: 'echo-task',
+      approver: 'alice',
+      cwd: firstCwd,
+      env: pathA,
+    });
+    await assert.rejects(
+      executeTask(manifest, { taskId: 'echo-task', cwd: firstCwd, env: pathB }),
+      error => error.code === 'approval_required'
+    );
+
+    grantApproval({
+      manifest,
+      taskId: 'echo-task',
+      approver: 'alice',
+      cwd: firstCwd,
+      timeoutMs: 1000,
+      env,
+    });
+    await assert.rejects(
+      executeTask(manifest, { taskId: 'echo-task', cwd: firstCwd, timeoutMs: 2000, env }),
+      error => error.code === 'approval_required'
+    );
+  } finally {
+    rmSync(firstCwd, { recursive: true, force: true });
+    rmSync(secondCwd, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('exec refuses an approval after a symlinked cwd is retargeted', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const { env, cleanup } = isolatedEnv();
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-approval-cwd-link-'));
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  const linked = join(root, 'current');
+  try {
+    mkdirSync(first);
+    mkdirSync(second);
+    symlinkSync(first, linked);
+    const manifest = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    manifest.workflows[0].tasks[0].shell.cwd = '.';
+    grantApproval({
+      manifest,
+      taskId: 'echo-task',
+      approver: 'alice',
+      cwd: linked,
+      env,
+    });
+    rmSync(linked);
+    symlinkSync(second, linked);
+    await assert.rejects(
+      executeTask(manifest, { taskId: 'echo-task', cwd: linked, env }),
+      error => error.code === 'approval_required'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('exec uses the same bound relative cwd after approval', async () => {
+  const { env, cleanup } = isolatedEnv();
+  const cwd = mkdtempSync(join(tmpdir(), 'agentcli-approval-bound-cwd-'));
+  try {
+    const manifest = makeManifest({
+      approval: { policy: 'manual', risk_level: 'high' },
+      program: process.execPath,
+      args: ['-e', 'process.stdout.write(process.cwd())'],
+    });
+    manifest.workflows[0].tasks[0].shell.cwd = '.';
+    grantApproval({
+      manifest,
+      taskId: 'echo-task',
+      approver: 'alice',
+      cwd,
+      env,
+    });
+    const result = await executeTask(manifest, { taskId: 'echo-task', cwd, env });
+    assert.equal(result.result.stdout, realpathSync(cwd));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    cleanup();
+  }
 });
 
 test('grant writes a pending approval; list + find work', () => {

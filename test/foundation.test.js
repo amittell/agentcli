@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -22,7 +23,9 @@ import {
   ensureAgentcliHome,
   listRegistry,
   showRegistryEntry,
+  validateManifest,
   writeAuditRecord,
+  writeJsonOutput,
 } from '../src/index.js';
 
 function manifestWithSecrets() {
@@ -187,6 +190,22 @@ test('audit append refuses symbolic-link destinations', { skip: process.platform
   }
 });
 
+test('JSON output tightens permissions when overwriting an existing file', {
+  skip: process.platform === 'win32',
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-output-mode-'));
+  const outputPath = join(root, 'result.json');
+  try {
+    writeFileSync(outputPath, '{"old":true}\n', { mode: 0o644 });
+    chmodSync(outputPath, 0o644);
+    writeJsonOutput('result.json', { ok: true }, { cwd: root });
+    assert.equal(statSync(outputPath).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(outputPath, 'utf8')), { ok: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('registry refuses symbolic-link entries', { skip: process.platform === 'win32' }, () => {
   const home = mkdtempSync(join(tmpdir(), 'agentcli-registry-link-'));
   const env = { ...process.env, AGENTCLI_HOME: home };
@@ -268,4 +287,21 @@ test('v0.1 conversion produces unique valid profile ids for colliding principal 
   const ids = converted.identity_profiles.map(profile => profile.id);
   assert.equal(new Set(ids).size, 2);
   assert.equal(converted.version, '0.2');
+});
+
+test('complete manifest examples in the identity guide remain valid', () => {
+  const guide = readFileSync(new URL('../docs/guide-identity.md', import.meta.url), 'utf8');
+  const manifests = [...guide.matchAll(/```json\s*\n([\s\S]*?)```/g)]
+    .map(match => match[1])
+    .filter(block => /"version"\s*:/.test(block) && /"workflows"\s*:/.test(block))
+    .map(block => JSON.parse(block));
+  assert.ok(manifests.length >= 10);
+  for (const manifest of manifests) {
+    const validation = validateManifest(manifest);
+    assert.equal(
+      validation.ok,
+      true,
+      validation.errors.map(error => `${error.path}: ${error.message}`).join('; ')
+    );
+  }
 });

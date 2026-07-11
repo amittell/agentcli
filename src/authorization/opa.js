@@ -11,6 +11,20 @@
  */
 
 import { registerAuthorizationProvider } from './index.js';
+import { validateSecureEndpoint } from '../identity/session.js';
+
+function auditSafeEndpointReference(value) {
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
 
 const opaAuthorizationProvider = {
   name: 'opa',
@@ -35,6 +49,8 @@ const opaAuthorizationProvider = {
     const endpoint = profile?.provider_config?.endpoint;
     if (typeof endpoint !== 'string' || endpoint.trim() === '') {
       errors.push('provider_config.endpoint must be a non-empty string');
+    } else {
+      errors.push(...validateSecureEndpoint(endpoint, 'provider_config.endpoint'));
     }
 
     if (errors.length > 0) {
@@ -57,6 +73,11 @@ const opaAuthorizationProvider = {
    */
   async authorize(request, profile, _ctx) {
     const endpoint = profile.provider_config.endpoint;
+    const endpointErrors = validateSecureEndpoint(endpoint, 'provider_config.endpoint');
+    if (endpointErrors.length > 0) {
+      throw Object.assign(new Error(endpointErrors.join('; ')), { code: 'authorization_error' });
+    }
+    const policyRef = auditSafeEndpointReference(endpoint);
     const onError = profile.on_error || 'deny';
     const input = { input: request };
 
@@ -74,7 +95,7 @@ const opaAuthorizationProvider = {
           decision: 'permit',
           provider: 'opa',
           reason: 'authorization provider error (on_error: warn)',
-          policy_ref: endpoint,
+          policy_ref: policyRef,
         };
       }
       throw Object.assign(
@@ -89,7 +110,7 @@ const opaAuthorizationProvider = {
           decision: 'permit',
           provider: 'opa',
           reason: 'authorization provider error (on_error: warn)',
-          policy_ref: endpoint,
+          policy_ref: policyRef,
         };
       }
       throw Object.assign(
@@ -107,7 +128,7 @@ const opaAuthorizationProvider = {
           decision: 'permit',
           provider: 'opa',
           reason: 'authorization provider error (on_error: warn)',
-          policy_ref: endpoint,
+          policy_ref: policyRef,
         };
       }
       throw Object.assign(
@@ -136,7 +157,7 @@ const opaAuthorizationProvider = {
       decision,
       provider: 'opa',
       reason,
-      policy_ref: endpoint,
+      policy_ref: policyRef,
     };
   },
 

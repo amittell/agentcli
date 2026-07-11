@@ -4,11 +4,40 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { runCli, runWorkflow } from '../src/index.js';
+import { canonicalDigest, executeTask, runCli, runWorkflow } from '../src/index.js';
 
 function makeTempHome() {
   return mkdtempSync(join(tmpdir(), 'agentcli-run-'));
 }
+
+test('direct exec and workflow run bind the original manifest before shorthand expansion', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'source-digest',
+      name: 'Source Digest',
+      tasks: [{
+        id: 'root',
+        name: 'Root',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        on_failure: {
+          shell: { program: 'true', args: [] },
+          contract: { audit: 'none' },
+        },
+      }],
+    }],
+  };
+  const expectedDigest = canonicalDigest(manifest);
+  const direct = await executeTask(manifest, { taskId: 'root', signer: 'none' });
+  const run = await runWorkflow(manifest, { rootTaskId: 'root', signer: 'none' });
+  const root = run.tasks.find(task => task.source.task_id === 'root');
+
+  assert.equal(direct.manifest_digest, expectedDigest);
+  assert.equal(root.execution.manifest_digest, expectedDigest);
+});
 
 test('runWorkflow executes a shell DAG and evaluates trigger conditions', async () => {
   const manifest = {

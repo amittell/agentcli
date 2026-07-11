@@ -1,6 +1,34 @@
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { normalizeShellExecution, renderShellExecution } from '../shell.js';
 import { canonicalDigest, canonicalStringify, hashNullableString, hashString } from '../canonical.js';
+
+export const OPERATIONAL_ENV_KEYS = new Set([
+  'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP',
+  'LANG', 'SHELL', 'USER', 'LOGNAME', 'TZ', 'TERM',
+  'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT',
+]);
+
+export function buildChildEnvironment(env = {}, declaredEnv = {}) {
+  const inherited = {};
+  for (const [key, value] of Object.entries(env || {})) {
+    if (OPERATIONAL_ENV_KEYS.has(key) || key.startsWith('LC_')) {
+      inherited[key] = value;
+    }
+  }
+  return { ...inherited, ...declaredEnv };
+}
+
+export function resolveExecutionCwd(shellCwd, cwd = process.cwd()) {
+  const resolved = resolvePath(cwd, shellCwd || '.');
+  try {
+    return realpathSync(resolved);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return resolved;
+    throw error;
+  }
+}
 
 function isObjectLike(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -594,17 +622,21 @@ function bindEvidence(evidence) {
   };
 }
 
-export function commandBindingForShell(shell, { cwd = process.cwd() } = {}) {
+export function commandBindingForShell(shell, {
+  cwd = process.cwd(),
+  env = process.env,
+} = {}) {
   const normalized = normalizeShellExecution(shell || {});
+  const effectiveEnv = buildChildEnvironment(env, normalized.env || {});
   const envHashes = {};
-  for (const key of Object.keys(normalized.env || {}).sort()) {
-    envHashes[key] = hashString(normalized.env[key]);
+  for (const key of Object.keys(effectiveEnv).sort()) {
+    envHashes[key] = hashString(effectiveEnv[key]);
   }
   return {
     program: normalized.program,
     args_hashes: (normalized.args || []).map(arg => hashString(arg)),
     args_count: (normalized.args || []).length,
-    cwd: normalized.cwd || cwd,
+    cwd: resolveExecutionCwd(normalized.cwd, cwd),
     env_keys: Object.keys(envHashes),
     env_hashes: envHashes,
     stdin_hash: hashNullableString(normalized.stdin),
@@ -617,6 +649,9 @@ export function buildEffectiveExecutionBinding({
   workflow,
   task,
   cwd = process.cwd(),
+  env = process.env,
+  timeoutMs,
+  instanceId,
 } = {}) {
   if (!workflow || !task) {
     throw new TypeError('workflow and task are required to build an execution binding');
@@ -651,13 +686,20 @@ export function buildEffectiveExecutionBinding({
   return {
     binding_version: 1,
     manifest_version: expanded?.version ?? manifest?.version ?? null,
-    manifest_digest: expanded ? canonicalDigest(expanded) : null,
+    manifest_digest: manifest
+      ? canonicalDigest(manifest)
+      : expanded
+        ? canonicalDigest(expanded)
+        : null,
     source: { workflow_id: workflow.id, task_id: task.id },
     enabled: task.enabled ?? true,
     target: task.target ?? null,
-    command: task.shell ? commandBindingForShell(task.shell, { cwd }) : null,
+    command: task.shell ? commandBindingForShell(task.shell, { cwd, env }) : null,
     prompt_hash: hashNullableString(task.prompt),
-    runtime: { timeout_ms: task.runtime?.timeout_ms ?? null },
+    runtime: {
+      timeout_ms: timeoutMs ?? task.runtime?.timeout_ms ?? null,
+      instance_id: instanceId ?? null,
+    },
     approval: approvalPolicyForTask(task),
     identity: bindIdentity(identity),
     contract: resolveContract(workflow, task),

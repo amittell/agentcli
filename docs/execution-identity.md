@@ -2356,12 +2356,12 @@ Implementation note: `apply.js` was made async to support dynamic import of auth
 
 - [DONE] `oidc-client-credentials` as the initial cloud-neutral credential acquisition provider
 - [DONE] `oidc-token-exchange` for RFC 8693 token exchange (supports delegation chains and downscope handoff)
-- [DONE] add enterprise and cloud-specific providers: `azure-managed-identity` (IMDS), `aws-sts-assume-role` (STS with Signature V4), `gcp-workload-identity` (metadata server), `spiffe-jwt-svid` (Workload API + file-based SVID)
+- [DONE] add enterprise and cloud-specific providers: `azure-managed-identity` (IMDS), `aws-sts-assume-role` (STS with Signature V4), `gcp-workload-identity` (metadata server), `spiffe-jwt-svid` (cryptographically verified file-mounted SVID)
 - [DONE] `entra-agent-id` provider -- authenticates via Entra token endpoint with JWT bearer client assertion, supports IMDS fallback, GUID validation, downscope handoff, and delegation
 - [DONE] providers implement trust level capabilities from the start
 - [DONE] ship at least one authorization provider: `opa` provider implements OPA REST API integration via fetch()
 
-Implementation note: All eleven identity providers are fully implemented and functional. Enterprise providers (`azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`, `entra-agent-id`) use their platform's native metadata endpoints and fail with clear error messages when not running in the target environment. The `aws-sts-assume-role` provider includes a minimal AWS Signature V4 implementation using Node's built-in `crypto` module. The `spiffe-jwt-svid` provider supports both file-based SVID acquisition (for Kubernetes projected volumes) and HTTP-based Workload API access.
+Implementation note: All eleven identity providers are fully implemented within their documented boundaries. Enterprise providers fail with clear errors when required platform services or local trust material are unavailable. The `aws-sts-assume-role` provider includes a minimal AWS Signature V4 implementation using Node's built-in `crypto` module. The `spiffe-jwt-svid` provider deliberately supports only file-mounted JWT-SVID acquisition with local cryptographic trust material; it rejects Workload API sockets rather than approximating the gRPC protocol.
 
 ### Additional Implementation Items
 

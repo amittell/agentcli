@@ -27,6 +27,16 @@ function attestationProfileId(attestation) {
   return `legacy-${identifierSlug(attestation, 'attestation')}-${shortHash(attestation)}`;
 }
 
+function mergeLegacyIdentity(workflowIdentity, scopedIdentity) {
+  const base = workflowIdentity || {};
+  const scoped = scopedIdentity || {};
+  return {
+    principal: scoped.principal ?? base.principal ?? null,
+    run_as: scoped.run_as ?? base.run_as ?? null,
+    attestation: scoped.attestation ?? base.attestation ?? null,
+  };
+}
+
 /**
  * Add an authorization_proof_profile for the attestation if one does not
  * already exist in the converted manifest.
@@ -144,7 +154,10 @@ export function convertManifestV1toV2(manifest) {
     }
 
     for (const task of (workflow.tasks || [])) {
-      const taskProfileRef = ensureIdentityProfile(task.identity);
+      const effectiveTaskIdentity = task.identity
+        ? mergeLegacyIdentity(workflow.identity, task.identity)
+        : null;
+      const taskProfileRef = ensureIdentityProfile(effectiveTaskIdentity);
 
       const convertedTask = {
         ...task,
@@ -160,7 +173,11 @@ export function convertManifestV1toV2(manifest) {
       }
 
       if (task.on_failure?.identity) {
-        const failureProfileRef = ensureIdentityProfile(task.on_failure.identity);
+        const effectiveFailureIdentity = mergeLegacyIdentity(
+          workflow.identity,
+          task.on_failure.identity
+        );
+        const failureProfileRef = ensureIdentityProfile(effectiveFailureIdentity);
         convertedTask.on_failure = {
           ...task.on_failure,
           identity: failureProfileRef ? { ref: failureProfileRef } : null,

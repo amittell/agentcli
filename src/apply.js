@@ -255,7 +255,9 @@ export async function applyManifestToScheduler(
   const compiled = compileManifestToScheduler(manifest, { includeExplain });
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
-  const hasV02Features = compiled.jobs.some(jobRequiresCapabilityNegotiation);
+  const requiredHandoffVersion = requiredSchedulerFieldVersion(compiled.jobs);
+  const requiresCapabilityNegotiation =
+    requiredHandoffVersion > 1 || compiled.jobs.some(jobRequiresCapabilityNegotiation);
 
   // Construct the scheduler runner once; runtime capability negotiation is only
   // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
@@ -270,7 +272,7 @@ export async function applyManifestToScheduler(
   let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
   let handoffVersion = '1';
   let capabilityWarnings = [];
-  if (hasV02Features) {
+  if (requiresCapabilityNegotiation) {
     const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
 

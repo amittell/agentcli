@@ -30,6 +30,7 @@ const CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const FILE_PREFIX_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
 const KNOWN_MANIFEST_KEYS = new Set([
   'version', 'workflows',
@@ -81,7 +82,7 @@ const V2_KEYS = Object.freeze({
   trustConstraints: new Set(['escalation', 'max_autonomy', 'escalation_timeout', 'require_justification']),
   presentation: new Set(['bindings', 'handoff', 'cleanup', 'default_redaction']),
   presentationBinding: new Set(['source', 'target', 'required', 'redact', 'format']),
-  presentationTarget: new Set(['kind', 'name']),
+  presentationTarget: new Set(['kind', 'name', 'prefix', 'expose_as']),
   identity: new Set(['ref', 'scope', 'subject', 'auth', 'trust', 'presentation']),
   contract: new Set(['sandbox', 'allowed_paths', 'network', 'max_cost_usd', 'audit', 'required_trust_level', 'trust_enforcement']),
   authorizationProofRef: new Set(['ref', 'claims', 'verify']),
@@ -421,6 +422,18 @@ function validatePresentation(errors, path, value) {
         if (checkOptionalObject(errors, `${bp}.target`, binding.target)) {
           checkEnum(errors, `${bp}.target.kind`, binding.target.kind, ['env', 'file', 'stdin', 'none']);
           checkString(errors, `${bp}.target.name`, binding.target.name, { required: false });
+          checkString(errors, `${bp}.target.prefix`, binding.target.prefix, { required: false });
+          if (binding.target.prefix != null &&
+              typeof binding.target.prefix === 'string' &&
+              !FILE_PREFIX_RE.test(binding.target.prefix)) {
+            addError(errors, `${bp}.target.prefix`, 'must be a safe file prefix of at most 80 characters');
+          }
+          checkString(errors, `${bp}.target.expose_as`, binding.target.expose_as, { required: false });
+          if (binding.target.expose_as != null &&
+              typeof binding.target.expose_as === 'string' &&
+              !ENV_NAME_RE.test(binding.target.expose_as)) {
+            addError(errors, `${bp}.target.expose_as`, 'must be a valid environment variable name');
+          }
         }
         checkBoolean(errors, `${bp}.required`, binding.required);
         checkBoolean(errors, `${bp}.redact`, binding.redact);

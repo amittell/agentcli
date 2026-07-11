@@ -36,13 +36,14 @@ import {
   validateEvidenceRecordBinding,
 } from '../src/evidence/payload.js';
 import { sshEvidenceProvider } from '../src/evidence/ssh.js';
-import { verifyEvidenceEnvelope } from '../src/evidence/index.js';
+import { registerEvidenceProvider, verifyEvidenceEnvelope } from '../src/evidence/index.js';
 import {
   generateExecutionId,
   readAuditLog,
   writeAuditRecord,
 } from '../src/audit.js';
 import { executeTask } from '../src/exec.js';
+import { compileManifestToStandalone } from '../src/compiler/standalone.js';
 
 function base64Url(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -224,6 +225,49 @@ test('authorization proof profile validation fails closed', () => {
     () => assertValidAuthorizationProofProfile({ method: 'jwt' }),
     error => error.code === 'authorization_proof_invalid'
   );
+});
+
+test('authorization proof profiles reject private keys in public_key fields', () => {
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  for (const verifier of [jwtVerifier, detachedSignatureVerifier]) {
+    const profile = {
+      id: 'proof',
+      method: verifier.name,
+      public_key: privateKey,
+      proof: { value_from: { env: 'AUTHORIZATION_PROOF' } },
+      verify: { required: true },
+    };
+    const validation = verifier.validateProfile(profile);
+    assert.equal(validation.valid, false);
+    assert.ok(validation.errors.some(error => (
+      error.field === 'public_key' && /private|verification key|supported/i.test(error.message)
+    )));
+
+    const manifest = {
+      version: '0.2',
+      authorization_proof_profiles: [profile],
+      workflows: [{
+        id: 'proof-workflow',
+        name: 'Proof Workflow',
+        authorization_proof: { ref: 'proof' },
+        tasks: [{
+          id: 'proof-task',
+          name: 'Proof Task',
+          target: { session_target: 'shell' },
+          shell: { program: 'true', args: [] },
+          schedule: { cron: '0 * * * *' },
+        }],
+      }],
+    };
+    assert.throws(
+      () => compileManifestToStandalone(manifest),
+      error => !JSON.stringify(error).includes(privateKey) && error.validation?.ok === false
+    );
+  }
 });
 
 test('detached signatures verify canonical manifest content and reject changes', () => {
@@ -457,10 +501,43 @@ test('verified evidence cannot be transplanted onto another audit record', () =>
   assert.ok(rewrittenIdentity.errors.some(error => /resolved_identity/.test(error)));
 });
 
+test('SSH evidence profiles reject non-canonical payload serialization', () => {
+  const validation = sshEvidenceProvider.validateProfile({ payload: { format: 'json' } });
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors[0], /canonical-json/);
+
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [{
+      id: 'ssh-evidence',
+      provider: 'ssh',
+      payload: { format: 'json' },
+    }],
+    workflows: [{
+      id: 'evidence-workflow',
+      name: 'Evidence Workflow',
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        evidence: { ref: 'ssh-evidence' },
+      }],
+    }],
+  };
+  assert.throws(
+    () => compileManifestToStandalone(manifest),
+    error => error.validation?.ok === false && /canonical-json/.test(JSON.stringify(error.validation))
+  );
+});
+
 test('SSH evidence persists a versioned envelope that can be independently verified', async () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-evidence-'));
   const keyPath = join(workdir, 'evidence-key');
   const allowedSignersPath = join(workdir, 'allowed_signers');
+  const untrustedKeyPath = join(workdir, 'untrusted-key');
+  const untrustedSignersPath = join(workdir, 'untrusted_signers');
   try {
     const generated = spawnSync('ssh-keygen', [
       '-q', '-t', 'ed25519', '-N', '', '-f', keyPath,
@@ -489,6 +566,27 @@ test('SSH evidence persists a versioned envelope that can be independently verif
     });
     assert.equal(verified.verified, true, verified.reason);
     assert.equal(verified.payload.execution_id, 'execution-1');
+
+    const missingTrust = await verifyEvidenceEnvelope(attested.envelope, {
+      allowedSignersPath: join(workdir, 'missing_allowed_signers'),
+      principal: 'agentcli',
+    });
+    assert.equal(missingTrust.verified, false);
+
+    const generatedUntrusted = spawnSync('ssh-keygen', [
+      '-q', '-t', 'ed25519', '-N', '', '-f', untrustedKeyPath,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.equal(generatedUntrusted.status, 0, generatedUntrusted.stderr);
+    writeFileSync(
+      untrustedSignersPath,
+      `agentcli ${readFileSync(`${untrustedKeyPath}.pub`, 'utf8').trim()}\n`,
+      { mode: 0o600 }
+    );
+    const untrusted = await verifyEvidenceEnvelope(attested.envelope, {
+      allowedSignersPath: untrustedSignersPath,
+      principal: 'agentcli',
+    });
+    assert.equal(untrusted.verified, false);
 
     const tampered = {
       ...attested.envelope,
@@ -536,7 +634,11 @@ test('exec persists complete evidence that binds back to its audit record', asyn
       evidence_profiles: [{
         id: 'signed-evidence',
         provider: 'ssh',
-        provider_config: { key_path: keyPath, principal: 'agentcli' },
+        provider_config: {
+          key_path: keyPath,
+          principal: 'agentcli',
+          allowed_signers_path: allowedSignersPath,
+        },
         payload: { format: 'canonical-json' },
         verify: { required: true },
       }],
@@ -564,6 +666,7 @@ test('exec persists complete evidence that binds back to its audit record', asyn
     });
     assert.equal(result.ok, true);
     assert.equal(result.evidence.attested, true);
+    assert.equal(result.evidence.verification.verified, true);
     assert.ok(result.evidence.envelope.signature);
 
     const auditPath = join(agentcliHome, 'state', 'audit.ndjson');
@@ -579,8 +682,73 @@ test('exec persists complete evidence that binds back to its audit record', asyn
       principal: 'agentcli',
     });
     assert.equal(verified.verified, true, verified.reason);
+
+    const missingTrustManifest = structuredClone(manifest);
+    missingTrustManifest.evidence_profiles[0].provider_config.allowed_signers_path =
+      join(workdir, 'missing_allowed_signers');
+    await assert.rejects(
+      executeTask(missingTrustManifest, {
+        workflowId: 'evidence-workflow',
+        taskId: 'evidence-task',
+        env,
+        cwd: workdir,
+        signer: 'none',
+      }),
+      error => error.code === 'evidence_failed' && /verification required but failed/i.test(error.message)
+    );
   } finally {
     rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('required evidence fails closed when a provider attests but cannot verify', async () => {
+  const providerName = `test-evidence-unverified-${process.pid}-${Date.now()}`;
+  const method = `${providerName}-signature`;
+  registerEvidenceProvider({
+    name: providerName,
+    methods: [method],
+    validateProfile: () => ({ valid: true }),
+    resolve: () => ({}),
+    attest: payload => ({
+      attested: true,
+      envelope: { method, signed_payload: payload },
+    }),
+    verify: () => ({ verified: false, reason: 'test verifier rejected the envelope' }),
+    describe: () => ({ provider: providerName, attested: true }),
+  });
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-unverified-evidence-'));
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [{
+      id: 'required-evidence',
+      provider: providerName,
+      verify: { required: true },
+    }],
+    workflows: [{
+      id: 'evidence-workflow',
+      name: 'Evidence Workflow',
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' },
+        evidence: { ref: 'required-evidence' },
+      }],
+    }],
+  };
+  try {
+    await assert.rejects(
+      executeTask(manifest, {
+        taskId: 'task',
+        env: { ...process.env, AGENTCLI_HOME: home },
+        signer: 'none',
+      }),
+      error => error.code === 'evidence_failed' && /test verifier rejected/.test(error.message)
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

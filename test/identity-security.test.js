@@ -18,6 +18,8 @@ import '../src/validate.js';
 import { getProvider, listProviders } from '../src/identity/index.js';
 import { validateSecureEndpoint } from '../src/identity/session.js';
 import { verifyJwtSvid } from '../src/identity/spiffe-jwt-svid.js';
+import { opaAuthorizationProvider } from '../src/authorization/opa.js';
+import { normalizeError } from '../src/errors.js';
 
 function envBearerProfile(overrides = {}) {
   return {
@@ -76,6 +78,14 @@ function signedJwt(privateKey, payload, header = { alg: 'RS256', typ: 'JWT', kid
   signer.update(signingInput);
   return `${signingInput}.${signer.sign(privateKey).toString('base64url')}`;
 }
+
+test('SPIFFE verification failures retain a stable structured error code', () => {
+  const normalized = normalizeError(Object.assign(new Error('JWT-SVID signature verification failed'), {
+    code: 'spiffe_signature_invalid',
+  }));
+  assert.equal(normalized.code, 'spiffe_signature_invalid');
+  assert.equal(normalized.error_type, 'validation_error');
+});
 
 test('every registered identity provider applies structural profile validation', async () => {
   for (const name of listProviders()) {
@@ -159,6 +169,34 @@ test('user-configurable HTTP endpoints are limited to loopback hosts', async () 
   const stripe = getProvider('stripe-api-key');
   assert.equal((await stripe.validateProfile(stripeProfile('http://localhost:8123'))).valid, true);
   assert.equal((await stripe.validateProfile(stripeProfile('http://192.0.2.30:8123'))).valid, false);
+});
+
+test('OPA endpoints require secure transport and audit references omit URL secrets', async () => {
+  assert.equal(opaAuthorizationProvider.validateProfile({
+    provider_config: { endpoint: 'http://policy.example.test/v1/data/agentcli/allow' },
+  }).valid, false);
+  assert.equal(opaAuthorizationProvider.validateProfile({
+    provider_config: { endpoint: 'https://user:password@policy.example.test/v1/data/agentcli/allow' },
+  }).valid, false);
+
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ result: true }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const endpoint = `http://127.0.0.1:${address.port}/v1/data/agentcli/allow?api_key=audit-secret#fragment`;
+  try {
+    const decision = await opaAuthorizationProvider.authorize(
+      { actor: { principal: 'agent://test' } },
+      { provider_config: { endpoint }, on_error: 'deny' }
+    );
+    assert.equal(decision.decision, 'permit');
+    assert.equal(decision.policy_ref, `http://127.0.0.1:${address.port}/v1/data/agentcli/allow`);
+    assert.equal(JSON.stringify(decision).includes('audit-secret'), false);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 test('required presentation bindings fail and stdin bindings materialize exactly once', () => {
@@ -402,6 +440,25 @@ test('SPIFFE provider accepts only trusted, audience-bound, file-mounted JWT-SVI
     assert.equal(session.provider_assertions.signature_verified, true);
     assert.equal(session.subject.principal, 'spiffe://example.test/workload/api');
     assert.equal(provider.describeSession(session).credentials.jwt_svid.value, '[REDACTED]');
+
+    const matchingPrincipal = structuredClone(profile);
+    matchingPrincipal.subject.principal = 'spiffe://example.test/workload/api';
+    assert.equal((await provider.validateProfile(matchingPrincipal)).valid, true);
+    assert.equal(
+      provider.resolveSession({ profile: matchingPrincipal }).subject.principal,
+      'spiffe://example.test/workload/api'
+    );
+
+    const mismatchedPrincipal = structuredClone(profile);
+    mismatchedPrincipal.subject.principal = 'spiffe://example.test/workload/admin';
+    assert.throws(
+      () => provider.resolveSession({ profile: mismatchedPrincipal }),
+      error => error.code === 'identity_resolution_failed'
+    );
+
+    const invalidPrincipal = structuredClone(profile);
+    invalidPrincipal.subject.principal = 'agent://not-spiffe';
+    assert.equal((await provider.validateProfile(invalidPrincipal)).valid, false);
 
     assert.throws(
       () => verifyJwtSvid(token, profile.auth.provider_config, 'wrong-audience'),

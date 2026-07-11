@@ -265,6 +265,11 @@ const spiffeJwtSvidProvider = {
     const config = auth.provider_config || {};
     const required = auth.required !== false;
     const audience = auth.audience || config.audience;
+    const declaredPrincipal = profile?.subject?.principal;
+
+    if (declaredPrincipal != null && !validateSpiffeId(declaredPrincipal)) {
+      errors.push('subject.principal must be a valid SPIFFE ID when declared');
+    }
 
     if (config.workload_api_socket != null) {
       errors.push('auth.provider_config.workload_api_socket is unsupported; mount a JWT-SVID file instead');
@@ -358,7 +363,14 @@ const spiffeJwtSvidProvider = {
     }
     const claims = verified.claims;
     const trustLevel = profile?.trust?.level || 'supervised';
-    const principal = profile?.subject?.principal || claims.sub;
+    const declaredPrincipal = profile?.subject?.principal ?? null;
+    if (declaredPrincipal != null && declaredPrincipal !== claims.sub) {
+      throw providerError(
+        'identity_resolution_failed',
+        'Declared SPIFFE principal does not match the verified JWT-SVID subject'
+      );
+    }
+    const principal = claims.sub;
     const session = {
       provider: 'spiffe-jwt-svid',
       subject: {

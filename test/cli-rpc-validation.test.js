@@ -116,6 +116,42 @@ test('v0.2 validation keeps deliberate provider and claims extension maps open',
   assert.equal(result.ok, true, JSON.stringify(result.errors));
 });
 
+test('file presentation targets validate prefix and expose_as in manifests and JSON Schema', () => {
+  const manifest = validManifest({
+    identity_profiles: [{
+      id: 'identity',
+      provider: 'env-bearer',
+      auth: {
+        required: true,
+        provider_config: { token_env: 'PRESENTATION_TOKEN' },
+      },
+      presentation: {
+        bindings: [{
+          source: 'credentials.access_token.value',
+          target: {
+            kind: 'file',
+            prefix: 'agentcli-credential',
+            expose_as: 'AGENTCLI_CREDENTIAL_FILE',
+          },
+        }],
+      },
+    }],
+  });
+  manifest.workflows[0].identity = { ref: 'identity' };
+  assert.equal(validateManifest(manifest).ok, true);
+
+  const targetSchema = MANIFEST_JSON_SCHEMA.$defs.presentationTarget;
+  assert.ok(targetSchema.properties.prefix);
+  assert.ok(targetSchema.properties.expose_as);
+
+  const invalidPrefix = structuredClone(manifest);
+  invalidPrefix.identity_profiles[0].presentation.bindings[0].target.prefix = '../escape';
+  assert.equal(validateManifest(invalidPrefix).ok, false);
+  const invalidEnv = structuredClone(manifest);
+  invalidEnv.identity_profiles[0].presentation.bindings[0].target.expose_as = 'not-valid';
+  assert.equal(validateManifest(invalidEnv).ok, false);
+});
+
 test('profile provider existence and synchronous structural validation are enforced', () => {
   const unknown = validManifest({
     identity_profiles: [{ id: 'identity', provider: 'does-not-exist' }],

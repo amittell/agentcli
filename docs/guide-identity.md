@@ -102,6 +102,7 @@ to pass it to the tool process.
             "args": ["-lc", "curl -H \"Authorization: Bearer $TOOL_ACCESS_TOKEN\" https://api.example.com/deploy"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "api-service" }
         }
       ]
@@ -222,6 +223,7 @@ using the client credentials grant (RFC 6749 Section 4.4).
             "args": ["sync.py"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "oidc-service" }
         }
       ]
@@ -361,6 +363,7 @@ token at `/var/run/secrets/kubernetes.io/serviceaccount/token`.
             "args": ["get", "pods"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "k8s-service" }
         }
       ]
@@ -466,6 +469,7 @@ or type. Implements OAuth 2.0 Token Exchange (RFC 8693).
             "args": ["-lc", "curl -H \"Authorization: Bearer $EXCHANGED_TOKEN\" https://downstream.example.com/api"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "exchange-service" }
         }
       ]
@@ -567,6 +571,7 @@ identity enabled. The provider acquires tokens from the Azure Instance Metadata 
             "args": ["-lc", "curl -H \"Authorization: Bearer $AZURE_ACCESS_TOKEN\" \"https://management.azure.com/subscriptions?api-version=2022-12-01\""]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "azure-service" }
         }
       ]
@@ -674,6 +679,7 @@ AWS Signature Version 4 signing with no external dependencies.
             "args": ["s3", "ls"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "aws-service" }
         }
       ]
@@ -777,6 +783,7 @@ attached. The provider acquires tokens from the GCP metadata server at
             "args": ["-lc", "curl -H \"Authorization: Bearer $GCP_ACCESS_TOKEN\" \"https://compute.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances\""]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "gcp-service" }
         }
       ]
@@ -814,9 +821,9 @@ is specified, the metadata server returns a token for that specific service acco
 
 ## Quick Setup: spiffe-jwt-svid
 
-Use this in SPIFFE-enabled Kubernetes clusters running SPIRE or Istio. The provider
-acquires JWT-SVIDs (SPIFFE Verifiable Identity Documents) from a file on disk or the
-SPIFFE Workload API.
+Use this in SPIFFE-enabled Kubernetes clusters running SPIRE or Istio when a
+JWT-SVID and its verification key or JWKS are mounted as local files. The provider
+does not implement the gRPC SPIFFE Workload API.
 
 ### Manifest
 
@@ -837,7 +844,8 @@ SPIFFE Workload API.
         "audience": "spiffe://example.org/downstream",
         "required": true,
         "provider_config": {
-          "svid_file": "/var/run/secrets/spiffe/svid.jwt"
+          "svid_file": "/var/run/secrets/spiffe/svid.jwt",
+          "public_key_file": "/var/run/secrets/spiffe/jwt-svid-public.pem"
         }
       },
       "trust": {
@@ -846,7 +854,7 @@ SPIFFE Workload API.
       "presentation": {
         "bindings": [
           {
-            "source": "credentials.access_token.value",
+            "source": "credentials.jwt_svid.value",
             "target": { "kind": "env", "name": "SPIFFE_JWT_SVID" },
             "required": true,
             "redact": true
@@ -874,6 +882,7 @@ SPIFFE Workload API.
             "args": ["-lc", "curl -H \"Authorization: Bearer $SPIFFE_JWT_SVID\" https://peer.example.svc.cluster.local/api"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "spiffe-service" }
         }
       ]
@@ -887,12 +896,11 @@ SPIFFE Workload API.
 | Field | Location | Required |
 |---|---|---|
 | `audience` | `auth.audience` or `auth.provider_config.audience` | Yes |
-| `svid_file` | `auth.provider_config.svid_file` | No (path to a file containing the JWT-SVID, e.g. Kubernetes projected volume) |
-| `workload_api_socket` | `auth.provider_config.workload_api_socket` | No (defaults to `SPIFFE_ENDPOINT_SOCKET` env var; supports `http://` or `https://` endpoints) |
+| `svid_file` | `auth.provider_config.svid_file` | Yes when `auth.required` is true |
+| One trust source | `auth.provider_config.public_key_pem`, `public_key_file`, `jwks`, or `jwks_file` | Exactly one when `auth.required` is true |
 
-The provider tries `svid_file` first, then falls back to the Workload API socket. For
-Unix domain sockets (the standard SPIRE agent configuration), use the file-based approach
-since standard Node `fetch()` does not support UDS connections.
+`workload_api_socket` and remote `jwks_uri` values are rejected. Project the
+JWT-SVID and a local public key or JWKS into the workload instead.
 
 ### Run it
 
@@ -909,12 +917,10 @@ agentcli identity resolve manifest.json call-peer
 ### When to use this provider
 
 Use `spiffe-jwt-svid` in Kubernetes clusters with SPIRE agent or Istio that project
-JWT-SVIDs into pod volumes. The `svid_file` approach works with Kubernetes projected
-service account tokens and SPIRE agent projected volumes. The HTTP-based Workload API
-approach works with SPIRE agents or Envoy SDS sidecars configured with TCP listeners.
-The provider parses JWT claims (sub, aud, exp, iss) from the SVID for audit purposes
-but does not verify the signature, as that is the responsibility of the consuming service's
-SPIFFE trust bundle verifier.
+JWT-SVIDs and trust material into pod volumes. The declared principal, when present,
+must exactly match the cryptographically verified `sub` claim. The provider verifies
+the signature, issuer, requested audience, activation time, expiration, and SPIFFE ID
+shape before returning a session.
 
 ## Quick Setup: entra-agent-id
 
@@ -980,6 +986,7 @@ assertions and supports agent-specific Conditional Access policies and lifecycle
             "args": ["-lc", "curl -H \"Authorization: Bearer $ENTRA_ACCESS_TOKEN\" https://graph.microsoft.com/v1.0/me"]
           },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "entra-agent" }
         }
       ]
@@ -1220,6 +1227,7 @@ For production-grade isolation on Linux or Windows, the recommended path today i
           "name": "Deploy",
           "shell": { "program": "deploy.sh", "args": [] },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "prod-agent" }
         }
       ]
@@ -1469,6 +1477,7 @@ and checks the attestation signature against the recorded principal.
           "name": "Build",
           "shell": { "program": "make", "args": ["build"] },
           "target": { "session_target": "shell" },
+          "schedule": { "cron": "0 0 * * *", "tz": "UTC" },
           "identity": { "ref": "build-agent" },
           "evidence": { "ref": "ssh-evidence" }
         }

@@ -444,7 +444,7 @@ export async function runWorkflow(manifest, {
 
     let payload = null;
     try {
-      payload = await executeTask(expanded, {
+      payload = await executeTask(manifest, {
         workflowId: workflow.id,
         taskId: task.id,
         dryRun: false,

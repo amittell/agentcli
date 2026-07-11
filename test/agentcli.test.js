@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createSign } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -27,8 +27,8 @@ import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
-import { ensureAgentcliHome } from '../src/home.js';
-import { stableId, resolveIdentityV2, resolveVerify } from '../src/compiler/shared.js';
+import { ensureAgentcliHome, getAgentcliPaths } from '../src/home.js';
+import { OPERATIONAL_ENV_KEYS, stableId, resolveIdentityV2, resolveVerify } from '../src/compiler/shared.js';
 import { applyFieldMask, parseFieldMask } from '../src/fields.js';
 import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
@@ -3963,7 +3963,8 @@ test('exec dry-run does not spawn a process', () => {
   assert.equal(result.dry_run, true);
   assert.equal(result.command.program, 'df');
   assert.equal(result.command.args_count, 1);
-  assert.deepEqual(result.command.env_keys, []);
+  assert.ok(result.command.env_keys.includes('PATH'));
+  assert.ok(result.command.env_keys.every(key => OPERATIONAL_ENV_KEYS.has(key) || key.startsWith('LC_')));
   assert.match(result.command.args_hashes[0], /^sha256:[a-f0-9]{64}$/);
   assert.deepEqual(result.result, { status: 'dry_run' });
   assert.ok(Object.values(result.phases).every(phase => phase === 'skipped'));
@@ -4009,6 +4010,39 @@ test('exec enforces contract.allowed_paths against shell.cwd', () => {
     () => executeTask(manifest, { taskId: 't' }),
     /not under any allowed path/
   );
+});
+
+test('exec resolves symlinks before enforcing contract.allowed_paths', {
+  skip: process.platform === 'win32',
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-cwd-symlink-'));
+  const allowed = join(root, 'allowed');
+  const outside = join(root, 'outside');
+  const linked = join(allowed, 'linked');
+  try {
+    mkdirSync(allowed);
+    mkdirSync(outside);
+    symlinkSync(outside, linked);
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'true', args: [], cwd: linked },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { allowed_paths: [allowed], audit: 'none' },
+        }],
+      }],
+    };
+    assert.throws(
+      () => executeTask(manifest, { taskId: 't' }),
+      error => error.code === 'contract_violation'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('exec allows cwd under an allowed path', () => {
@@ -7108,6 +7142,48 @@ test('convertManifestV1toV2 preserves workflow identity', async () => {
   assert.strictEqual(profile.subject.principal, 'deploy-bot@infra.example.com');
 });
 
+test('convertManifestV1toV2 preserves inherited legacy identity fields under partial overrides', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  const v1 = {
+    version: '0.1',
+    workflows: [{
+      id: 'partial-identity',
+      name: 'Partial Identity',
+      identity: {
+        principal: 'workflow@example.test',
+        run_as: 'workflow-user',
+        attestation: 'ssh',
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { run_as: 'task-user' },
+        on_failure: {
+          shell: { program: 'true', args: [] },
+          identity: { principal: 'handler@example.test' },
+        },
+      }],
+    }],
+  };
+  const converted = convertManifestV1toV2(v1);
+  const workflow = converted.workflows[0];
+  const task = workflow.tasks[0];
+  const taskProfile = converted.identity_profiles.find(profile => profile.id === task.identity.ref);
+  const failureProfile = converted.identity_profiles.find(profile => profile.id === task.on_failure.identity.ref);
+
+  assert.equal(taskProfile.subject.principal, 'workflow@example.test');
+  assert.equal(taskProfile.subject.run_as, 'task-user');
+  assert.equal(failureProfile.subject.principal, 'handler@example.test');
+  assert.equal(failureProfile.subject.run_as, 'workflow-user');
+  assert.ok(workflow.authorization_proof?.ref);
+  assert.equal(task.authorization_proof, undefined);
+  assert.equal(task.on_failure.authorization_proof, undefined);
+  assert.equal(validateManifest(converted).ok, true);
+});
+
 test('convertManifestV1toV2 preserves legacy attestation as a non-verifying declaration', async () => {
   const { convertManifestV1toV2 } = await import('../src/convert.js');
   const v1 = JSON.parse(readFileSync(new URL('../examples/identity-contract.json', import.meta.url), 'utf8'));
@@ -8556,6 +8632,83 @@ test('applyManifestToScheduler without capabilities rejects v0.2 fields', async 
     )
   );
   assert.strictEqual(calls.length, 0);
+});
+
+test('v0.1 governance and verify fields require handoff v2 and project without loss', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'legacy-governed',
+      name: 'Legacy Governed',
+      identity: {
+        principal: 'deploy@example.test',
+        run_as: 'deployer',
+        attestation: 'ssh',
+      },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'test -n "$PATH"', timeout_seconds: 7, on_failure: 'warn' },
+      }],
+    }],
+  };
+  const capabilityResponse = handoffVersion => ({
+    scheduler_version: 'test',
+    handoff_version: handoffVersion,
+    features: {
+      runtime_execution: true,
+      identity_declaration: true,
+      runtime_identity_resolution: true,
+      trust_evaluation: true,
+      authorization_proof_verification: true,
+      authorization_hook: true,
+      evidence_generation: true,
+      credential_handoff: true,
+      audit_export: true,
+    },
+  });
+  const makeRunner = (handoffVersion, calls) => ({
+    invocation: { label: `fake-scheduler-v${handoffVersion}` },
+    queryCapabilities: () => capabilityResponse(handoffVersion),
+    listJobs: () => [],
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); },
+  });
+
+  const v1Calls = [];
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner: makeRunner('1', v1Calls) }),
+    error => (
+      error.code === 'unsupported_capability' &&
+      error.required_handoff_version === '2' &&
+      error.advertised_handoff_version === '1'
+    )
+  );
+  assert.equal(v1Calls.length, 0);
+
+  const v2Calls = [];
+  const applied = await applyManifestToScheduler(manifest, {
+    runner: makeRunner('2', v2Calls),
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(v2Calls.length, 1);
+  assert.equal(v2Calls[0].verify_shell, 'test -n "$PATH"');
+  assert.equal(v2Calls[0].verify_timeout_s, 7);
+  assert.equal(v2Calls[0].verify_on_failure, 'warn');
+  assert.equal(v2Calls[0].contract_audit, 'always');
+  assert.equal(v2Calls[0].identity_principal, 'deploy@example.test');
+  assert.equal(v2Calls[0].identity_run_as, 'deployer');
 });
 
 test('applyManifestToScheduler with handoff_version 2 passes v0.2 fields to updateJob', async () => {
@@ -12066,6 +12219,80 @@ test('exec verify: on_failure=warn adds warning but returns ok', () => {
   assert.ok(result.warnings.some(w => w.includes('Verify command failed')));
 });
 
+test('exec verify receives only the explicit child environment', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'test -z "$AMBIENT_VERIFY_SECRET"' },
+      }],
+    }],
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { ...process.env, AMBIENT_VERIFY_SECRET: 'must-not-be-inherited' },
+  });
+  assert.equal(result.verify.passed, true);
+});
+
+test('v0.1 verify output is hashed rather than copied into audits or errors', () => {
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-verify-audit-v1-'));
+  const canary = 'verify-output-secret-v1';
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  try {
+    for (const onFailure of ['warn', 'error']) {
+      const manifest = {
+        version: '0.1',
+        workflows: [{
+          id: `w-${onFailure}`, name: 'W',
+          tasks: [{
+            id: 't', name: 'T',
+            shell: {
+              program: 'true',
+              args: [],
+              env: { DECLARED_VERIFY_SECRET: canary },
+            },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            contract: { audit: 'always' },
+            verify: {
+              shell: 'printf "%s" "$DECLARED_VERIFY_SECRET"; printf "%s" "$DECLARED_VERIFY_SECRET" >&2; exit 1',
+              on_failure: onFailure,
+            },
+          }],
+        }],
+      };
+      if (onFailure === 'warn') {
+        const result = executeTask(manifest, { taskId: 't', env });
+        assert.equal(result.ok, true);
+      } else {
+        assert.throws(
+          () => executeTask(manifest, { taskId: 't', env }),
+          error => error.code === 'verify_failed' && !JSON.stringify(error).includes(canary)
+        );
+      }
+    }
+
+    const records = readAuditLog({ auditPath: getAgentcliPaths({ env }).audit });
+    assert.equal(records.length, 2);
+    assert.equal(JSON.stringify(records).includes(canary), false);
+    for (const record of records) {
+      assert.match(record.verify.stdout_hash, /^sha256:[a-f0-9]{64}$/);
+      assert.match(record.verify.stderr_hash, /^sha256:[a-f0-9]{64}$/);
+      assert.equal(record.verify.stdout, undefined);
+      assert.equal(record.verify.stderr, undefined);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('exec verify: not run when shell command fails', () => {
   const manifest = {
     version: '0.1',
@@ -12300,6 +12527,53 @@ test('exec verify: v0.2 path verify failure with on_failure=error throws', async
       return true;
     }
   );
+});
+
+test('v0.2 evidence failures do not copy verify output into audits or errors', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-verify-audit-v2-'));
+  const canary = 'verify-output-secret-v2';
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [{
+      id: 'required-evidence',
+      provider: 'none',
+      verify: { required: true },
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'true',
+          args: [],
+          env: { DECLARED_VERIFY_SECRET: canary },
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' },
+        verify: {
+          shell: 'printf "%s" "$DECLARED_VERIFY_SECRET"; printf "%s" "$DECLARED_VERIFY_SECRET" >&2; exit 1',
+          on_failure: 'warn',
+        },
+        evidence: { ref: 'required-evidence' },
+      }],
+    }],
+  };
+
+  try {
+    await assert.rejects(
+      executeTask(manifest, { taskId: 't', env, signer: 'none' }),
+      error => error.code === 'evidence_failed' && !JSON.stringify(error).includes(canary)
+    );
+    const records = readAuditLog({ auditPath: getAgentcliPaths({ env }).audit });
+    assert.equal(records.length, 1);
+    assert.equal(JSON.stringify(records).includes(canary), false);
+    assert.match(records[0].verify.stdout_hash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(records[0].verify.stdout, undefined);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -204,6 +204,7 @@ if (!schedulerRuntime.ok) {
     it('apply with different manifest replaces jobs', async () => {
       const helloManifest = readExample('hello-world.json');
       const shellManifest = readExample('shell-workflow.json');
+      delete shellManifest.workflows[0].tasks[1].approval.risk_level;
       const db = dbPath('replace');
 
       // Apply hello-world first

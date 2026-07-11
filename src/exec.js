@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
+import { canonicalDigest } from './canonical.js';
 import { validateManifest } from './validate.js';
 import { resolveValueFrom } from './command.js';
 import { expandManifestShorthands } from './shorthand.js';
@@ -10,12 +11,14 @@ import {
   mergeAuthorizationProofProfile,
   mergeEvidenceProfile,
   mergeIdentityProfile,
+  buildChildEnvironment,
   buildEffectiveExecutionBinding,
   computeEffectiveTaskHash,
   resolveAuthorization,
   resolveAuthorizationProof,
   resolveContract,
   resolveEvidence,
+  resolveExecutionCwd,
   resolveIdentity,
   resolveVerify
 } from './compiler/shared.js';
@@ -52,9 +55,9 @@ import './identity/entra-agent-id.js';
 import { compareTrustLevels, redactSession, buildCredentialSummary } from './identity/session.js';
 
 // v0.2 evidence providers
-import { resolveEvidenceProvider } from './evidence/index.js';
+import { resolveEvidenceProvider, verifyEvidenceEnvelope } from './evidence/index.js';
 import './evidence/none.js';
-import './evidence/ssh.js';
+import { resolveAllowedSigners as resolveEvidenceAllowedSigners } from './evidence/ssh.js';
 import {
   buildCompleteEvidencePayload,
   serializePayload,
@@ -85,11 +88,11 @@ function isPathWithin(targetPath, rootPath) {
 function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) {
   const violations = [];
   const warnings = [];
-  const executionCwd = resolvePath(cwd, shell.cwd || '.');
+  const executionCwd = resolveExecutionCwd(shell.cwd, cwd);
 
   if (contract.allowed_paths?.length) {
     const allowed = contract.allowed_paths.some(p =>
-      isPathWithin(executionCwd, resolvePath(cwd, p))
+      isPathWithin(executionCwd, resolveExecutionCwd(p, cwd))
     );
     if (!allowed) {
       violations.push({
@@ -128,7 +131,7 @@ function runVerify(verify, {
     usesSandbox ? ['-p', sandboxCommand.profile, verifyProgram, ...verifyArgs] : verifyArgs,
     {
     cwd,
-    env: { ...process.env, ...env },
+    env,
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 1 * 1024 * 1024,
@@ -147,6 +150,24 @@ function runVerify(verify, {
     stderr,
     timed_out: timedOut,
     duration_ms: durationMs,
+    stdout_bytes: Buffer.byteLength(stdout, 'utf8'),
+    stderr_bytes: Buffer.byteLength(stderr, 'utf8'),
+  };
+}
+
+function auditSafeVerifyResult(result) {
+  if (!result) return null;
+  const { stdout, stderr, structured, ...safe } = result;
+  const hash = value => value == null
+    ? null
+    : `sha256:${createHash('sha256').update(String(value), 'utf8').digest('hex')}`;
+  return {
+    ...safe,
+    stdout_hash: hash(stdout),
+    stderr_hash: hash(stderr),
+    structured_hash: structured == null
+      ? null
+      : canonicalDigest(structured),
   };
 }
 
@@ -158,26 +179,10 @@ function resolvePrincipal(identity) {
   return `${user}@${host}`;
 }
 
-const OPERATIONAL_ENV_KEYS = new Set([
-  'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP',
-  'LANG', 'SHELL', 'USER', 'LOGNAME', 'TZ', 'TERM',
-  'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT',
-]);
-
-function buildChildEnvironment(env, declaredEnv = {}) {
-  const inherited = {};
-  for (const [key, value] of Object.entries(env || {})) {
-    if (OPERATIONAL_ENV_KEYS.has(key) || key.startsWith('LC_')) {
-      inherited[key] = value;
-    }
-  }
-  return { ...inherited, ...declaredEnv };
-}
-
 function safeCommandMetadata(binding, shell, cwd) {
   return {
     program: shell.program,
-    cwd: shell.cwd || cwd,
+    cwd: binding.command?.cwd ?? resolveExecutionCwd(shell.cwd, cwd),
     args_count: binding.command?.args_count ?? shell.args.length,
     args_hashes: binding.command?.args_hashes ?? [],
     env_keys: binding.command?.env_keys ?? Object.keys(shell.env),
@@ -372,6 +377,7 @@ function resolveCommonState(manifest, {
     return {
       requiresDelegation: true,
       manifest: expanded,
+      sourceManifest: manifest,
       expanded,
       workflow,
       task,
@@ -418,6 +424,7 @@ function resolveCommonState(manifest, {
   const verify = resolveVerify(workflow, task);
   const auditPolicy = contract.audit ?? 'always';
   const shell = normalizeShellExecution(task.shell);
+  const executionCwd = resolveExecutionCwd(shell.cwd, cwd);
   const effectiveTimeout = timeoutMs ?? task.runtime?.timeout_ms ?? null;
   const { violations, warnings: preflightWarnings } = preflightContractChecks(contract, shell, { cwd });
   const warnings = [...preflightWarnings];
@@ -430,9 +437,10 @@ function resolveCommonState(manifest, {
   }
 
   return {
+    sourceManifest: manifest,
     expanded, workflow, task, isV2, identity, contract, verify,
     auditPolicy, shell, effectiveTimeout, violations, warnings,
-    signer, explicitSigningKey, cwd, env,
+    signer, explicitSigningKey, cwd, executionCwd, env,
   };
 }
 
@@ -479,8 +487,12 @@ function buildDryRunResult(common, { binding, taskHash, timestamp, executionId }
   };
 }
 
-function prepareLiveCommon(common, { signer, signingKey, cwd, env }) {
-  const sandboxCommand = prepareSandboxedShellCommand(common.shell, common.contract, { cwd, env });
+function prepareLiveCommon(common, { signer, signingKey, env }) {
+  const sandboxCommand = prepareSandboxedShellCommand(
+    { ...common.shell, cwd: common.executionCwd },
+    common.contract,
+    { cwd: common.cwd, env }
+  );
   common.warnings.push(...sandboxCommand.warnings);
   const provider = resolveProvider({ signer, env });
   const providerConfig = provider.resolve({ env, signingKey });
@@ -556,6 +568,9 @@ export function executeTask(manifest, {
     workflow: common.workflow,
     task: common.task,
     cwd,
+    env,
+    timeoutMs: common.effectiveTimeout,
+    instanceId,
   });
   const taskHash = computeEffectiveTaskHash(binding);
 
@@ -627,6 +642,9 @@ async function inspectTaskGovernance(manifest, mode, {
     workflow: common.workflow,
     task: common.task,
     cwd,
+    env,
+    timeoutMs: common.effectiveTimeout,
+    instanceId,
   });
   const taskHash = computeEffectiveTaskHash(binding);
 
@@ -810,7 +828,7 @@ function executeDelegated(common, options) {
 function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executionId }) {
   const {
     workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
-    effectiveTimeout, warnings, provider, providerConfig, cwd, env,
+    effectiveTimeout, warnings, provider, providerConfig, cwd, executionCwd, env,
   } = common;
 
   let declaredIdentity = null;
@@ -849,7 +867,7 @@ function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executi
   const spawnEnv = buildChildEnvironment(env, shell.env);
 
   const spawnOpts = {
-    cwd: shell.cwd || cwd,
+    cwd: executionCwd,
     env: spawnEnv,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
@@ -934,18 +952,19 @@ function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executi
   let verifyFailed = false;
   if (verify && exitCode === 0) {
     verifyResult = runVerify(verify, {
-      cwd: shell.cwd || cwd,
+      cwd: executionCwd,
       env: spawnEnv,
       sandboxCommand,
     });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
-        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted from audit records`);
       } else {
         verifyFailed = true;
       }
     }
   }
+  const auditVerifyResult = auditSafeVerifyResult(verifyResult);
 
   const effectiveOk = exitCode === 0 && !verifyFailed;
 
@@ -971,7 +990,7 @@ function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executi
       signer: provider.name,
       attestation,
       attestation_note,
-      verify: verifyResult,
+      verify: auditVerifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -982,14 +1001,11 @@ function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executi
   }
 
   if (verifyFailed) {
-    const verifyStdout = verifyResult.stdout || '';
-    const verifyStderr = verifyResult.stderr || '';
-    const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
-      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted`),
       {
         code: 'verify_failed',
-        verify: verifyResult,
+        verify: auditVerifyResult,
         execution_id: executionId,
         source: { workflow_id: workflow.id, task_id: task.id },
       }
@@ -1074,16 +1090,16 @@ async function executeV2Core(common, {
   inspectionMode = null,
 }, cleanupState) {
   const {
-    expanded, workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
-    effectiveTimeout, warnings, provider, providerConfig, cwd,
+    sourceManifest, expanded, workflow, task, identity, contract, verify, auditPolicy, shell,
+    sandboxCommand, effectiveTimeout, warnings, provider, providerConfig, cwd, executionCwd,
   } = common;
 
   const authorizationCommand = shell
     ? {
         program: shell.program,
         args: shell.args,
-        cwd: shell.cwd || cwd,
-        env_keys: Object.keys(shell.env),
+        cwd: executionCwd,
+        env_keys: binding.command?.env_keys ?? Object.keys(shell.env),
         stdin_present: shell.stdin != null,
       }
     : {
@@ -1153,7 +1169,7 @@ async function executeV2Core(common, {
         : null;
       verificationResult = proofValue
         ? await verifyAuthorizationProof(proofValue, authorizationProofDeclaration, {
-            manifest: expanded,
+            manifest: sourceManifest,
             manifestDigest,
             env: proofEnv,
             cwd,
@@ -1630,7 +1646,7 @@ async function executeV2Core(common, {
     : null;
 
   const spawnOpts = {
-    cwd: shell.cwd || cwd,
+    cwd: executionCwd,
     env: spawnEnv,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
@@ -1731,24 +1747,26 @@ async function executeV2Core(common, {
   let verifyFailed = false;
   if (verify && exitCode === 0) {
     verifyResult = runVerify(verify, {
-      cwd: shell.cwd || cwd,
+      cwd: executionCwd,
       env: spawnEnv,
       sandboxCommand,
     });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
-        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted from audit records`);
       } else {
         verifyFailed = true;
       }
     }
   }
+  const auditVerifyResult = auditSafeVerifyResult(verifyResult);
 
   // ------------------------------------------------------------------
   // Phase 6: Complete, versioned evidence
   // ------------------------------------------------------------------
 
-  const evidenceRequired = requireEvidence || evidenceDeclaration?.verify?.required === true;
+  const evidenceVerificationRequired = evidenceDeclaration?.verify?.required === true;
+  const evidenceProductionRequired = requireEvidence || evidenceVerificationRequired;
   try {
     if (evidRef && evidenceDeclaration) {
       const evProvider = resolveEvidenceProvider({
@@ -1778,7 +1796,7 @@ async function executeV2Core(common, {
           stdin: spawnOpts.input ?? null,
         },
         result,
-        verify: verifyResult,
+        verify: auditVerifyResult,
         complianceContext: complianceCtx,
       });
       const serialized = serializePayload(
@@ -1791,6 +1809,33 @@ async function executeV2Core(common, {
           ...evProvider.describe(attestResult.envelope, {}),
           envelope: attestResult.envelope,
         };
+        if (evidenceVerificationRequired) {
+          const providerConfig = evidenceDeclaration.provider_config || {};
+          const paths = getAgentcliPaths({ env });
+          const allowedSignersPath = providerConfig.allowed_signers ||
+            providerConfig.allowed_signers_path ||
+            resolveEvidenceAllowedSigners({ env, statePath: paths.allowed_signers });
+          const verification = await verifyEvidenceEnvelope(attestResult.envelope, {
+            ...providerConfig,
+            allowedSignersPath,
+            principal: providerConfig.principal || attestResult.envelope?.principal || null,
+          }, { env });
+          evidenceMetadata.verification = {
+            required: true,
+            verified: verification.verified === true,
+            reason: verification.reason || null,
+            principal: verification.principal || null,
+            key_fingerprint: verification.key_fingerprint || null,
+            payload_digest: verification.payload_digest || null,
+            envelope_version: verification.envelope_version || null,
+          };
+          if (!verification.verified) {
+            throw Object.assign(
+              new Error(`Evidence verification required but failed: ${verification.reason || 'verification did not succeed'}`),
+              { code: 'evidence_failed' }
+            );
+          }
+        }
       } else {
         evidenceMetadata = {
           provider: evProvider.name,
@@ -1799,15 +1844,15 @@ async function executeV2Core(common, {
           envelope: null,
         };
       }
-      if (evidenceRequired && !attestResult.attested) {
+      if (evidenceProductionRequired && !attestResult.attested) {
         throw Object.assign(
           new Error(`Evidence required but attestation failed: ${attestResult.reason}`),
           { code: 'evidence_failed' }
         );
       }
-    } else if (evidenceRequired) {
+    } else if (evidenceProductionRequired) {
       throw Object.assign(
-        new Error('Evidence verification is required but no evidence block resolved'),
+        new Error('Evidence is required but no evidence block resolved'),
         { code: 'evidence_failed' }
       );
     }
@@ -1834,7 +1879,7 @@ async function executeV2Core(common, {
         identity: binding.identity,
         effective_task_hash: taskHash,
         manifest_digest: binding.manifest_digest,
-        verify: verifyResult,
+        verify: auditVerifyResult,
         evidence: evidenceMetadata,
         evidence_error: evidenceFailure,
         warnings,
@@ -1882,7 +1927,7 @@ async function executeV2Core(common, {
       signer: provider.name,
       attestation,
       attestation_note,
-      verify: verifyResult,
+      verify: auditVerifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -1893,14 +1938,11 @@ async function executeV2Core(common, {
   }
 
   if (verifyFailed) {
-    const verifyStdout = verifyResult.stdout || '';
-    const verifyStderr = verifyResult.stderr || '';
-    const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
-      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted`),
       {
         code: 'verify_failed',
-        verify: verifyResult,
+        verify: auditVerifyResult,
         execution_id: executionId,
         source: { workflow_id: workflow.id, task_id: task.id },
       }

@@ -29,6 +29,7 @@ const AUDIT_SAFE_CLAIMS = [
   'manifest_digest',
 ];
 const jwksCache = new Map();
+const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 
 // -- JWT Helpers --
 
@@ -99,11 +100,15 @@ function normalizeVerificationKey(publicKey) {
   }
 
   if (typeof publicKey === 'string' || Buffer.isBuffer(publicKey)) {
+    if (PRIVATE_KEY_PEM.test(String(publicKey))) {
+      throw new Error('private key material is forbidden in public_key');
+    }
     return createPublicKey(publicKey);
   }
 
   if (typeof publicKey === 'object' && publicKey !== null) {
     if ('kty' in publicKey) {
+      if ('d' in publicKey) throw new Error('private JWK material is forbidden in public_key');
       return createPublicKey({ key: publicKey, format: 'jwk' });
     }
     return createPublicKey(publicKey);

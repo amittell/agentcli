@@ -374,6 +374,8 @@ Each element in the `bindings` array is an object with these fields:
 |-------|------|----------|--------|-------------|
 | `kind` | string | No | `env`, `file`, `stdin`, `none` | Mechanism for exposing the credential. |
 | `name` | string | No | -- | Environment variable name (for `env`) or file name (for `file`). |
+| `prefix` | string | No | -- | Safe prefix of at most 80 characters for a generated credential file. |
+| `expose_as` | string | No | -- | Environment variable that receives the generated credential file path. |
 
 ---
 
@@ -384,7 +386,7 @@ Each element in the `bindings` array is an object with these fields:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | Yes | Unique identifier within the manifest. Must be an identifier. |
-| `provider` | string | Yes | Identity provider name. Free-form string. Known providers: `none`, `env-bearer`, `file-bearer`, `oidc-client-credentials`, `oidc-token-exchange`, `azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`, `entra-agent-id`. |
+| `provider` | string | Yes | Identity provider name. Free-form string. Known providers: `none`, `env-bearer`, `file-bearer`, `oidc-client-credentials`, `oidc-token-exchange`, `azure-managed-identity`, `aws-sts-assume-role`, `gcp-workload-identity`, `spiffe-jwt-svid`, `entra-agent-id`, `stripe-api-key`. |
 | `subject` | object | No | Subject descriptor. Same fields as [Identity Subject Fields](#identity-subject-fields). |
 | `auth` | object | No | Authentication configuration. Same fields as [Identity Auth Fields](#identity-auth-fields). |
 | `trust` | object | No | Trust level declaration. Same fields as [Identity Trust Fields](#identity-trust-fields). |
@@ -518,6 +520,8 @@ Current include values are:
 | `bind` | array of strings | No | -- | Execution context sections to bind into the evidence payload. |
 | `context` | object | No | -- | Additional context included in the evidence record. Free-form. |
 | `format` | string | No | `canonical-json`, `json` | Evidence payload serialization format. |
+
+The `ssh` evidence provider accepts only `canonical-json`. When `verify.required` is `true`, configure a signing `key_path`, the signing `principal`, and an `allowed_signers_path` that trusts that principal and public key. Verification fails closed when the trust file is missing or does not contain the signer.
 
 ### verify (on evidence profiles)
 

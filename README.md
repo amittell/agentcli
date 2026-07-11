@@ -301,7 +301,7 @@ For the full guide: [Identity Setup](docs/guide-identity.md) | [Wrapping CLI Too
 | `azure-managed-identity` | Acquires a token from the Azure Instance Metadata Service (IMDS). Works on Azure VMs, App Service, and Container Instances. |
 | `aws-sts-assume-role` | Assumes an AWS IAM role via STS and returns temporary credentials. Includes AWS Signature V4 signing. |
 | `gcp-workload-identity` | Acquires a token from the GCP metadata server. Works on Compute Engine, Cloud Run, and GKE. |
-| `spiffe-jwt-svid` | Acquires a JWT-SVID from the SPIFFE Workload API or a projected volume file. Works in SPIFFE-enabled Kubernetes clusters. |
+| `spiffe-jwt-svid` | Reads a file-mounted JWT-SVID and verifies its issuer, audience, lifetime, subject, and signature against exactly one local trust source. Workload API sockets are not accepted. |
 | `entra-agent-id` | Acquires a token via Microsoft Entra Agent ID using JWT bearer client assertion. Supports Agent Registry, Conditional Access, and IMDS fallback. |
 | `stripe-api-key` | Resolves Stripe API keys with scope-aware permissions. Supports precreated restricted keys by scope name and dynamic key minting via the Stripe API. |
 

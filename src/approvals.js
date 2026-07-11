@@ -111,6 +111,9 @@ export function computeTaskApprovalHash({
   task: suppliedTask,
   taskId,
   cwd = process.cwd(),
+  env = process.env,
+  timeoutMs,
+  instanceId,
 } = {}) {
   if (binding) return computeEffectiveTaskHash(binding);
 
@@ -140,6 +143,9 @@ export function computeTaskApprovalHash({
     workflow: compatibilityWorkflow,
     task,
     cwd,
+    env,
+    timeoutMs,
+    instanceId,
   }));
 }
 
@@ -405,6 +411,9 @@ export function grantApproval({
   signer,
   signingKey,
   env = process.env,
+  cwd = process.cwd(),
+  timeoutMs,
+  instanceId,
   now = Date.now(),
 }) {
   if (!manifest || typeof manifest !== 'object') {
@@ -475,6 +484,10 @@ export function grantApproval({
     expanded,
     workflow,
     task,
+    cwd,
+    env,
+    timeoutMs,
+    instanceId,
   });
   const taskHash = computeTaskApprovalHash({ binding });
   const grantedAt = new Date(now).toISOString();

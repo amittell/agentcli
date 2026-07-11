@@ -61,7 +61,8 @@ Commands:
   inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text]
-          [--ttl-s seconds] [--signer ssh|none] [--signing-key path]
+          [--ttl-s seconds] [--timeout ms] [--instance-id id]
+          [--signer ssh|none] [--signing-key path]
   approvals list [--status pending|consumed|expired|revoked|all] [--workflow id] [--task id]
   approvals revoke <approval-id> [--by principal] [--reason text]
   verify <execution-id> [--allowed-signers path]
@@ -174,6 +175,8 @@ const COMMAND_FLAGS = Object.freeze({
     by: VALUE_FLAG,
     reason: VALUE_FLAG,
     'ttl-s': VALUE_FLAG,
+    timeout: VALUE_FLAG,
+    'instance-id': VALUE_FLAG,
     signer: VALUE_FLAG,
     'signing-key': VALUE_FLAG,
   },
@@ -676,7 +679,7 @@ export async function runCli(
       const taskId = positionals[2];
       if (!manifestInput || !taskId) {
         throw Object.assign(
-          new Error('Usage: agentcli approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--signer ssh|none] [--signing-key path]'),
+          new Error('Usage: agentcli approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--timeout ms] [--instance-id id] [--signer ssh|none] [--signing-key path]'),
           { code: 'invalid_argument' }
         );
       }
@@ -685,6 +688,13 @@ export async function runCli(
       if (rawTtl != null && (typeof rawTtl !== 'string' || !/^[1-9][0-9]*$/.test(rawTtl))) {
         throw Object.assign(
           new Error(`Invalid --ttl-s value: ${rawTtl}. Must be a positive integer (seconds).`),
+          { code: 'invalid_argument' }
+        );
+      }
+      const rawTimeout = flags.timeout;
+      if (rawTimeout != null && (typeof rawTimeout !== 'string' || !/^[1-9][0-9]*$/.test(rawTimeout))) {
+        throw Object.assign(
+          new Error(`Invalid --timeout value: ${rawTimeout}. Must be a positive integer (milliseconds).`),
           { code: 'invalid_argument' }
         );
       }
@@ -705,6 +715,9 @@ export async function runCli(
         signer: flags.signer || undefined,
         signingKey: flags['signing-key'] || undefined,
         env: derivedEnv,
+        cwd,
+        timeoutMs: rawTimeout ? Number(rawTimeout) : undefined,
+        instanceId: flags['instance-id'] || undefined,
       });
       return formatOutput({ ok: true, approval: record }, { mode: outputMode, pretty });
     }

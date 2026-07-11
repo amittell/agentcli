@@ -16,6 +16,8 @@ import process from 'node:process';
 import { canonicalStringify, hashString } from '../canonical.js';
 import { registerVerifier } from './index.js';
 
+const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
+
 /**
  * Attempt to auto-detect a suitable verification algorithm from a PEM public key.
  *
@@ -26,6 +28,7 @@ import { registerVerifier } from './index.js';
  * @returns {string|null|undefined} Algorithm identifier, null for EdDSA, or undefined for unsupported keys.
  */
 function detectAlgorithm(pem) {
+  if (PRIVATE_KEY_PEM.test(String(pem))) return undefined;
   try {
     const keyObj = createPublicKey(pem);
     const type = keyObj.asymmetricKeyType;

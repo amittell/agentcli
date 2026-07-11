@@ -2,6 +2,7 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -154,6 +155,7 @@ export function writeJsonOutput(outputPath, payload, { cwd = process.cwd() } = {
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    if (process.platform !== 'win32') fchmodSync(fd, 0o600);
     writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   } catch (err) {
     if (err?.code === 'ELOOP') {

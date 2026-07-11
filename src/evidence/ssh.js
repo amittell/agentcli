@@ -160,6 +160,17 @@ const sshEvidenceProvider = {
   name: 'ssh',
   methods: ['ssh-signature'],
 
+  validateProfile(profile = {}) {
+    const format = profile.payload?.format;
+    if (format != null && format !== 'canonical-json') {
+      return {
+        valid: false,
+        errors: ['payload.format must be "canonical-json" for the SSH evidence provider'],
+      };
+    }
+    return { valid: true };
+  },
+
   /**
    * Resolve signing credentials from config and context.
    *
