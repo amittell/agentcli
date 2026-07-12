@@ -1,12 +1,16 @@
 import {
-  chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync,
-  mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync,
+  closeSync, constants as fsConstants, existsSync, fchmodSync, lstatSync,
+  openSync, readFileSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getProvider, resolveProvider } from './signing/index.js';
 import { resolveAllowedSigners, generateAllowedSigners } from './signing/ssh.js';
-import { getAgentcliPaths } from './home.js';
+import {
+  assertRegularFileDescriptor,
+  ensurePrivateDirectory,
+  getAgentcliPaths,
+} from './home.js';
 import { canonicalStringify } from './canonical.js';
 import {
   buildEffectiveExecutionBinding,
@@ -45,8 +49,7 @@ function withApprovalsLock(approvalsPath, fn, {
   now = () => Date.now(),
 } = {}) {
   const stateDirectory = dirname(approvalsPath);
-  mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') chmodSync(stateDirectory, 0o700);
+  ensurePrivateDirectory(stateDirectory);
   const lockPath = `${approvalsPath}${LOCK_SUFFIX}`;
   const deadline = now() + timeoutMs;
   let fd;
@@ -168,9 +171,10 @@ export function approverMatchesScope(approver, scope) {
 
 function readApprovalsLog(approvalsPath) {
   if (!approvalsPath || !existsSync(approvalsPath)) return [];
-  if (lstatSync(approvalsPath).isSymbolicLink()) {
+  const approvalsState = lstatSync(approvalsPath);
+  if (approvalsState.isSymbolicLink() || !approvalsState.isFile()) {
     throw Object.assign(
-      new Error('Refusing to read approvals from a symbolic link'),
+      new Error('Refusing to read approvals from a non-regular file'),
       { code: 'approval_log_invalid' }
     );
   }
@@ -198,14 +202,16 @@ function appendApprovalEventUnlocked(event, approvalsPath) {
       fsConstants.O_WRONLY |
         fsConstants.O_APPEND |
         fsConstants.O_CREAT |
+        (fsConstants.O_NONBLOCK || 0) |
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    assertRegularFileDescriptor(descriptor, approvalsPath, { code: 'approval_log_invalid' });
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
     writeSync(descriptor, JSON.stringify(event) + '\n', null, 'utf8');
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-  if (process.platform !== 'win32') chmodSync(approvalsPath, 0o600);
 }
 
 function writeApprovalEvent(event, { approvalsPath }) {

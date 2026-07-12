@@ -5,10 +5,16 @@ import {
 } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,7 +41,10 @@ import {
   validateCompleteEvidencePayload,
   validateEvidenceRecordBinding,
 } from '../src/evidence/payload.js';
-import { sshEvidenceProvider } from '../src/evidence/ssh.js';
+import {
+  generateAllowedSigners as generateEvidenceAllowedSigners,
+  sshEvidenceProvider,
+} from '../src/evidence/ssh.js';
 import { registerEvidenceProvider, verifyEvidenceEnvelope } from '../src/evidence/index.js';
 import {
   generateExecutionId,
@@ -530,6 +539,68 @@ test('SSH evidence profiles reject non-canonical payload serialization', () => {
     () => compileManifestToStandalone(manifest),
     error => error.validation?.ok === false && /canonical-json/.test(JSON.stringify(error.validation))
   );
+});
+
+test('SSH evidence allowed signers refuse a symbolic-link output directory', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-evidence-signers-link-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const targetDirectory = join(root, 'target');
+  const linkedDirectory = join(root, 'linked');
+  mkdirSync(sshDirectory, { recursive: true });
+  mkdirSync(targetDirectory);
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  try {
+    symlinkSync(
+      targetDirectory,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('directory link creation is unavailable on this Windows runner');
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => generateEvidenceAllowedSigners({
+      principal: 'agentcli@test',
+      homeDir: home,
+      outputPath: join(linkedDirectory, 'allowed_signers'),
+    }),
+    error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+  );
+  assert.equal(existsSync(join(targetDirectory, 'allowed_signers')), false);
+});
+
+test('SSH evidence allowed signers refuse a FIFO output without blocking', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-evidence-signers-fifo-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const outputPath = join(root, 'allowed_signers');
+  mkdirSync(sshDirectory, { recursive: true });
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  const created = spawnSync('mkfifo', [outputPath], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr || created.error?.message);
+  const reader = openSync(outputPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    assert.throws(
+      () => generateEvidenceAllowedSigners({
+        principal: 'agentcli@test',
+        homeDir: home,
+        outputPath,
+      }),
+      error => error.code === 'invalid_argument' && /non-regular file/.test(error.message)
+    );
+  } finally {
+    closeSync(reader);
+  }
 });
 
 test('SSH evidence persists a versioned envelope that can be independently verified', async () => {

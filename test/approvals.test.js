@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, statSync, symlinkSync, utimesSync } from 'node:fs';
+import { closeSync, constants as fsConstants, mkdtempSync, openSync, readFileSync, realpathSync, writeFileSync, appendFileSync, existsSync, rmSync, mkdirSync, statSync, symlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Worker } from 'node:worker_threads';
@@ -328,6 +328,34 @@ test('approval writes refuse symbolic-link log destinations', { skip: process.pl
     );
     assert.equal(readFileSync(target, 'utf8'), 'unchanged\n');
   } finally {
+    cleanup();
+  }
+});
+
+test('approval writes refuse FIFO log destinations without blocking', {
+  skip: process.platform === 'win32',
+}, () => {
+  const { env, cleanup } = isolatedEnv();
+  let reader;
+  try {
+    const paths = getAgentcliPaths({ env });
+    mkdirSync(paths.state, { recursive: true });
+    const created = spawnSync('mkfifo', [paths.approvals], { encoding: 'utf8' });
+    assert.equal(created.status, 0, created.stderr || created.error?.message);
+    reader = openSync(paths.approvals, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    const manifest = makeManifest({ approval: { policy: 'manual', risk_level: 'high' } });
+    assert.throws(
+      () => grantApproval({
+        manifest,
+        taskId: 'echo-task',
+        approver: 'alice',
+        signer: 'none',
+        env,
+      }),
+      error => error.code === 'approval_log_invalid' && /non-regular file/.test(error.message)
+    );
+  } finally {
+    if (reader !== undefined) closeSync(reader);
     cleanup();
   }
 });

@@ -1,11 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
+  fchmodSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
   unlinkSync,
@@ -15,6 +14,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { registerProvider } from './index.js';
+import { assertRegularFileDescriptor, ensurePrivateDirectory } from '../home.js';
 
 const SSH_KEY_CANDIDATES = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
 const NAMESPACE = 'agentcli';
@@ -129,23 +129,24 @@ export function generateAllowedSigners({ principal, homeDir = homedir(), outputP
   if (lines.length === 0) return null;
 
   const outputDirectory = dirname(outputPath);
-  mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') chmodSync(outputDirectory, 0o700);
+  ensurePrivateDirectory(outputDirectory);
   let descriptor;
   try {
     descriptor = openSync(
       outputPath,
-      fsConstants.O_WRONLY |
+        fsConstants.O_WRONLY |
         fsConstants.O_CREAT |
         fsConstants.O_TRUNC |
+        (fsConstants.O_NONBLOCK || 0) |
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    assertRegularFileDescriptor(descriptor, outputPath);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
     writeFileSync(descriptor, lines.join('\n') + '\n', 'utf8');
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-  if (process.platform !== 'win32') chmodSync(outputPath, 0o600);
   return outputPath;
 }
 

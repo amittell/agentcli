@@ -1,10 +1,9 @@
 import {
-  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
-  fstatSync,
-  mkdirSync,
+  fchmodSync,
+  lstatSync,
   openSync,
   readFileSync,
   readSync,
@@ -13,6 +12,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import process from 'node:process';
+import { assertRegularFileDescriptor, ensurePrivateDirectory } from './home.js';
 
 export function generateExecutionId(_workflowId, _taskId, _timestamp) {
   return randomUUID().replaceAll('-', '');
@@ -20,8 +20,7 @@ export function generateExecutionId(_workflowId, _taskId, _timestamp) {
 
 export function writeAuditRecord(record, { auditPath }) {
   const auditDirectory = dirname(auditPath);
-  mkdirSync(auditDirectory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') chmodSync(auditDirectory, 0o700);
+  ensurePrivateDirectory(auditDirectory);
   let descriptor;
   try {
     descriptor = openSync(
@@ -29,11 +28,14 @@ export function writeAuditRecord(record, { auditPath }) {
       fsConstants.O_RDWR |
         fsConstants.O_APPEND |
         fsConstants.O_CREAT |
+        (fsConstants.O_NONBLOCK || 0) |
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    const auditState = assertRegularFileDescriptor(descriptor, auditPath);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
     let separator = '';
-    const existingSize = fstatSync(descriptor).size;
+    const existingSize = auditState.size;
     if (existingSize > 0) {
       const finalByte = Buffer.allocUnsafe(1);
       readSync(descriptor, finalByte, 0, 1, existingSize - 1);
@@ -43,11 +45,16 @@ export function writeAuditRecord(record, { auditPath }) {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-  if (process.platform !== 'win32') chmodSync(auditPath, 0o600);
 }
 
 export function readAuditLog({ auditPath, limit, onMalformed } = {}) {
   if (!auditPath || !existsSync(auditPath)) return [];
+  const auditState = lstatSync(auditPath);
+  if (auditState.isSymbolicLink() || !auditState.isFile()) {
+    throw Object.assign(new Error(`Refusing to read a non-regular audit file: ${auditPath}`), {
+      code: 'invalid_argument',
+    });
+  }
   const content = readFileSync(auditPath, 'utf8');
   if (!content.trim()) return [];
 

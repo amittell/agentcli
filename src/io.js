@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { isatty } from 'node:tty';
-import { resolveManifestCandidate } from './home.js';
+import { assertRegularFileDescriptor, resolveManifestCandidate } from './home.js';
 
 function looksLikeJsonLiteral(input) {
   if (typeof input !== 'string') return false;
@@ -129,8 +129,12 @@ export function resolveSafeOutputPath(outputPath, cwd = process.cwd()) {
   }
 
   if (existsSync(resolvedPath)) {
-    if (lstatSync(resolvedPath).isSymbolicLink()) {
+    const outputState = lstatSync(resolvedPath);
+    if (outputState.isSymbolicLink()) {
       throw invalidOutput('Refusing to overwrite a symbolic link.');
+    }
+    if (!outputState.isFile()) {
+      throw invalidOutput('Refusing to overwrite a non-regular file.');
     }
     if (!isWithin(baseRealPath, realpathSync(resolvedPath))) {
       throw invalidOutput('Refusing to overwrite a file outside the current working directory.');
@@ -140,7 +144,15 @@ export function resolveSafeOutputPath(outputPath, cwd = process.cwd()) {
   return resolvedPath;
 }
 
-export function writeJsonOutput(outputPath, payload, { cwd = process.cwd() } = {}) {
+export function writeJsonOutput(
+  outputPath,
+  payload,
+  { cwd = process.cwd(), overwrite = true } = {}
+) {
+  if (typeof overwrite !== 'boolean') {
+    throw invalidOutput('Output overwrite option must be a boolean.');
+  }
+  const serialized = `${JSON.stringify(payload, null, 2)}\n`;
   let resolvedPath = resolveSafeOutputPath(outputPath, cwd);
   mkdirSync(dirname(resolvedPath), { recursive: true, mode: 0o700 });
   resolvedPath = resolveSafeOutputPath(outputPath, cwd);
@@ -151,12 +163,14 @@ export function writeJsonOutput(outputPath, payload, { cwd = process.cwd() } = {
       resolvedPath,
       fsConstants.O_WRONLY |
         fsConstants.O_CREAT |
-        fsConstants.O_TRUNC |
+        (overwrite ? fsConstants.O_TRUNC : fsConstants.O_EXCL) |
+        (fsConstants.O_NONBLOCK || 0) |
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    assertRegularFileDescriptor(fd, resolvedPath);
     if (process.platform !== 'win32') fchmodSync(fd, 0o600);
-    writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    writeFileSync(fd, serialized, 'utf8');
   } catch (err) {
     if (err?.code === 'ELOOP') {
       throw invalidOutput('Refusing to overwrite a symbolic link.');

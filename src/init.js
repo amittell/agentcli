@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { validateManifest } from './validate.js';
 import { resolveSafeOutputPath, writeJsonOutput } from './io.js';
@@ -71,12 +70,15 @@ export function writeManifest(manifest, { output, cwd = process.cwd() } = {}) {
   const requestedPath = output || 'agentcli.json';
   const filePath = resolveSafeOutputPath(requestedPath, cwd);
 
-  if (existsSync(filePath)) {
-    throw Object.assign(
-      new Error(`File already exists: ${filePath}. Use --output to specify a different path or remove the existing file.`),
-      { code: 'invalid_argument' }
-    );
+  try {
+    return writeJsonOutput(requestedPath, manifest, { cwd, overwrite: false });
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw Object.assign(
+        new Error(`File already exists: ${filePath}. Use --output to specify a different path or remove the existing file.`),
+        { code: 'invalid_argument' }
+      );
+    }
+    throw error;
   }
-
-  return writeJsonOutput(requestedPath, manifest, { cwd });
 }

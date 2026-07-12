@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -532,5 +535,50 @@ test('safe JSON output creates mode-restricted files inside cwd', (t) => {
     assert.equal(statSync(join(base, 'nested')).mode & 0o777, 0o700);
     assert.equal(statSync(join(base, 'nested', 'private')).mode & 0o777, 0o700);
     assert.equal(statSync(written).mode & 0o777, 0o600);
+  }
+});
+
+test('safe JSON output can atomically refuse overwrites without side effects', (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'agentcli-output-exclusive-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const existingPath = join(base, 'existing.json');
+  writeFileSync(existingPath, 'sentinel\n', 'utf8');
+  assert.throws(
+    () => writeJsonOutput('existing.json', { replaced: true }, { cwd: base, overwrite: false }),
+    error => error.code === 'EEXIST'
+  );
+  assert.equal(readFileSync(existingPath, 'utf8'), 'sentinel\n');
+
+  const circular = {};
+  circular.self = circular;
+  assert.throws(
+    () => writeJsonOutput('nested/circular.json', circular, { cwd: base, overwrite: false }),
+    /circular/i
+  );
+  assert.equal(existsSync(join(base, 'nested')), false);
+
+  assert.throws(
+    () => writeJsonOutput('invalid.json', { ok: true }, { cwd: base, overwrite: 'no' }),
+    error => error.code === 'invalid_argument' && /overwrite option/.test(error.message)
+  );
+});
+
+test('safe JSON output refuses FIFO destinations without blocking', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'agentcli-output-fifo-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const outputPath = join(base, 'result.json');
+  const created = spawnSync('mkfifo', [outputPath], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr || created.error?.message);
+  const reader = openSync(outputPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    assert.throws(
+      () => writeJsonOutput('result.json', { ok: true }, { cwd: base }),
+      error => error.code === 'invalid_argument' && /non-regular file/.test(error.message)
+    );
+  } finally {
+    closeSync(reader);
   }
 });

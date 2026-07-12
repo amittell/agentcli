@@ -9,12 +9,11 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
+  fchmodSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
   unlinkSync,
@@ -23,6 +22,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { canonicalStringify, hashString } from '../canonical.js';
+import { assertRegularFileDescriptor, ensurePrivateDirectory } from '../home.js';
 import { registerEvidenceProvider } from './index.js';
 import { validateCompleteEvidencePayload } from './payload.js';
 
@@ -134,23 +134,24 @@ export function generateAllowedSigners({ principal, homeDir = homedir(), outputP
   if (lines.length === 0) return null;
 
   const outputDirectory = dirname(outputPath);
-  mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') chmodSync(outputDirectory, 0o700);
+  ensurePrivateDirectory(outputDirectory);
   let descriptor;
   try {
     descriptor = openSync(
       outputPath,
-      fsConstants.O_WRONLY |
+        fsConstants.O_WRONLY |
         fsConstants.O_CREAT |
         fsConstants.O_TRUNC |
+        (fsConstants.O_NONBLOCK || 0) |
         (fsConstants.O_NOFOLLOW || 0),
       0o600
     );
+    assertRegularFileDescriptor(descriptor, outputPath);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
     writeFileSync(descriptor, lines.join('\n') + '\n', 'utf8');
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-  if (process.platform !== 'win32') chmodSync(outputPath, 0o600);
   return outputPath;
 }
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createSign } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -3100,11 +3100,14 @@ test('cli init rejects when agentcli.json already exists', async (t) => {
 
   const envOverride = { ...process.env, AGENTCLI_HOME: homeRoot };
   await runCli(['init'], { cwd: workdir, env: envOverride });
+  const manifestPath = join(workdir, 'agentcli.json');
+  const original = readFileSync(manifestPath, 'utf8');
 
   await assert.rejects(
     runCli(['init'], { cwd: workdir, env: envOverride }),
     /File already exists/
   );
+  assert.equal(readFileSync(manifestPath, 'utf8'), original);
 });
 
 // --- Sweep 10 tests ---
@@ -4560,6 +4563,68 @@ test('resolveSigningKey finds SSH key from home directory', () => {
 test('resolveSigningKey respects AGENTCLI_SIGNING_KEY env', () => {
   const key = resolveSigningKey({ env: { AGENTCLI_SIGNING_KEY: '/nonexistent/key' } });
   assert.equal(key, null);
+});
+
+test('generateAllowedSigners refuses a symbolic-link output directory', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-signers-dir-link-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const targetDirectory = join(root, 'target');
+  const linkedDirectory = join(root, 'linked');
+  mkdirSync(sshDirectory, { recursive: true });
+  mkdirSync(targetDirectory);
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  try {
+    symlinkSync(
+      targetDirectory,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('directory link creation is unavailable on this Windows runner');
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => generateAllowedSigners({
+      principal: 'agentcli@test',
+      homeDir: home,
+      outputPath: join(linkedDirectory, 'allowed_signers'),
+    }),
+    error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+  );
+  assert.equal(existsSync(join(targetDirectory, 'allowed_signers')), false);
+});
+
+test('generateAllowedSigners refuses a FIFO output without blocking', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-signers-fifo-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const outputPath = join(root, 'allowed_signers');
+  mkdirSync(sshDirectory, { recursive: true });
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  const created = spawnSync('mkfifo', [outputPath], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr || created.error?.message);
+  const reader = openSync(outputPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    assert.throws(
+      () => generateAllowedSigners({
+        principal: 'agentcli@test',
+        homeDir: home,
+        outputPath,
+      }),
+      error => error.code === 'invalid_argument' && /non-regular file/.test(error.message)
+    );
+  } finally {
+    closeSync(reader);
+  }
 });
 
 test('buildAttestationPayload produces deterministic canonical JSON', () => {

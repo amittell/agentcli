@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -27,6 +33,19 @@ import {
   writeAuditRecord,
   writeJsonOutput,
 } from '../src/index.js';
+
+function createDirectoryLinkOrSkip(t, target, link) {
+  try {
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('directory link creation is unavailable on this Windows runner');
+      return false;
+    }
+    throw error;
+  }
+}
 
 function manifestWithSecrets() {
   return {
@@ -190,6 +209,28 @@ test('audit append refuses symbolic-link destinations', { skip: process.platform
   }
 });
 
+test('audit append refuses FIFO destinations without blocking', {
+  skip: process.platform === 'win32',
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-audit-fifo-'));
+  const auditPath = join(root, 'audit.ndjson');
+  try {
+    const created = spawnSync('mkfifo', [auditPath], { encoding: 'utf8' });
+    assert.equal(created.status, 0, created.stderr || created.error?.message);
+    const reader = openSync(auditPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      assert.throws(
+        () => writeAuditRecord({ execution_id: 'blocked' }, { auditPath }),
+        error => error.code === 'invalid_argument' && /non-regular file/.test(error.message)
+      );
+    } finally {
+      closeSync(reader);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('JSON output tightens permissions when overwriting an existing file', {
   skip: process.platform === 'win32',
 }, () => {
@@ -238,6 +279,46 @@ test('registry refuses symbolic-link entries', { skip: process.platform === 'win
   }
 });
 
+test('registry refuses FIFO entries without blocking', {
+  skip: process.platform === 'win32',
+}, () => {
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-registry-fifo-'));
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  const manifest = {
+    version: '0.2',
+    workflows: [{
+      id: 'registry-fifo', name: 'Registry FIFO', tasks: [{
+        id: 'run', name: 'Run', target: { session_target: 'shell' },
+        shell: { program: 'true', args: [] },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  try {
+    ensureAgentcliHome({ env });
+    const entryPath = join(home, 'registry', 'blocked.json');
+    const created = spawnSync('mkfifo', [entryPath], { encoding: 'utf8' });
+    assert.equal(created.status, 0, created.stderr || created.error?.message);
+    const reader = openSync(entryPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      assert.throws(
+        () => addToRegistry(manifest, { name: 'blocked', env }),
+        error => error.code === 'invalid_argument' && /non-regular registry entry/.test(error.message)
+      );
+      assert.throws(
+        () => showRegistryEntry('blocked', { env }),
+        error => error.code === 'invalid_argument' && /non-regular registry entry/.test(error.message)
+      );
+      const listed = listRegistry({ env }).find(entry => entry.name === 'blocked');
+      assert.equal(listed.invalid_type_refused, true);
+    } finally {
+      closeSync(reader);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('agentcli home stores state and scaffold files with private permissions', {
   skip: process.platform === 'win32',
 }, () => {
@@ -259,6 +340,121 @@ test('agentcli home stores state and scaffold files with private permissions', {
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('agentcli home refuses a symbolic-link root without mutating its target', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-home-root-link-'));
+  const target = join(root, 'target');
+  const linkedHome = join(root, 'linked-home');
+  try {
+    mkdirSync(target, { mode: 0o755 });
+    if (process.platform !== 'win32') chmodSync(target, 0o755);
+    if (!createDirectoryLinkOrSkip(t, target, linkedHome)) return;
+
+    assert.throws(
+      () => ensureAgentcliHome({ env: { ...process.env, AGENTCLI_HOME: linkedHome }, force: true }),
+      error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+    );
+    assert.equal(existsSync(join(target, 'README.md')), false);
+    if (process.platform !== 'win32') assert.equal(statSync(target).mode & 0o777, 0o755);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('agentcli home refuses symbolic-link managed subdirectories before mutation', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-home-subdir-link-'));
+  try {
+    for (const name of ['manifests', 'output', 'state', 'registry']) {
+      const caseRoot = join(root, name);
+      const home = join(caseRoot, 'home');
+      const target = join(caseRoot, 'target');
+      mkdirSync(home, { recursive: true });
+      mkdirSync(target, { mode: 0o755 });
+      if (process.platform !== 'win32') chmodSync(target, 0o755);
+      if (!createDirectoryLinkOrSkip(t, target, join(home, name))) return;
+
+      assert.throws(
+        () => ensureAgentcliHome({ env: { ...process.env, AGENTCLI_HOME: home } }),
+        error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+      );
+      assert.equal(existsSync(join(home, 'README.md')), false);
+      if (process.platform !== 'win32') assert.equal(statSync(target).mode & 0o777, 0o755);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('agentcli home refuses dangling links and non-directory managed paths', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-home-invalid-paths-'));
+  try {
+    const missingTarget = join(root, 'missing-target');
+    const danglingHome = join(root, 'dangling-home');
+    if (!createDirectoryLinkOrSkip(t, missingTarget, danglingHome)) return;
+    assert.throws(
+      () => ensureAgentcliHome({ env: { ...process.env, AGENTCLI_HOME: danglingHome } }),
+      error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+    );
+    assert.equal(existsSync(missingTarget), false);
+
+    for (const name of ['root', 'manifests', 'output', 'state', 'registry']) {
+      const caseRoot = join(root, `wrong-${name}`);
+      const home = name === 'root' ? join(caseRoot, 'home-file') : join(caseRoot, 'home');
+      mkdirSync(caseRoot, { recursive: true });
+      if (name !== 'root') mkdirSync(home);
+      const wrongPath = name === 'root' ? home : join(home, name);
+      writeFileSync(wrongPath, 'unchanged\n', 'utf8');
+
+      assert.throws(
+        () => ensureAgentcliHome({ env: { ...process.env, AGENTCLI_HOME: home } }),
+        error => error.code === 'invalid_argument' && /Expected directory path/.test(error.message)
+      );
+      assert.equal(readFileSync(wrongPath, 'utf8'), 'unchanged\n');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('agentcli home refuses symbolic-link scaffold files even with force', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-home-file-link-'));
+  try {
+    for (const [relativePath, force] of [
+      ['README.md', false],
+      ['README.md', true],
+      [join('manifests', 'bot-health.json'), false],
+      [join('manifests', 'bot-health.json'), true],
+    ]) {
+      const caseRoot = join(root, relativePath.replaceAll('/', '-'), force ? 'force' : 'normal');
+      const home = join(caseRoot, 'home');
+      const target = join(caseRoot, 'target.txt');
+      const env = { ...process.env, AGENTCLI_HOME: home };
+      ensureAgentcliHome({ env });
+      const linkedFile = join(home, relativePath);
+      rmSync(linkedFile);
+      writeFileSync(target, 'unchanged\n', { mode: 0o644 });
+      if (process.platform !== 'win32') chmodSync(target, 0o644);
+      try {
+        symlinkSync(target, linkedFile, 'file');
+      } catch (error) {
+        if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+          t.skip('file link creation is unavailable on this Windows runner');
+          return;
+        }
+        throw error;
+      }
+
+      assert.throws(
+        () => ensureAgentcliHome({ env, force }),
+        error => error.code === 'invalid_argument' && /symbolic-link regular file/.test(error.message)
+      );
+      assert.equal(readFileSync(target, 'utf8'), 'unchanged\n');
+      if (process.platform !== 'win32') assert.equal(statSync(target).mode & 0o777, 0o644);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
