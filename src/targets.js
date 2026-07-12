@@ -1,29 +1,12 @@
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
-import { compileManifestToStandalone } from './compiler/standalone.js';
+import { compileManifestToStandalone, STANDALONE_FEATURES } from './compiler/standalone.js';
 
 export const TARGETS = {
   standalone: {
     name: 'standalone',
     description: 'Portable execution plan for authoring, validation, and protocol use without a bound runtime.',
     capabilities: ['schema', 'validate', 'compile', 'describe', 'json-rpc'],
-    features: {
-      approvals: 'intent-only',
-      model_policy: 'portable',
-      execution_intent: 'portable',
-      output_hints: 'portable',
-      timeout_support: 'portable',
-      context_retrieval: 'portable',
-      runtime_execution: false,
-      identity_declaration: true,
-      runtime_identity_resolution: false,
-      evidence_generation: false,
-      audit_export: false,
-      trust_evaluation: false,
-      delegation_validation: false,
-      credential_handoff: false,
-      authorization_proof_verification: false,
-      authorization_hook: false,
-    },
+    features: { ...STANDALONE_FEATURES },
     compile: compileManifestToStandalone,
   },
   'openclaw-scheduler': {
@@ -50,6 +33,9 @@ export const TARGETS = {
       credential_handoff: false,
       authorization_proof_verification: false,
       authorization_hook: false,
+      root_approval_gate: false,
+      approval_scope_enforcement: false,
+      structured_output_format: false,
     },
     compile: compileManifestToScheduler,
   },

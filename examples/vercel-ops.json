@@ -107,8 +107,7 @@
           "name": "List Recent Deployments",
           "shell": {
             "program": "vercel",
-            "args": ["list", "--json"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["list", "--json"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-readonly" },
@@ -124,8 +123,7 @@
           "name": "Check Domain Configuration",
           "shell": {
             "program": "vercel",
-            "args": ["domains", "list", "--json"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["domains", "list", "--json"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-readonly" },
@@ -140,8 +138,7 @@
           "name": "Deploy to Preview",
           "shell": {
             "program": "vercel",
-            "args": ["deploy", "--json", "--no-wait"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["deploy", "--json", "--no-wait"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-deploy-credentials" },
@@ -166,8 +163,7 @@
           "name": "Inspect Preview Deployment",
           "shell": {
             "program": "vercel",
-            "args": ["inspect", "--json"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["inspect", "--json"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-readonly" },
@@ -186,8 +182,7 @@
           "name": "Promote to Production",
           "shell": {
             "program": "vercel",
-            "args": ["promote", "--json", "--yes"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["promote", "--json", "--yes"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-deploy-credentials" },
@@ -244,8 +239,7 @@
           "name": "Audit Environment Variables",
           "shell": {
             "program": "vercel",
-            "args": ["env", "list", "--json"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["env", "list", "--json"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "vercel-readonly" },

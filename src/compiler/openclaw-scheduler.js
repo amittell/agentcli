@@ -9,7 +9,8 @@ import {
   stableId
 } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
-import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../scheduler-fields.js';
+import { canonicalDigest } from '../canonical.js';
+import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03 } from '../scheduler-fields.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
 const TRIGGERED_SENTINEL_TZ = 'UTC';
@@ -79,6 +80,15 @@ function sanitizeIdentityDeclaration(identity) {
     && Object.values(presentation).some(v => v != null);
   return {
     ...identity,
+    subject: identity.subject
+      ? {
+          ...identity.subject,
+          attributes_hash: identity.subject.attributes == null
+            ? null
+            : canonicalDigest(identity.subject.attributes),
+          attributes: null,
+        }
+      : null,
     auth: identity.auth
       ? {
           ...identity.auth,
@@ -95,6 +105,15 @@ function sanitizeIdentityProfile(profile) {
   return {
     ...profile,
     provider_config: null,
+    subject: profile.subject
+      ? {
+          ...profile.subject,
+          attributes_hash: profile.subject.attributes == null
+            ? null
+            : canonicalDigest(profile.subject.attributes),
+          attributes: null,
+        }
+      : null,
     auth: profile.auth
       ? {
           ...profile.auth,
@@ -205,6 +224,25 @@ function validateSchedulerReservedValues(errors, taskPath, job) {
   }
 }
 
+function validateSchedulerShellInputs(errors, taskPath, plan) {
+  if (plan.execution.payload_kind !== 'shellCommand') return;
+  const payload = plan.execution.payload || {};
+  if (Object.keys(payload.env || {}).length > 0) {
+    addTargetValidationError(
+      errors,
+      `${taskPath}.shell.env`,
+      'openclaw-scheduler persists shell commands; shell.env values are refused to prevent credential disclosure. Use an identity provider or runtime-managed environment instead.'
+    );
+  }
+  if (payload.stdin != null) {
+    addTargetValidationError(
+      errors,
+      `${taskPath}.shell.stdin`,
+      'openclaw-scheduler persists shell commands; inline stdin is refused because it may contain sensitive material.'
+    );
+  }
+}
+
 export function compileManifestToScheduler(manifest, { includeExplain = false } = {}) {
   const validation = validateManifest(manifest);
   if (!validation.ok) {
@@ -268,7 +306,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         id: plan.id,
         source: plan.source,
         name: plan.name,
-        enabled: plan.enabled ? 1 : 0,
+        enabled: plan.enabled && plan.approval.policy !== 'auto-reject' ? 1 : 0,
         schedule_cron: isTriggered ? TRIGGERED_SENTINEL_CRON : plan.invocation.cron,
         schedule_tz: isTriggered ? TRIGGERED_SENTINEL_TZ : plan.invocation.tz,
         session_target: plan.execution.session_target,
@@ -298,9 +336,12 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         approval_required: plan.approval.required,
         approval_timeout_s: plan.approval.timeout_s ?? SCHEDULER_DEFAULT_APPROVAL_TIMEOUT_S,
         approval_auto: plan.approval.auto ?? SCHEDULER_DEFAULT_APPROVAL_AUTO,
+        approval_risk_level: task.approval?.risk_level ?? null,
+        approval_approver_scope: task.approval?.approver_scope ?? null,
         context_retrieval: plan.context.retrieval,
         context_retrieval_limit: plan.context.limit,
         ...outputPolicy,
+        output_format: plan.output.format,
         preferred_session_key: plan.session.preferred_key,
         auth_profile: plan.auth_profile ?? null,
         identity_principal: plan.identity?.principal ?? null,
@@ -347,6 +388,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
       };
       validateSchedulerStringLimits(targetErrors, taskPath, job);
       validateSchedulerReservedValues(targetErrors, taskPath, job);
+      validateSchedulerShellInputs(targetErrors, taskPath, plan);
 
       if (isTriggered && task.trigger?.parent) {
         // The effective policy here uses a 3-level fallback (child -> parent task
@@ -422,9 +464,10 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
     target: 'openclaw-scheduler',
     version: '0.2',
     handoff: {
-      field_version: '2',
+      field_version: '3',
       v1_field_count: SCHEDULER_FIELDS_V1.length,
       v2_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length,
+      v3_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length + SCHEDULER_FIELDS_V03.length,
     },
     jobs,
     ...profiles,

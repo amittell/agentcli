@@ -70,3 +70,104 @@ export function resolveVerifier(methodName) {
   }
   return verifier;
 }
+
+/**
+ * Run method-specific validation and normalize malformed verifier responses
+ * to a closed failure.
+ */
+export function validateAuthorizationProofProfile(profile, ctx = {}) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    return {
+      valid: false,
+      errors: [{ field: '$', message: 'authorization proof profile must be an object' }],
+    };
+  }
+  if (typeof profile.method !== 'string' || profile.method.length === 0) {
+    return {
+      valid: false,
+      errors: [{ field: 'method', message: 'authorization proof method is required' }],
+    };
+  }
+
+  let verifier;
+  try {
+    verifier = resolveVerifier(profile.method);
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{ field: 'method', message: error.message }],
+    };
+  }
+
+  try {
+    const result = verifier.validateProfile(profile, ctx);
+    if (!result || result.valid !== true) {
+      return {
+        valid: false,
+        errors: Array.isArray(result?.errors) && result.errors.length > 0
+          ? result.errors
+          : [{ field: '$', message: `verifier "${profile.method}" rejected the profile` }],
+      };
+    }
+    return { valid: true, errors: [] };
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{ field: '$', message: `profile validation failed: ${error.message}` }],
+    };
+  }
+}
+
+/**
+ * Throw a structured error when a proof profile is not executable.
+ */
+export function assertValidAuthorizationProofProfile(profile, ctx = {}) {
+  const validation = validateAuthorizationProofProfile(profile, ctx);
+  if (!validation.valid) {
+    const detail = validation.errors
+      .map(error => `${error.field}: ${error.message}`)
+      .join('; ');
+    throw Object.assign(
+      new Error(`Invalid authorization proof profile: ${detail}`),
+      {
+        code: 'authorization_proof_invalid',
+        validation,
+      }
+    );
+  }
+  return resolveVerifier(profile.method);
+}
+
+/**
+ * Verify a proof after validating the profile. Any malformed provider result
+ * is converted to verified:false so callers cannot accidentally treat it as
+ * a successful verification.
+ */
+export async function verifyAuthorizationProof(proof, profile, ctx = {}) {
+  const verifier = assertValidAuthorizationProofProfile(profile, ctx);
+  let verificationContext = ctx;
+  try {
+    if (profile.method === 'jwt') {
+      const { resolveJwtVerificationContext } = await import('./jwt.js');
+      verificationContext = await resolveJwtVerificationContext(proof, profile, ctx);
+    }
+    const result = await verifier.verifyProof(proof, profile, verificationContext);
+    if (!result || result.verified !== true) {
+      return {
+        ...(result && typeof result === 'object' ? result : {}),
+        verified: false,
+        method: result?.method || profile.method,
+        reason: result?.reason || 'authorization proof verification did not succeed',
+      };
+    }
+    return result;
+  } catch (error) {
+    return {
+      verified: false,
+      method: profile.method,
+      reason: `authorization proof verification failed: ${error.message}`,
+      manifest_digest: verificationContext.manifestDigest || null,
+      verified_at: new Date().toISOString(),
+    };
+  }
+}

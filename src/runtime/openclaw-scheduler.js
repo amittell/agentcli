@@ -6,26 +6,21 @@
  */
 
 import { compileManifestToScheduler } from '../compiler/openclaw-scheduler.js';
-import { createSchedulerCliRunner, schedulerCreateSpec } from '../apply.js';
+import {
+  createSchedulerCliRunner,
+  negotiateSchedulerFieldVersion,
+  schedulerCreateSpec,
+} from '../apply.js';
 import {
   querySchedulerCapabilities,
   resolveEffectiveFeatures,
   validateManifestCapabilities,
 } from '../capabilities.js';
 
-const compiledManifestCache = new WeakMap();
-
 export function compileManifestForDispatch(manifest) {
-  if (!manifest || typeof manifest !== 'object') {
-    return compileManifestToScheduler(manifest);
-  }
-
-  const cached = compiledManifestCache.get(manifest);
-  if (cached) return cached;
-
-  const compiled = compileManifestToScheduler(manifest);
-  compiledManifestCache.set(manifest, compiled);
-  return compiled;
+  // Manifests are ordinary mutable JavaScript objects. Recompile on every
+  // dispatch so a caller cannot receive a stale job after an in-place edit.
+  return compileManifestToScheduler(manifest);
 }
 
 export const schedulerAdapter = {
@@ -84,7 +79,7 @@ export const schedulerAdapter = {
     }
 
     // Mark as one-off so the scheduler deletes the job after a single run.
-    // Spread to avoid mutating the compiler output in case it is cached/reused.
+    // Spread to avoid mutating the compiler output returned to other callers.
     const jobSpec = { ...job, delete_after_run: 1 };
 
     if (dryRun) {
@@ -111,7 +106,6 @@ export const schedulerAdapter = {
 
     const runtimeCaps = querySchedulerCapabilities(runner);
     const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
-    const handoffVersion = effectiveResult.handoff_version || '1';
     const {
       errors: capabilityErrors,
       warnings: capabilityWarnings,
@@ -122,6 +116,10 @@ export const schedulerAdapter = {
         { code: 'unsupported_capability', capability_errors: capabilityErrors }
       );
     }
+    const handoffVersion = negotiateSchedulerFieldVersion(
+      [jobSpec],
+      effectiveResult.handoff_version || '1'
+    );
 
     const spec = schedulerCreateSpec(jobSpec, { fieldVersion: handoffVersion });
     runner.addJob(spec);

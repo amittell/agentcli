@@ -5,7 +5,7 @@ This guide walks through a local end-to-end test of the Stripe Identity step-up 
 - the manifest: [`../examples/stripe-identity-step-up.json`](../examples/stripe-identity-step-up.json)
 - the OPA policy: [`../examples/stripe-identity-step-up.rego`](../examples/stripe-identity-step-up.rego)
 
-The flow uses `--dry-run`, so you can test proof verification, OPA authorization, and audit output without needing a live backend API behind the wrapped shell commands.
+The generated local manifest replaces the remote API commands with harmless `printf` calls, so the guide can exercise live proof verification, OPA authorization, identity materialization, and audit output without contacting a backend API. Do not add `--dry-run` to those checks: dry-run is intentionally static and skips proof, provider, authorization, evidence, and audit side effects.
 
 ## Prerequisites
 
@@ -57,7 +57,7 @@ http://127.0.0.1:8181/v1/data/agentcli/authz/allow
 
 ## 3. Create a local test manifest with a generated public key
 
-The checked-in example uses a placeholder `jwks_uri`. For local testing, generate an RSA key pair and write a temporary manifest that embeds the public key directly.
+The checked-in example uses an illustrative remote `jwks_uri`. For local testing, generate an RSA key pair and write a temporary manifest that embeds the public key directly.
 
 ```bash
 node --input-type=module <<'EOF'
@@ -70,6 +70,10 @@ writeFileSync('/tmp/agentcli-step-up-private.pem', privateKey.export({ type: 'pk
 const manifest = JSON.parse(readFileSync('examples/stripe-identity-step-up.json', 'utf8'));
 delete manifest.authorization_proof_profiles[0].jwks_uri;
 manifest.authorization_proof_profiles[0].public_key = publicKey.export({ type: 'spki', format: 'pem' });
+manifest.workflows[0].contract.sandbox = 'none';
+for (const task of manifest.workflows[0].tasks) {
+  task.shell = { program: 'printf', args: ['%s\\n', `local test: ${task.id}`] };
+}
 
 writeFileSync('/tmp/stripe-identity-step-up.local.json', JSON.stringify(manifest, null, 2));
 EOF
@@ -83,7 +87,7 @@ node bin/agentcli.js validate /tmp/stripe-identity-step-up.local.json --json
 
 ## 4. Export a dummy primary auth token
 
-The manifest's `identity_profile` still expects a runtime bearer token. Because this guide uses `--dry-run`, the token can be a placeholder.
+The manifest's identity profile still expects a runtime bearer token. The local commands only print fixed text, so use a synthetic local token that is never sent to a remote service.
 
 ```bash
 export BOT_ACCESS_TOKEN="dummy-bot-token"
@@ -101,8 +105,10 @@ export ACTOR_STEP_UP_JWT="$(
   node --input-type=module <<'EOF'
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { canonicalDigest } from './src/canonical.js';
 
 const privateKey = readFileSync('/tmp/agentcli-step-up-private.pem', 'utf8');
+const manifest = JSON.parse(readFileSync('/tmp/stripe-identity-step-up.local.json', 'utf8'));
 const header = Buffer.from(JSON.stringify({
   alg: 'RS256',
   typ: 'JWT',
@@ -122,6 +128,7 @@ const payload = Buffer.from(JSON.stringify({
   verification_level: 'document',
   verification_verified_at: '2026-04-07T12:00:00Z',
   step_up_policy: 'stripe_identity_sensitive_ops',
+  manifest_digest: canonicalDigest(manifest),
   exp: Math.floor(Date.now() / 1000) + 3600
 })).toString('base64url');
 
@@ -132,12 +139,12 @@ EOF
 )"
 ```
 
-## 6. Dry-run the non-sensitive task
+## 6. Run the harmless non-sensitive task
 
 This task does not require step-up proof or OPA authorization.
 
 ```bash
-node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json list-safe-state --dry-run --signer none --json
+node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json list-safe-state --signer none --json
 ```
 
 What to look for:
@@ -146,10 +153,10 @@ What to look for:
 - no authorization proof requirement
 - resolved identity from the `ops-bot` profile
 
-## 7. Dry-run the sensitive task with valid step-up proof
+## 7. Run the harmless sensitive task with valid step-up proof
 
 ```bash
-node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --dry-run --signer none --json
+node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --signer none --json
 ```
 
 What to look for in the JSON output:
@@ -168,7 +175,7 @@ Unset the JWT and rerun the sensitive task:
 
 ```bash
 unset ACTOR_STEP_UP_JWT
-node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --dry-run --signer none --json
+node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --signer none --json
 ```
 
 Expected result:
@@ -185,8 +192,10 @@ export ACTOR_STEP_UP_JWT="$(
   node --input-type=module <<'EOF'
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { canonicalDigest } from './src/canonical.js';
 
 const privateKey = readFileSync('/tmp/agentcli-step-up-private.pem', 'utf8');
+const manifest = JSON.parse(readFileSync('/tmp/stripe-identity-step-up.local.json', 'utf8'));
 const header = Buffer.from(JSON.stringify({
   alg: 'RS256',
   typ: 'JWT',
@@ -206,6 +215,7 @@ const payload = Buffer.from(JSON.stringify({
   verification_level: 'document',
   verification_verified_at: '2026-04-07T12:00:00Z',
   step_up_policy: 'stripe_identity_sensitive_ops',
+  manifest_digest: canonicalDigest(manifest),
   exp: Math.floor(Date.now() / 1000) + 3600
 })).toString('base64url');
 
@@ -219,7 +229,7 @@ EOF
 Now rerun:
 
 ```bash
-node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --dry-run --signer none --json
+node bin/agentcli.js exec /tmp/stripe-identity-step-up.local.json view-sensitive-customer --signer none --json
 ```
 
 Expected result:
@@ -230,7 +240,7 @@ Expected result:
 
 ## 10. Inspect audit output
 
-Because the example workflow uses `contract.audit: "always"`, both successful dry-runs and authorization failures are written to the audit log.
+Because the example workflow uses `contract.audit: "always"`, successful live local runs and authorization failures are written to the audit log. Static dry-runs never write audit records.
 
 ```bash
 node bin/agentcli.js audit --limit 5 --json
@@ -265,7 +275,7 @@ unset ACTOR_STEP_UP_JWT
 
 1. `validate` passes for the checked-in example.
 2. `validate` passes for the generated local manifest.
-3. `list-safe-state --dry-run` succeeds without step-up.
-4. `view-sensitive-customer --dry-run` succeeds with a valid JWT and OPA allow.
-5. `view-sensitive-customer --dry-run` fails when the JWT is missing.
-6. `view-sensitive-customer --dry-run` fails with `authorization_denied` when OPA rejects the actor context.
+3. The harmless local `list-safe-state` task succeeds without step-up.
+4. The harmless local `view-sensitive-customer` task succeeds with a valid manifest-bound JWT and OPA allow.
+5. The sensitive task fails when the JWT is missing.
+6. The sensitive task fails with `authorization_denied` when OPA rejects the actor context.

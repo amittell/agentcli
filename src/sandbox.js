@@ -1,64 +1,98 @@
-import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 
 function toAbsolutePath(value, cwd) {
   if (!value || typeof value !== 'string') return null;
-  return isAbsolute(value) ? value : resolve(cwd, value);
+  return resolve(isAbsolute(value) ? value : resolve(cwd, value));
 }
 
 function uniquePaths(paths) {
   return [...new Set(paths.filter(Boolean))];
 }
 
-function canonicalizePath(pathValue) {
-  if (!pathValue) return [];
-  const values = [pathValue];
-  try {
-    values.push(realpathSync(pathValue));
-  } catch {
-    // Ignore paths that do not exist yet; the non-canonical path is still useful.
+function isPathWithin(candidate, root) {
+  const relation = relative(root, candidate);
+  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+}
+
+/**
+ * Resolve a requested sandbox path through its nearest existing ancestor.
+ * Existing symlinks are resolved, dangling symlinks fail closed, and missing
+ * descendants are appended only beneath the real ancestor path.
+ */
+export function canonicalizeSandboxPath(pathValue, { cwd = process.cwd() } = {}) {
+  const absolute = toAbsolutePath(pathValue, cwd);
+  if (!absolute) {
+    throw Object.assign(new Error('Sandbox path must be a non-empty string'), {
+      code: 'sandbox_path_invalid',
+    });
   }
-  return uniquePaths(values);
+
+  const missing = [];
+  let cursor = absolute;
+  while (true) {
+    try {
+      lstatSync(cursor);
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') {
+        throw Object.assign(new Error('Sandbox path cannot be canonicalized safely'), {
+          code: 'sandbox_path_invalid',
+          cause: error,
+        });
+      }
+
+      const parent = dirname(cursor);
+      if (parent === cursor) {
+        throw Object.assign(new Error('Sandbox path has no resolvable existing ancestor'), {
+          code: 'sandbox_path_invalid',
+        });
+      }
+      missing.push(basename(cursor));
+      cursor = parent;
+      continue;
+    }
+
+    try {
+      const canonicalAncestor = realpathSync(cursor);
+      return resolve(canonicalAncestor, ...missing.reverse());
+    } catch (error) {
+      // lstat succeeded, so an ENOENT here means a dangling symlink rather
+      // than a merely nonexistent descendant. Never treat it as safe.
+      throw Object.assign(new Error('Sandbox path resolves through an unsafe or dangling symlink'), {
+        code: 'sandbox_path_invalid',
+        cause: error,
+      });
+    }
+  }
 }
 
 function escapeSandboxString(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-function commandExists(command) {
-  if (!command) return false;
-  if (command.includes('/')) return true;
-  const result = spawnSync('which', [command], {
-    encoding: 'utf8',
-    timeout: 5000,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  return result.status === 0;
-}
-
+/**
+ * Resolve configured sandbox support without spawning a probe process. The
+ * eventual approved command spawn is the authoritative availability check.
+ */
 export function resolveSandboxSupport({
   env = process.env,
   platform = process.platform,
 } = {}) {
   const mode = String(env.AGENTCLI_SANDBOX || '').trim().toLowerCase();
-  if (['off', '0', 'false', 'disabled', 'none'].includes(mode)) {
-    return null;
-  }
-
-  if (platform === 'darwin') {
-    const command = env.AGENTCLI_SANDBOX_EXEC || 'sandbox-exec';
-    if (commandExists(command)) {
-      return { kind: 'sandbox-exec', command };
-    }
-  }
-
-  return null;
+  if (['off', '0', 'false', 'disabled', 'none'].includes(mode)) return null;
+  if (platform !== 'darwin') return null;
+  return {
+    kind: 'sandbox-exec',
+    command: '/usr/bin/sandbox-exec',
+  };
 }
 
 export function needsSandboxEnforcement(contract = {}) {
-  return contract.sandbox === 'strict' || contract.network === 'restricted' || contract.network === 'none';
+  return contract.sandbox === 'strict' ||
+    contract.network === 'restricted' ||
+    contract.network === 'none' ||
+    (Array.isArray(contract.allowed_paths) && contract.allowed_paths.length > 0);
 }
 
 export function buildMacOSSandboxProfile({
@@ -68,8 +102,10 @@ export function buildMacOSSandboxProfile({
 } = {}) {
   const executionCwd = toAbsolutePath(shellCwd || cwd, cwd);
   const sandboxMode = contract.sandbox || 'none';
+  const restrictFilesystem = sandboxMode === 'strict' ||
+    (Array.isArray(contract.allowed_paths) && contract.allowed_paths.length > 0);
 
-  if (sandboxMode !== 'strict') {
+  if (!restrictFilesystem) {
     const lines = ['(version 1)', '(allow default)'];
     if (contract.network === 'none') {
       lines.push('(deny network*)');
@@ -79,10 +115,21 @@ export function buildMacOSSandboxProfile({
     return lines.join('\n');
   }
 
+  const canonicalExecutionCwd = canonicalizeSandboxPath(executionCwd, { cwd });
+  const canonicalAllowedPaths = (contract.allowed_paths || [])
+    .map(path => canonicalizeSandboxPath(path, { cwd }));
+  if (canonicalAllowedPaths.length > 0 &&
+      !canonicalAllowedPaths.some(root => isPathWithin(canonicalExecutionCwd, root))) {
+    throw Object.assign(
+      new Error('Execution working directory resolves outside contract.allowed_paths'),
+      { code: 'sandbox_path_escape' }
+    );
+  }
+
   const writeRoots = uniquePaths([
-    ...canonicalizePath(executionCwd),
-    ...canonicalizePath(tmpdir()),
-    ...(contract.allowed_paths || []).flatMap(p => canonicalizePath(toAbsolutePath(p, cwd))),
+    canonicalExecutionCwd,
+    canonicalizeSandboxPath(tmpdir(), { cwd }),
+    ...canonicalAllowedPaths,
   ]);
 
   const lines = [
@@ -105,18 +152,15 @@ export function buildMacOSSandboxProfile({
   for (const root of writeRoots) {
     lines.push(`(allow file-write* (subpath "${escapeSandboxString(root)}"))`);
   }
-
   return lines.join('\n');
 }
 
-export function prepareSandboxedShellCommand(shell, contract, {
+export function prepareSandboxedShellCommand(shell, contract = {}, {
   cwd = process.cwd(),
   env = process.env,
   platform = process.platform,
 } = {}) {
   const warnings = [];
-  const support = resolveSandboxSupport({ env, platform });
-
   if (!needsSandboxEnforcement(contract)) {
     if (contract.sandbox === 'permissive') {
       warnings.push('contract.sandbox is "permissive"; execution proceeds without additional OS-level isolation');
@@ -131,47 +175,34 @@ export function prepareSandboxedShellCommand(shell, contract, {
     };
   }
 
+  const support = resolveSandboxSupport({ env, platform });
   if (!support) {
-    if (contract.sandbox === 'strict') {
-      warnings.push('contract.sandbox is "strict" but no supported local sandbox runner is available; execution proceeds without OS-level sandbox enforcement');
+    const constraints = [];
+    if (contract.sandbox === 'strict') constraints.push('strict filesystem/process isolation');
+    if (contract.network === 'none') constraints.push('network denial');
+    if (contract.network === 'restricted') constraints.push('network restriction');
+    if (Array.isArray(contract.allowed_paths) && contract.allowed_paths.length > 0) {
+      constraints.push('allowed_paths filesystem boundary');
     }
-    if (contract.network === 'none') {
-      warnings.push('contract.network is "none" but no supported local sandbox runner is available; execution proceeds without OS-level network enforcement');
-    } else if (contract.network === 'restricted') {
-      warnings.push('contract.network is "restricted" but no supported local sandbox runner is available; execution proceeds without OS-level inbound network enforcement');
-    }
-    return {
-      program: shell.program,
-      args: shell.args,
-      warnings,
-      sandboxed: false,
-      profile: null,
-      support: null,
-    };
+    throw Object.assign(
+      new Error(`Required sandbox enforcement is unavailable: ${constraints.join(', ')}`),
+      { code: 'sandbox_enforcement_unavailable', constraints }
+    );
   }
 
-  if (support.kind === 'sandbox-exec') {
-    const profile = buildMacOSSandboxProfile({
-      contract,
-      cwd,
-      shellCwd: shell.cwd,
+  if (support.kind !== 'sandbox-exec') {
+    throw Object.assign(new Error('Configured sandbox implementation is unsupported'), {
+      code: 'sandbox_enforcement_unavailable',
     });
-    return {
-      program: support.command,
-      args: ['-p', profile, shell.program, ...shell.args],
-      warnings,
-      sandboxed: true,
-      profile,
-      support,
-    };
   }
 
+  const profile = buildMacOSSandboxProfile({ contract, cwd, shellCwd: shell.cwd });
   return {
-    program: shell.program,
-    args: shell.args,
+    program: support.command,
+    args: ['-p', profile, shell.program, ...(shell.args || [])],
     warnings,
-    sandboxed: false,
-    profile: null,
-    support: null,
+    sandboxed: true,
+    profile,
+    support,
   };
 }

@@ -13,7 +13,7 @@
         "mode": "service",
         "scopes": ["api.read", "api.write"],
         "audience": "https://api.example.com",
-        "cache": "memory",
+        "cache": "none",
         "refresh": "never",
         "required": true,
         "provider_config": {

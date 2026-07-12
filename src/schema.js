@@ -565,6 +565,11 @@ export const authorizationProofProfileField = {
     audience: nullableString,
     jwks_uri: nullableString,
     public_key: nullableString,
+    allowed_signers: nullableString,
+    principal: nullableString,
+    namespace: nullableString,
+    ca_certificate: nullableString,
+    ca_certificate_from: valueFromField,
     proof: {
       type: 'object',
       nullable: true,
@@ -819,4 +824,494 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   verify_timeout_s: { type: 'integer', nullable: true, min: 1 },
   verify_on_failure: nullableString,
   auth_profile: { type: 'string', nullable: true, note: 'Auth profile ID for scheduler dispatch (e.g. \'anthropic:me.com\'). Scheduler-target only — ignored by other backends.' },
+});
+
+const JSON_SCHEMA_DIALECT = 'https://json-schema.org/draft/2020-12/schema';
+const IDENTIFIER_PATTERN = '^[A-Za-z0-9][A-Za-z0-9._-]*$';
+const TOKEN_PATTERN = '^[A-Za-z0-9@:_./-]+$';
+const ENV_NAME_PATTERN = '^[A-Za-z_][A-Za-z0-9_]*$';
+
+function objectSchema(properties, { required = [], additionalProperties = false, ...extra } = {}) {
+  return {
+    type: 'object',
+    properties,
+    additionalProperties,
+    ...(required.length > 0 ? { required } : {}),
+    ...extra,
+  };
+}
+
+function nullableSchema(schema) {
+  return { anyOf: [schema, { type: 'null' }] };
+}
+
+const nullableStringSchema = nullableSchema({ type: 'string' });
+const nullableTokenSchema = nullableSchema({ type: 'string', pattern: TOKEN_PATTERN });
+const nullableBooleanSchema = nullableSchema({ type: 'boolean' });
+
+const jsonSchemaDefs = {
+  valueFrom: objectSchema({
+    env: nullableStringSchema,
+    file: nullableStringSchema,
+    literal: nullableStringSchema,
+    command: nullableStringSchema,
+  }, {
+    anyOf: [
+      { required: ['env'] },
+      { required: ['file'] },
+      { required: ['literal'] },
+      { required: ['command'] },
+    ],
+  }),
+  proofValueFrom: objectSchema({
+    env: nullableStringSchema,
+    file: nullableStringSchema,
+    command: nullableStringSchema,
+  }, {
+    anyOf: [
+      { required: ['env'] },
+      { required: ['file'] },
+      { required: ['command'] },
+    ],
+  }),
+  target: objectSchema({
+    session_target: { type: 'string', enum: ['main', 'isolated', 'shell'] },
+    agent_id: nullableTokenSchema,
+    payload_kind: nullableSchema({ type: 'string', enum: ['systemEvent', 'agentTurn', 'shellCommand'] }),
+  }, { required: ['session_target'] }),
+  shell: objectSchema({
+    program: { type: 'string', pattern: TOKEN_PATTERN },
+    args: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    env: nullableSchema({
+      type: 'object',
+      propertyNames: { pattern: ENV_NAME_PATTERN },
+      additionalProperties: { type: 'string' },
+    }),
+    cwd: nullableStringSchema,
+    stdin: nullableStringSchema,
+  }, { required: ['program'] }),
+  modelPolicy: objectSchema({
+    provider: nullableTokenSchema,
+    model: nullableTokenSchema,
+    thinking: nullableTokenSchema,
+  }),
+  intent: objectSchema({
+    mode: nullableSchema({ type: 'string', enum: ['execute', 'plan'] }),
+    read_only: nullableBooleanSchema,
+  }),
+  output: objectSchema({
+    preview_bytes: nullableSchema({ type: 'integer', minimum: 64 }),
+    offload: nullableSchema({ type: 'string', enum: ['auto', 'always', 'never'] }),
+    retrieve: nullableSchema({ type: 'string', enum: ['inline', 'on-demand'] }),
+    format: nullableSchema({ type: 'string', enum: ['json', 'ndjson', 'text'] }),
+  }),
+  budgets: objectSchema({
+    max_iterations: nullableSchema({ type: 'integer', minimum: 1 }),
+    max_fanout: nullableSchema({ type: 'integer', minimum: 1 }),
+    max_context_items: nullableSchema({ type: 'integer', minimum: 1 }),
+    max_pending_approvals: nullableSchema({ type: 'integer', minimum: 1 }),
+    max_queued_dispatches: nullableSchema({ type: 'integer', minimum: 1 }),
+  }),
+  schedule: objectSchema({
+    cron: { type: 'string', minLength: 1 },
+    tz: nullableStringSchema,
+  }, { required: ['cron'] }),
+  trigger: objectSchema({
+    parent: { type: 'string', minLength: 1 },
+    on: { type: 'string', enum: ['success', 'failure', 'complete'] },
+    delay_s: nullableSchema({ type: 'integer', minimum: 0 }),
+    condition: nullableStringSchema,
+  }, { required: ['parent', 'on'] }),
+  delivery: objectSchema({
+    mode: nullableSchema({ type: 'string', enum: ['announce', 'announce-always', 'none'] }),
+    channel: nullableTokenSchema,
+    to: nullableTokenSchema,
+  }),
+  reliability: objectSchema({
+    guarantee: nullableSchema({ type: 'string', enum: ['at-most-once', 'at-least-once'] }),
+    max_retries: nullableSchema({ type: 'integer', minimum: 0 }),
+    overlap_policy: nullableSchema({ type: 'string', enum: ['skip', 'allow', 'queue'] }),
+  }),
+  runtime: objectSchema({
+    timeout_ms: nullableSchema({ type: 'integer', minimum: 1 }),
+  }),
+  approval: objectSchema({
+    required: nullableBooleanSchema,
+    policy: nullableSchema({ type: 'string', enum: ['manual', 'auto-approve', 'auto-reject'] }),
+    risk_level: nullableSchema({ type: 'string', enum: ['low', 'medium', 'high'] }),
+    approver_scope: nullableTokenSchema,
+    timeout_s: nullableSchema({ type: 'integer', minimum: 1 }),
+    auto: nullableSchema({ type: 'string', enum: ['approve', 'reject'] }),
+  }),
+  context: objectSchema({
+    retrieval: nullableSchema({ type: 'string', enum: ['none', 'recent', 'hybrid'] }),
+    limit: nullableSchema({ type: 'integer', minimum: 1 }),
+  }),
+  session: objectSchema({ preferred_key: nullableTokenSchema }),
+  delegationPolicy: objectSchema({
+    max_depth: nullableSchema({ type: 'integer', minimum: 1 }),
+    allowed_delegators: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    require_grant_per_hop: nullableBooleanSchema,
+  }),
+  subject: objectSchema({
+    kind: nullableSchema({ type: 'string', enum: ['agent', 'service', 'workload', 'user', 'composite', 'delegated-agent', 'unknown'] }),
+    principal: nullableStringSchema,
+    display_name: nullableStringSchema,
+    run_as: nullableTokenSchema,
+    issuer: nullableStringSchema,
+    delegation_mode: nullableSchema({ type: 'string', enum: ['none', 'on-behalf-of', 'impersonation'] }),
+    attributes: nullableSchema({ type: 'object', additionalProperties: true }),
+  }),
+  auth: objectSchema({
+    mode: nullableSchema({ type: 'string', enum: ['none', 'service', 'delegated', 'on-behalf-of', 'impersonation', 'exchange'] }),
+    scopes: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    audience: nullableStringSchema,
+    resource: nullableStringSchema,
+    cache: nullableSchema({ type: 'string', enum: ['none', 'memory', 'state'] }),
+    refresh: nullableSchema({ type: 'string', enum: ['never', 'manual', 'auto'] }),
+    required: nullableBooleanSchema,
+    delegation_policy: nullableSchema({ $ref: '#/$defs/delegationPolicy' }),
+    provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
+    inputs: nullableSchema({ type: 'object', additionalProperties: true }),
+  }),
+  trust: objectSchema({
+    level: nullableSchema({ type: 'string', enum: ['untrusted', 'restricted', 'supervised', 'autonomous'] }),
+    constraints: nullableSchema(objectSchema({
+      escalation: nullableSchema({ type: 'string', enum: ['fail', 'human-approval', 'log-and-proceed'] }),
+      max_autonomy: nullableSchema({ type: 'string', enum: ['untrusted', 'restricted', 'supervised', 'autonomous'] }),
+      escalation_timeout: nullableStringSchema,
+      require_justification: nullableBooleanSchema,
+    })),
+  }),
+  presentationTarget: objectSchema({
+    kind: nullableSchema({ type: 'string', enum: ['env', 'file', 'stdin', 'none'] }),
+    name: nullableStringSchema,
+    prefix: nullableSchema({
+      type: 'string',
+      minLength: 1,
+      maxLength: 80,
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$',
+    }),
+    expose_as: nullableSchema({ type: 'string', pattern: ENV_NAME_PATTERN }),
+  }),
+  presentationBinding: objectSchema({
+    source: { type: 'string', minLength: 1 },
+    target: nullableSchema({ $ref: '#/$defs/presentationTarget' }),
+    required: nullableBooleanSchema,
+    redact: nullableBooleanSchema,
+    format: nullableSchema({ type: 'string', enum: ['raw', 'json', 'base64'] }),
+  }, { required: ['source'] }),
+  presentation: objectSchema({
+    bindings: nullableSchema({ type: 'array', items: { $ref: '#/$defs/presentationBinding' } }),
+    handoff: nullableSchema({ type: 'string', enum: ['none', 'downscope', 'transaction-token'] }),
+    cleanup: nullableSchema({ type: 'string', enum: ['always', 'on-success', 'on-failure', 'never'] }),
+    default_redaction: nullableBooleanSchema,
+  }),
+  identityV1: objectSchema({
+    principal: nullableTokenSchema,
+    run_as: nullableTokenSchema,
+    attestation: nullableStringSchema,
+  }),
+  identityV2: objectSchema({
+    ref: nullableStringSchema,
+    scope: nullableStringSchema,
+    subject: nullableSchema({ $ref: '#/$defs/subject' }),
+    auth: nullableSchema({ $ref: '#/$defs/auth' }),
+    trust: nullableSchema({ $ref: '#/$defs/trust' }),
+    presentation: nullableSchema({ $ref: '#/$defs/presentation' }),
+  }),
+  identity: {
+    anyOf: [
+      { $ref: '#/$defs/identityV1' },
+      { $ref: '#/$defs/identityV2' },
+    ],
+  },
+  contract: objectSchema({
+    sandbox: nullableSchema({ type: 'string', enum: ['none', 'permissive', 'strict'] }),
+    allowed_paths: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    network: nullableSchema({ type: 'string', enum: ['unrestricted', 'restricted', 'none'] }),
+    max_cost_usd: nullableSchema({ type: 'number', minimum: 0 }),
+    audit: nullableSchema({ type: 'string', enum: ['none', 'on-failure', 'always'] }),
+    required_trust_level: nullableSchema({ type: 'string', enum: ['untrusted', 'restricted', 'supervised', 'autonomous'] }),
+    trust_enforcement: nullableSchema({ type: 'string', enum: ['none', 'advisory', 'strict'] }),
+  }),
+  authorizationProofRef: objectSchema({
+    ref: { type: 'string', minLength: 1 },
+    claims: nullableSchema({ type: 'object', additionalProperties: true }),
+    verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
+  }, { required: ['ref'] }),
+  authorizationRequest: objectSchema({
+    include: nullableSchema({ type: 'array', items: { type: 'string' } }),
+  }),
+  authorizationDecision: objectSchema({
+    allow_values: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    deny_values: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    escalate_values: nullableSchema({ type: 'array', items: { type: 'string' } }),
+  }),
+  authorizationRef: objectSchema({
+    ref: { type: 'string', minLength: 1 },
+    provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
+    on_error: nullableSchema({ type: 'string', enum: ['deny', 'warn'] }),
+    request: nullableSchema({ $ref: '#/$defs/authorizationRequest' }),
+    decision: nullableSchema({ $ref: '#/$defs/authorizationDecision' }),
+  }, { required: ['ref'] }),
+  evidencePayload: objectSchema({
+    bind: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    context: nullableSchema({ type: 'object', additionalProperties: true }),
+    format: nullableSchema({ type: 'string', enum: ['canonical-json', 'json'] }),
+  }),
+  evidenceRef: objectSchema({
+    ref: nullableStringSchema,
+    payload: nullableSchema({ $ref: '#/$defs/evidencePayload' }),
+    verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
+  }),
+  verify: objectSchema({
+    shell: { type: 'string', minLength: 1 },
+    timeout_seconds: nullableSchema({ type: 'integer', minimum: 1 }),
+    on_failure: nullableSchema({ type: 'string', enum: ['error', 'warn'] }),
+  }, { required: ['shell'] }),
+  identityProfile: objectSchema({
+    id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+    provider: { type: 'string', minLength: 1 },
+    subject: nullableSchema({ $ref: '#/$defs/subject' }),
+    auth: nullableSchema({ $ref: '#/$defs/auth' }),
+    trust: nullableSchema({ $ref: '#/$defs/trust' }),
+    presentation: nullableSchema({ $ref: '#/$defs/presentation' }),
+    provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
+  }, { required: ['id', 'provider'] }),
+  authorizationProofProfile: objectSchema({
+    id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+    method: { type: 'string', enum: ['none', 'jwt', 'detached-signature', 'certificate'] },
+    issuer: nullableStringSchema,
+    audience: nullableStringSchema,
+    jwks_uri: nullableStringSchema,
+    public_key: nullableStringSchema,
+    allowed_signers: nullableStringSchema,
+    principal: nullableStringSchema,
+    namespace: nullableStringSchema,
+    ca_certificate: nullableStringSchema,
+    ca_certificate_from: nullableSchema({ $ref: '#/$defs/valueFrom' }),
+    proof: nullableSchema(objectSchema({
+      value_from: nullableSchema({ $ref: '#/$defs/proofValueFrom' }),
+    })),
+    claims: nullableSchema({ type: 'object', additionalProperties: true }),
+    verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
+  }, { required: ['id', 'method'] }),
+  authorizationProfile: objectSchema({
+    id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+    provider: { type: 'string', minLength: 1 },
+    provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
+    on_error: nullableSchema({ type: 'string', enum: ['deny', 'warn'] }),
+    request: nullableSchema({ $ref: '#/$defs/authorizationRequest' }),
+    decision: nullableSchema({ $ref: '#/$defs/authorizationDecision' }),
+  }, { required: ['id', 'provider'] }),
+  evidenceProfile: objectSchema({
+    id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+    provider: { type: 'string', minLength: 1 },
+    methods: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
+    payload: nullableSchema({ $ref: '#/$defs/evidencePayload' }),
+    verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
+  }, { required: ['id', 'provider'] }),
+};
+
+const commonExecutionProperties = {
+  id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+  name: { type: 'string', minLength: 1 },
+  enabled: nullableBooleanSchema,
+  prompt: nullableStringSchema,
+  shell: nullableSchema({ $ref: '#/$defs/shell' }),
+  target: { $ref: '#/$defs/target' },
+  model_policy: nullableSchema({ $ref: '#/$defs/modelPolicy' }),
+  intent: nullableSchema({ $ref: '#/$defs/intent' }),
+  output: nullableSchema({ $ref: '#/$defs/output' }),
+  budgets: nullableSchema({ $ref: '#/$defs/budgets' }),
+  delivery: nullableSchema({ $ref: '#/$defs/delivery' }),
+  reliability: nullableSchema({ $ref: '#/$defs/reliability' }),
+  runtime: nullableSchema({ $ref: '#/$defs/runtime' }),
+  approval: nullableSchema({ $ref: '#/$defs/approval' }),
+  context: nullableSchema({ $ref: '#/$defs/context' }),
+  session: nullableSchema({ $ref: '#/$defs/session' }),
+  identity: nullableSchema({ $ref: '#/$defs/identity' }),
+  contract: nullableSchema({ $ref: '#/$defs/contract' }),
+  authorization_proof: nullableSchema({ $ref: '#/$defs/authorizationProofRef' }),
+  authorization: nullableSchema({ $ref: '#/$defs/authorizationRef' }),
+  evidence: nullableSchema({ $ref: '#/$defs/evidenceRef' }),
+  child_credential_policy: nullableSchema({ type: 'string', enum: ['none', 'inherit', 'downscope', 'independent'] }),
+  auth_profile: nullableStringSchema,
+  delete_after_run: nullableBooleanSchema,
+};
+
+const {
+  child_credential_policy: _childCredentialPolicy,
+  auth_profile: _authProfile,
+  ...onFailureCommonProperties
+} = commonExecutionProperties;
+
+jsonSchemaDefs.onFailure = objectSchema({
+  ...onFailureCommonProperties,
+  delay_s: nullableSchema({ type: 'integer', minimum: 0 }),
+  condition: nullableStringSchema,
+}, {
+  allOf: [{
+    if: { required: ['shell'] },
+    then: {
+      properties: {
+        shell: { $ref: '#/$defs/shell' },
+        prompt: { type: 'null' },
+      },
+    },
+    else: {
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', minLength: 1 },
+        shell: { type: 'null' },
+      },
+    },
+  }],
+});
+
+jsonSchemaDefs.task = objectSchema({
+  ...commonExecutionProperties,
+  schedule: nullableSchema({ $ref: '#/$defs/schedule' }),
+  trigger: nullableSchema({ $ref: '#/$defs/trigger' }),
+  verify: nullableSchema({ $ref: '#/$defs/verify' }),
+  on_failure: nullableSchema({ $ref: '#/$defs/onFailure' }),
+}, {
+  required: ['id', 'name', 'target'],
+  oneOf: [
+    {
+      required: ['schedule'],
+      properties: {
+        schedule: { $ref: '#/$defs/schedule' },
+        trigger: { type: 'null' },
+      },
+    },
+    {
+      required: ['trigger'],
+      properties: {
+        trigger: { $ref: '#/$defs/trigger' },
+        schedule: { type: 'null' },
+      },
+    },
+  ],
+  allOf: [{
+    if: {
+      properties: {
+        target: {
+          properties: { session_target: { const: 'shell' } },
+          required: ['session_target'],
+        },
+      },
+      required: ['target'],
+    },
+    then: {
+      required: ['shell'],
+      properties: {
+        shell: { $ref: '#/$defs/shell' },
+        prompt: { type: 'null' },
+      },
+    },
+    else: {
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', minLength: 1 },
+        shell: { type: 'null' },
+      },
+    },
+  }],
+});
+
+jsonSchemaDefs.workflow = objectSchema({
+  id: { type: 'string', pattern: IDENTIFIER_PATTERN },
+  name: { type: 'string', minLength: 1 },
+  model_policy: nullableSchema({ $ref: '#/$defs/modelPolicy' }),
+  identity: nullableSchema({ $ref: '#/$defs/identity' }),
+  contract: nullableSchema({ $ref: '#/$defs/contract' }),
+  authorization_proof: nullableSchema({ $ref: '#/$defs/authorizationProofRef' }),
+  authorization: nullableSchema({ $ref: '#/$defs/authorizationRef' }),
+  evidence: nullableSchema({ $ref: '#/$defs/evidenceRef' }),
+  child_credential_policy: nullableSchema({ type: 'string', enum: ['none', 'inherit', 'downscope', 'independent'] }),
+  verify: nullableSchema({ $ref: '#/$defs/verify' }),
+  tasks: { type: 'array', minItems: 1, items: { $ref: '#/$defs/task' } },
+}, { required: ['id', 'name', 'tasks'] });
+
+export const MANIFEST_JSON_SCHEMA = {
+  $schema: JSON_SCHEMA_DIALECT,
+  $id: 'https://github.com/amittell/agentcli/schema/manifest-0.2.json',
+  title: 'agentcli workflow manifest',
+  description: 'Draft 2020-12 schema for agentcli v0.1 and v0.2 manifests.',
+  ...objectSchema({
+    version: { type: 'string', enum: ['0.1', MANIFEST_VERSION] },
+    identity_profiles: nullableSchema({ type: 'array', items: { $ref: '#/$defs/identityProfile' } }),
+    authorization_proof_profiles: nullableSchema({ type: 'array', items: { $ref: '#/$defs/authorizationProofProfile' } }),
+    authorization_profiles: nullableSchema({ type: 'array', items: { $ref: '#/$defs/authorizationProfile' } }),
+    evidence_profiles: nullableSchema({ type: 'array', items: { $ref: '#/$defs/evidenceProfile' } }),
+    workflows: { type: 'array', minItems: 1, items: { $ref: '#/$defs/workflow' } },
+  }, { required: ['version', 'workflows'] }),
+  $defs: jsonSchemaDefs,
+};
+
+function legacyDescriptorToJsonSchema(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') return {};
+  if (descriptor.removed) return false;
+
+  const result = {};
+  if (descriptor.type !== undefined) {
+    const types = Array.isArray(descriptor.type) ? [...descriptor.type] : [descriptor.type];
+    if (descriptor.nullable && !types.includes('null')) types.push('null');
+    result.type = types.length === 1 ? types[0] : types;
+  }
+  if (descriptor.const !== undefined) result.const = descriptor.const;
+  if (descriptor.enum) result.enum = [...descriptor.enum];
+  if (descriptor.required) result.required = [...descriptor.required];
+  if (descriptor.min !== undefined) result.minimum = descriptor.min;
+  if (descriptor.minItems !== undefined) result.minItems = descriptor.minItems;
+  if (descriptor.note) result.description = descriptor.note;
+  if (descriptor.format === 'token') result.pattern = TOKEN_PATTERN;
+  if (descriptor.fields) {
+    result.properties = Object.fromEntries(
+      Object.entries(descriptor.fields).map(([name, value]) => [name, legacyDescriptorToJsonSchema(value)])
+    );
+    result.additionalProperties = false;
+  }
+  if (descriptor.items) result.items = legacyDescriptorToJsonSchema(descriptor.items);
+  if (descriptor.values) result.additionalProperties = legacyDescriptorToJsonSchema(descriptor.values);
+  return result;
+}
+
+function fragmentSchema(definitionName, title) {
+  return {
+    $schema: JSON_SCHEMA_DIALECT,
+    title,
+    $ref: `#/$defs/${definitionName}`,
+    $defs: jsonSchemaDefs,
+  };
+}
+
+export const JSON_SCHEMAS = Object.freeze({
+  manifest: MANIFEST_JSON_SCHEMA,
+  workflow: fragmentSchema('workflow', 'agentcli workflow'),
+  task: fragmentSchema('task', 'agentcli task'),
+  schedulerJob: {
+    $schema: JSON_SCHEMA_DIALECT,
+    title: 'openclaw-scheduler compiled job',
+    ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.schedulerJob),
+  },
+  standalonePlan: {
+    $schema: JSON_SCHEMA_DIALECT,
+    title: 'agentcli standalone compiled plan',
+    ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.standalonePlan),
+  },
+  rpcRequest: {
+    $schema: JSON_SCHEMA_DIALECT,
+    title: 'agentcli JSON-RPC request',
+    ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.rpcRequest),
+  },
+  rpcResponse: {
+    $schema: JSON_SCHEMA_DIALECT,
+    title: 'agentcli JSON-RPC response',
+    ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.rpcResponse),
+    oneOf: [{ required: ['result'] }, { required: ['error'] }],
+  },
 });

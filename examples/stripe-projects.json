@@ -261,8 +261,7 @@
           "name": "Remove Vercel Project",
           "shell": {
             "program": "sh",
-            "args": ["-c", "echo y | vercel project rm my-app"],
-            "env": { "VERCEL_TOKEN": "$VERCEL_TOKEN" }
+            "args": ["-c", "echo y | vercel project rm my-app"]
           },
           "target": { "session_target": "shell" },
           "identity": { "ref": "deploy-credentials" },

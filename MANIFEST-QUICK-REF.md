@@ -79,12 +79,23 @@ Copy-paste patterns for common agentcli manifests.
 | `delivery.channel` | optional | `telegram`, etc. |
 | `delivery.to` | optional | Channel-specific target (chat ID) |
 | `reliability.overlap_policy` | optional | `skip`, `queue`, `allow` |
+| `runtime.timeout_ms` | optional | Local or backend execution timeout in milliseconds |
 | `verify.shell` | optional | Post-completion verification command |
-| `verify.required` | optional | When `true`, requires `public_key` or `jwks_uri` for jwt proofs |
+| `authorization_proof_profiles[].verify.required` | optional | Verification policy; every non-`none` proof is verified regardless |
 | `authorization.request.include` | optional | Array of include fields for OPA request (`actor`, `step_up`) |
 | `subject.attributes` | optional | Actor metadata object (`org_id`, `on_behalf_of_user_id`, `delegation_grant_id`, `run_id`, `agent_id`, `verification_ref`, `verification_level`) |
 | `authorization_proof_profiles[].jwks_uri` | optional | JWKS endpoint URI for JWT key discovery and caching |
 | `authorization_proof_profiles[].public_key` | optional | Inline public key for JWT verification |
+
+## Safety rules
+
+- `agentcli exec --dry-run` is a static preview. It performs no approval consumption, proof command, provider call, sandbox probe, credential materialization, signing, evidence, postcondition, or audit write.
+- Manual grants are single-use and bind the canonical manifest plus the full effective execution configuration. Approver scope and timeout are enforced. Unexpected unsigned grants are rejected.
+- `jwt`, `detached-signature`, and `certificate` proofs must verify cryptographically and bind the canonical manifest. Use `method: "none"` for an intentionally unverifiable declaration.
+- Requested sandbox or network restrictions fail closed if the local host cannot enforce them.
+- Child processes inherit only a small operational allowlist. Every other ambient variable requires explicit `shell.env` declaration or identity-provider materialization.
+- `agentcli run` skips disabled tasks and their branches.
+- Scheduler apply rejects inline `shell.env` and `shell.stdin`; durable credentials belong in runtime identity providers.
 
 ## Session targets
 
@@ -151,13 +162,14 @@ agentcli apply manifest.json --db scheduler.db --scheduler-prefix ./scheduler --
 agentcli apply manifest.json --db scheduler.db --scheduler-prefix ./scheduler --adopt-by name
 agentcli exec manifest.json task-id      # Run a task locally
 agentcli exec manifest.json task-id --approval-id <id>   # Target a specific pending approval
-agentcli schema manifest                 # Machine-readable schema
+agentcli schema manifest                 # Draft 2020-12 JSON Schema
+agentcli schema manifest --legacy        # Legacy agentcli descriptor
 agentcli describe commands --json        # All CLI commands
 ```
 
 ## Approvals (local gate)
 
-Tasks with `approval.policy: "manual"` refuse to run via `agentcli exec` unless a matching, unconsumed approval record exists. Grants are ssh-signed, single-use, and bound to the exact task hash (`workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, policy, risk level). `--dry-run` bypasses the gate.
+Tasks with `approval.policy: "manual"` refuse to run via `agentcli exec` unless a matching, unconsumed approval record exists. Grants are signed by default, single-use, constrained by `approver_scope` and `timeout_s`, and bound to the canonical manifest and complete effective execution configuration. Unexpected unsigned grants fail; `--signer none` is the explicit unsigned mode. `--dry-run` is static and does not consume or enforce the gate.
 
 ```bash
 agentcli approve manifest.json task-id --by alex --reason "tuesday deploy" --ttl-s 3600

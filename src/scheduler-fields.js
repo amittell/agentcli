@@ -40,7 +40,14 @@ export const SCHEDULER_FIELDS_V02 = [
   'verify_on_failure',
 ];
 
+export const SCHEDULER_FIELDS_V03 = [
+  'approval_risk_level',
+  'approval_approver_scope',
+  'output_format',
+];
+
 export const SCHEDULER_FIELD_VERSIONS = {
   '1': SCHEDULER_FIELDS_V1,
   '2': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02],
+  '3': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02, ...SCHEDULER_FIELDS_V03],
 };

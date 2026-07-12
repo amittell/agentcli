@@ -250,7 +250,8 @@ function summarizeCounts(tasks, dryRun) {
 
   for (const task of tasks) {
     if (dryRun) {
-      summary.planned += 1;
+      if (task.status === 'skipped') summary.skipped += 1;
+      else summary.planned += 1;
       continue;
     }
 
@@ -271,8 +272,21 @@ function selectedTaskWarnings(tasksById, selectedTaskIds) {
   if (disabledTaskIds.length === 0) return [];
 
   return [
-    `Local workflow runs do not enforce task.enabled; selected disabled tasks were included explicitly: ${disabledTaskIds.join(', ')}`,
+    `Disabled tasks and their dependent trigger branches will be skipped: ${disabledTaskIds.join(', ')}`,
   ];
+}
+
+function disabledBlocker(task, tasksById) {
+  let current = task;
+  const visited = new Set();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    if (current.enabled === false) return current.id;
+    current = current.trigger?.parent
+      ? tasksById.get(current.trigger.parent)
+      : null;
+  }
+  return null;
 }
 
 function buildDryRunTasks(workflow, graph, selectedTaskIds, rootTaskIds, cwd) {
@@ -280,10 +294,11 @@ function buildDryRunTasks(workflow, graph, selectedTaskIds, rootTaskIds, cwd) {
 
   return selectedTaskIds.map(taskId => {
     const task = graph.tasksById.get(taskId);
+    const blockedBy = disabledBlocker(task, graph.tasksById);
     return {
       source: { workflow_id: workflow.id, task_id: task.id },
       name: task.name,
-      status: 'planned',
+      status: blockedBy ? 'skipped' : 'planned',
       selected_as_root: rootTaskIdSet.has(task.id),
       invocation: invocationSummary(task),
       command: commandPreview(task, cwd),
@@ -294,7 +309,11 @@ function buildDryRunTasks(workflow, graph, selectedTaskIds, rootTaskIds, cwd) {
         condition: task.trigger.condition ?? null,
         matched: null,
       } : null,
-      reason: task.trigger ? 'dry-run does not evaluate trigger outcomes or conditions' : null,
+      reason: blockedBy
+        ? (blockedBy === task.id
+            ? 'task is disabled'
+            : `ancestor task "${blockedBy}" is disabled`)
+        : (task.trigger ? 'dry-run does not evaluate trigger outcomes or conditions' : null),
     };
   });
 }
@@ -366,6 +385,7 @@ export async function runWorkflow(manifest, {
     readyAt: Date.now(),
     sequence: index,
     triggerContext: null,
+    skipReason: null,
   }));
   let sequence = pending.length;
 
@@ -399,9 +419,32 @@ export async function runWorkflow(manifest, {
       reason: null,
     };
 
+    const skipReason = next.skipReason || (task.enabled === false ? 'task is disabled' : null);
+    if (skipReason) {
+      record.status = 'skipped';
+      record.reason = skipReason;
+      taskRuns.push(record);
+
+      for (const childId of graph.childrenByParent.get(task.id) || []) {
+        if (!selectedTaskIdSet.has(childId)) continue;
+        pending.push({
+          taskId: childId,
+          readyAt: Date.now(),
+          sequence,
+          triggerContext: {
+            matched: false,
+            parentOutcome: 'skipped',
+          },
+          skipReason: `ancestor task "${task.id}" was skipped: ${skipReason}`,
+        });
+        sequence += 1;
+      }
+      continue;
+    }
+
     let payload = null;
     try {
-      payload = await executeTask(expanded, {
+      payload = await executeTask(manifest, {
         workflowId: workflow.id,
         taskId: task.id,
         dryRun: false,
@@ -471,6 +514,7 @@ export async function runWorkflow(manifest, {
           matched: true,
           parentOutcome: outcome,
         },
+        skipReason: null,
       });
       sequence += 1;
     }

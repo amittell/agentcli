@@ -103,6 +103,8 @@ If omitted, implementations SHOULD treat the task as enabled by default.
 
 This field expresses the desired active state when compiled into a runtime that supports dormant or disabled jobs.
 
+The local `run` command MUST NOT execute a task whose effective `enabled` value is `false`. A disabled root, triggered task, or failure handler is reported as skipped, and its dependent branch does not run.
+
 ### Target
 
 `target.session_target` MUST be one of:
@@ -222,6 +224,8 @@ It MAY also define:
 `shell.cwd`, if present, MUST be a non-empty string.
 
 `shell.stdin`, if present, MUST be a string.
+
+A durable compiler or apply adapter MUST NOT persist raw `shell.env` values or `shell.stdin` into a scheduler job record. A backend that cannot resolve these values at dispatch through an explicit credential boundary MUST reject the manifest for that target.
 
 The legacy `command` string field is not supported. Implementations MUST reject manifests that include `command` and SHOULD direct users to `shell.program` and `shell.args`.
 
@@ -378,24 +382,28 @@ This field provides a direct override for the auto-resolution behavior when an a
 
 `approval.approver_scope`, if present, MUST be a restricted token identifying the scope or group that may approve the gate.
 
+Local approval scope accepts an exact principal or the prefixes `principal:`, `user:`, and `domain:`. `principal:` and `user:` require an exact principal match; `domain:` requires the approver's address domain to match case-insensitively.
+
 `approval.required` is supported for compatibility, but `approval.policy` SHOULD be preferred in new manifests.
 
 ### Local enforcement in `agentcli exec`
 
 `agentcli exec` enforces `approval.policy` directly, without a scheduler:
 
-- When `approval.policy` is `manual` (or legacy `approval.required: true` with no `policy`), `exec` MUST refuse execution unless a matching, unconsumed, unrevoked, unexpired approval record exists in `~/.agentcli/state/approvals.ndjson`. The error type is `approval_required`.
-- When `approval.policy` is `auto-reject`, `exec` MUST refuse execution unconditionally. Approval records cannot override this policy. The error type is `approval_auto_rejected`.
+- When `approval.policy` is `manual` (or legacy `approval.required: true` with no `policy`), `exec` MUST refuse execution unless a matching, unconsumed, unrevoked, unexpired approval record exists in `~/.agentcli/state/approvals.ndjson`. The detailed code is `approval_required`; the closed error type is `validation_error`.
+- When `approval.policy` is `auto-reject`, `exec` MUST refuse execution unconditionally. Approval records cannot override this policy. The detailed code is `approval_auto_rejected`; the closed error type is `validation_error`.
 - When `approval.policy` is `auto-approve` or absent, `exec` proceeds without requiring an approval record.
-- `exec --dry-run` MUST bypass the gate without consuming any approval record.
+- `exec --dry-run` MUST return a static preview without consuming or enforcing any approval record.
 
-A matching approval record is one whose `task_hash` equals the canonical hash of the current task over these fields: `workflow_id`, `task_id`, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, `approval.policy`, `approval.risk_level`. Any drift in those fields invalidates prior grants.
+A matching approval record is one whose `task_hash` equals the canonical hash of the complete effective execution binding. The binding includes the canonical manifest digest, workflow and task ids, target and enabled state, hashes of command arguments, declared environment values and stdin, runtime timeout, approval fields, merged identity and provider configuration hashes, contract, authorization proof, authorization, evidence, child credential policy, postcondition, output contract, intent, and deletion policy. Raw credential values MUST NOT be stored in the grant or audit record. Any bound drift invalidates prior grants.
+
+When `approval.approver_scope` is present, the approver MUST satisfy it at grant time and again at consumption. A grant lifetime MUST NOT exceed `approval.timeout_s`.
 
 Approvals are single-use. The matching grant MUST be consumed (written as a `consume` event in `approvals.ndjson`) before the process is spawned; crashed or failed executions still consume the grant.
 
-Successful gated executions MUST include an `approval_used` object in both the result payload and the audit record, carrying `approval_id`, `approver`, `reason`, `risk_level`, `granted_at`, `expires_at`, `signature_verified`, and `signature.{method, key_fingerprint}`.
+Successful gated executions MUST include an `approval_used` object in both the result payload and the audit record, carrying `approval_id`, `approver`, `reason`, `risk_level`, `approver_scope`, `granted_at`, `expires_at`, `signature_verified`, and `signature.{method, key_fingerprint}` when signed.
 
-Grants SHOULD be signed. If a grant carries a `signature` field, `exec` MUST verify it against the configured allowed-signers file. A failing signature MUST refuse execution with error type `approval_signature_invalid`.
+Grants SHOULD be signed. Signing failure MUST refuse grant creation without appending an unsigned record. If a grant carries a `signature` field, `exec` MUST verify it against the configured allowed-signers file. A failing signature MUST refuse execution with detailed code `approval_signature_invalid` and closed error type `validation_error`. A record without a signature MUST be rejected unless it explicitly records that signing was disabled by the caller.
 
 This local mechanism is scoped to single-machine `exec` invocations. Durable multi-actor cron-triggered approvals remain the responsibility of the runtime target (e.g. `openclaw-scheduler`).
 
@@ -563,7 +571,7 @@ Authorization proof supports the following methods:
 
 `authorization_proof_profiles[].method`, if present, MUST be one of the above values.
 
-Workflow/task `authorization_proof` blocks are scoped overlays on reusable `authorization_proof_profiles[]` entries. Implementations MUST verify the referenced proof before executing a task when `verify` is present and the resolved profile method is not `none`. Verification failure MUST prevent execution.
+Workflow/task `authorization_proof` blocks are scoped overlays on reusable `authorization_proof_profiles[]` entries. Implementations MUST cryptographically verify every referenced proof whose resolved method is not `none`, regardless of `verify.required`. JWT verification MUST validate a signature with configured public-key or JWKS trust material and require a canonical manifest digest claim. Detached signatures and certificates MUST verify the signature or certificate chain and bind the same canonical manifest. Missing trust material, missing binding, or verification failure MUST prevent execution. `method: "none"` is the explicit representation for an informational or unverifiable declaration.
 
 See [execution-identity.md](execution-identity.md) for full architectural details.
 
@@ -616,7 +624,7 @@ Evidence profiles describe how execution evidence is produced, bound to a specif
 
 `evidence.verify`, if present, MUST be an object describing how the evidence can be independently verified.
 
-Implementations SHOULD produce evidence for every execution when `evidence` is declared. Evidence records MUST be included in the audit trail.
+Implementations SHOULD produce evidence for every execution when `evidence` is declared. The evidence envelope MUST retain a versioned canonical payload sufficient for later independent verification. It MUST bind the canonical manifest, effective task, execution id, audit-safe identity and command descriptors, result, and postcondition. Raw credentials, stdin, stdout, and stderr MUST NOT be embedded. Verification MUST reject an envelope whose payload or execution binding was changed or transplanted to another audit record. Evidence records MUST be included in the audit trail.
 
 See [execution-identity.md](execution-identity.md) for full architectural details.
 
@@ -687,7 +695,7 @@ Workflow-level `contract` acts as a default for tasks in that workflow.
 
 Task-level `contract` overrides workflow-level fields key by key.
 
-Contracts are intent declarations. Backends interpret and enforce them according to their own capabilities. A backend that does not support sandboxing MAY ignore `sandbox` but SHOULD log a warning.
+Contracts are portable intent declarations whose enforcement depends on the selected execution boundary. A backend MUST fail closed when a task requests restrictive sandbox, path, or network controls that the backend cannot enforce. `sandbox: none` and `network: unrestricted` explicitly opt out of those restrictions.
 
 ## Delete After Run
 
@@ -718,17 +726,17 @@ A conforming implementation MAY support direct task execution via an `exec` comm
 - `exec` MUST only execute tasks with `target.session_target` equal to `shell`. Prompt-based tasks require an agent runtime and are not executable by agentcli directly.
 - `exec` MUST resolve identity and contract by inheriting from the workflow level, with task-level fields overriding key by key.
 - `exec` MUST perform pre-flight contract checks before spawning a process. If `contract.allowed_paths` is declared and the effective execution cwd (`shell.cwd` when set, otherwise the caller cwd) is not under any allowed path, `exec` MUST reject the execution with a contract violation error.
-- `exec` SHOULD enforce `contract.sandbox` and `contract.network` when a supported local sandbox backend is available.
-- `exec` SHOULD emit advisory warnings for contract constraints it cannot enforce on the current machine (for example, `sandbox: strict` or `network: none` on an unsupported OS).
+- `exec` MUST enforce restrictive `contract.sandbox`, `contract.allowed_paths`, and `contract.network` declarations or refuse execution when no supported local boundary is available.
 - `exec` MUST respect `runtime.timeout_ms` as a process execution timeout.
 - `exec` MUST record an audit trail governed by `contract.audit`:
   - `always`: write an audit record for every execution
   - `on-failure`: write an audit record only when the exit code is non-zero
   - `none`: do not write an audit record
   - If `contract.audit` is not set, `exec` SHOULD default to `always`
-- The audit record MUST include: execution_id, timestamp, source (workflow_id, task_id), identity (principal, run_as, attestation presence), contract, command metadata (program, args, cwd, env key names, stdin presence), and result (exit code, duration, output size, output hash).
-- The audit record MUST NOT include environment variable values or stdin content, as these may contain secrets.
-- `exec` supports `--dry-run` to perform validation and contract checks without spawning a process.
+- The audit record MUST include: execution_id, timestamp, source (workflow_id, task_id), audit-safe identity, contract, effective task and manifest digests, command metadata (program, argument hashes, cwd, environment key names and value hashes, stdin presence and hash), and result (exit code, duration, output size, output hash).
+- The audit record MUST NOT include raw environment variable values, command arguments, stdin, stdout, stderr, provider secrets, or credential material.
+- `exec --dry-run` MUST be a static preview. It MUST NOT consume an approval, execute a proof command, resolve identity or authorization providers, contact network endpoints, probe a sandbox, materialize credentials, sign or verify evidence, run a postcondition, or write an audit record. Live phases MUST be reported as skipped.
+- Before spawning, `exec` MUST construct child environments from a small operational allowlist such as PATH, HOME, temporary-directory, locale, shell, user, timezone, terminal, and Windows equivalents. Every other ambient variable MUST be omitted unless the task explicitly declares it or an identity provider materializes it.
 - `exec` works independently of any scheduler runtime. It reads a manifest, resolves a task, and executes it directly.
 
 ### Execution-Time Attestation

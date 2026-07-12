@@ -1,9 +1,20 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fchmodSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { registerProvider } from './index.js';
+import { assertRegularFileDescriptor, ensurePrivateDirectory } from '../home.js';
 
 const SSH_KEY_CANDIDATES = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
 const NAMESPACE = 'agentcli';
@@ -96,9 +107,9 @@ export function signPayload(payload, { keyPath }) {
 
 export function resolveAllowedSigners({ env = process.env, statePath } = {}) {
   const explicit = env.AGENTCLI_ALLOWED_SIGNERS;
-  if (explicit && existsSync(explicit)) return explicit;
+  if (explicit && existsSync(explicit) && lstatSync(explicit).isFile()) return explicit;
 
-  if (statePath && existsSync(statePath)) return statePath;
+  if (statePath && existsSync(statePath) && lstatSync(statePath).isFile()) return statePath;
 
   return null;
 }
@@ -117,8 +128,25 @@ export function generateAllowedSigners({ principal, homeDir = homedir(), outputP
 
   if (lines.length === 0) return null;
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, lines.join('\n') + '\n', 'utf8');
+  const outputDirectory = dirname(outputPath);
+  ensurePrivateDirectory(outputDirectory);
+  let descriptor;
+  try {
+    descriptor = openSync(
+      outputPath,
+        fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NONBLOCK || 0) |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    assertRegularFileDescriptor(descriptor, outputPath);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
+    writeFileSync(descriptor, lines.join('\n') + '\n', 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
   return outputPath;
 }
 

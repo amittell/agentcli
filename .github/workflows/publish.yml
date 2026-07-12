@@ -5,25 +5,48 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      OPENCLAW_SCHEDULER_REF: ac9ea643a8efc68e9f81c8d93125467ca62140b5
     steps:
       - uses: actions/checkout@v5
+      - name: Check out pinned openclaw-scheduler
+        uses: actions/checkout@v5
+        with:
+          repository: amittell/openclaw-scheduler
+          ref: ac9ea643a8efc68e9f81c8d93125467ca62140b5
+          path: openclaw-scheduler
+      - name: Configure scheduler fixture path
+        run: echo "SCHEDULER_PATH=$RUNNER_TEMP/openclaw-scheduler" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            openclaw-scheduler/package-lock.json
+      - name: Move scheduler fixture outside the agentcli source tree
+        run: mv openclaw-scheduler "$SCHEDULER_PATH"
       - run: npm ci
+      - name: Install and verify pinned scheduler runtime
+        run: |
+          cd "$SCHEDULER_PATH"
+          test "$(git rev-parse HEAD)" = "$OPENCLAW_SCHEDULER_REF"
+          npm ci
+          node bin/openclaw-scheduler.js --json capabilities > /dev/null
       - run: npm run lint
       - run: npm test
 
   publish:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

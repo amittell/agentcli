@@ -28,9 +28,10 @@ export function querySchedulerCapabilities(runner) {
 }
 
 /**
- * Merge static features with runtime capabilities.
- * Static features are the floor -- runtime can upgrade false->true but never downgrade true->false.
- * String values are replaced by runtime values when present.
+ * Merge static declarations with observed runtime capabilities.
+ * When a runtime reports a known feature, the observed value is authoritative.
+ * Static values are used only for features omitted by the runtime or when no
+ * runtime capability response is available.
  */
 export function resolveEffectiveFeatures(targetName, runtimeCapabilities) {
   const target = TARGETS[targetName];
@@ -46,14 +47,8 @@ export function resolveEffectiveFeatures(targetName, runtimeCapabilities) {
 
   for (const [key, runtimeValue] of Object.entries(runtimeFeatures)) {
     if (!(key in effective)) continue; // ignore unknown keys from runtime
-    const staticValue = effective[key];
-
-    if (typeof staticValue === 'boolean') {
-      // Boolean: runtime can upgrade false->true, never downgrade true->false
-      if (runtimeValue === true) effective[key] = true;
-    } else if (typeof staticValue === 'string') {
-      // String: runtime value replaces static if present and is a string
-      if (typeof runtimeValue === 'string') effective[key] = runtimeValue;
+    if (typeof runtimeValue === 'boolean' || typeof runtimeValue === 'string') {
+      effective[key] = runtimeValue;
     }
   }
 
@@ -89,6 +84,32 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
   // validation remains execution-time only (chains are only known after a
   // concrete session is resolved).
   for (const job of compiledOutput.jobs) {
+    if (job.approval_required && !job.parent_id && !features.root_approval_gate) {
+      errors.push({
+        code: 'capability_mismatch',
+        feature: 'root_approval_gate',
+        required_by: `job "${job.name || job.id}"`,
+        message: `Root job "${job.name || job.id}" requires manual approval but the runtime does not advertise root_approval_gate`,
+      });
+    }
+
+    if (job.approval_approver_scope && !features.approval_scope_enforcement) {
+      errors.push({
+        code: 'capability_mismatch',
+        feature: 'approval_scope_enforcement',
+        required_by: `job "${job.name || job.id}"`,
+        message: `Job "${job.name || job.id}" declares approver scope but the runtime cannot enforce it`,
+      });
+    }
+
+    if (job.output_format && !features.structured_output_format) {
+      errors.push({
+        code: 'capability_mismatch',
+        feature: 'structured_output_format',
+        required_by: `job "${job.name || job.id}"`,
+        message: `Job "${job.name || job.id}" declares output.format="${job.output_format}" but the runtime cannot persist that contract`,
+      });
+    }
     // Check authorization hook requirement
     if (job.authorization || job.authorization_ref) {
       if (!features.authorization_hook) {

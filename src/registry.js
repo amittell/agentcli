@@ -1,11 +1,26 @@
-import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, mkdirSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fchmodSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { validateManifest } from './validate.js';
-import { getAgentcliPaths } from './home.js';
+import {
+  assertRegularFileDescriptor,
+  ensurePrivateDirectory,
+  getAgentcliPaths,
+} from './home.js';
 
 function registryDir({ env = process.env } = {}) {
   const paths = getAgentcliPaths({ env });
-  mkdirSync(paths.registry, { recursive: true });
+  ensurePrivateDirectory(paths.registry);
   return paths.registry;
 }
 
@@ -28,6 +43,13 @@ export function listRegistry({ env } = {}) {
     const name = file.replace(/\.json$/, '');
     const filePath = join(dir, file);
     try {
+      const entryState = lstatSync(filePath);
+      if (entryState.isSymbolicLink()) {
+        return { name, workflows: [], symlink_refused: true };
+      }
+      if (!entryState.isFile()) {
+        return { name, workflows: [], invalid_type_refused: true };
+      }
       const manifest = JSON.parse(readFileSync(filePath, 'utf8'));
       const workflows = (manifest.workflows || []).map(w => ({
         id: w.id,
@@ -57,7 +79,14 @@ export function addToRegistry(manifestOrPath, { name, env, cwd = process.cwd() }
       );
     }
 
-    manifest = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    try {
+      manifest = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    } catch (error) {
+      throw Object.assign(
+        new Error(`Invalid JSON in registry source ${resolvedPath}: ${error.message}`),
+        { code: 'parse_error' }
+      );
+    }
     derivedName = basename(resolvedPath, extname(resolvedPath));
   } else {
     manifest = manifestOrPath;
@@ -75,10 +104,41 @@ export function addToRegistry(manifestOrPath, { name, env, cwd = process.cwd() }
   const entryName = name || derivedName;
   const dir = registryDir({ env });
   const filePath = entryPath(dir, entryName);
+  const overwritten = existsSync(filePath);
+  if (overwritten) {
+    const entryState = lstatSync(filePath);
+    if (entryState.isSymbolicLink()) {
+      throw Object.assign(
+        new Error(`Refusing to overwrite symbolic-link registry entry: "${entryName}"`),
+        { code: 'invalid_argument' }
+      );
+    }
+    if (!entryState.isFile()) {
+      throw Object.assign(
+        new Error(`Refusing to overwrite non-regular registry entry: "${entryName}"`),
+        { code: 'invalid_argument' }
+      );
+    }
+  }
 
-  writeFileSync(filePath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-
-  return { name: entryName, path: filePath, overwritten: false };
+  let descriptor;
+  try {
+    descriptor = openSync(
+      filePath,
+        fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NONBLOCK || 0) |
+        (fsConstants.O_NOFOLLOW || 0),
+      0o600
+    );
+    assertRegularFileDescriptor(descriptor, filePath);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
+    writeFileSync(descriptor, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  return { name: entryName, path: filePath, overwritten };
 }
 
 export function showRegistryEntry(name, { env } = {}) {
@@ -91,8 +151,28 @@ export function showRegistryEntry(name, { env } = {}) {
       { code: 'invalid_argument' }
     );
   }
+  const entryState = lstatSync(filePath);
+  if (entryState.isSymbolicLink()) {
+    throw Object.assign(
+      new Error(`Refusing to read symbolic-link registry entry: "${name}"`),
+      { code: 'invalid_argument' }
+    );
+  }
+  if (!entryState.isFile()) {
+    throw Object.assign(
+      new Error(`Refusing to read non-regular registry entry: "${name}"`),
+      { code: 'invalid_argument' }
+    );
+  }
 
-  return JSON.parse(readFileSync(filePath, 'utf8'));
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw Object.assign(
+      new Error(`Invalid JSON in registry entry "${name}": ${error.message}`),
+      { code: 'parse_error' }
+    );
+  }
 }
 
 export function removeFromRegistry(name, { env } = {}) {

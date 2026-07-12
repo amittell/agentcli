@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createSign } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -27,8 +27,8 @@ import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
 import { handleJsonRpcRequest } from '../src/jsonrpc.js';
-import { ensureAgentcliHome } from '../src/home.js';
-import { stableId, resolveIdentityV2, resolveVerify } from '../src/compiler/shared.js';
+import { ensureAgentcliHome, getAgentcliPaths } from '../src/home.js';
+import { OPERATIONAL_ENV_KEYS, stableId, resolveIdentityV2, resolveVerify } from '../src/compiler/shared.js';
 import { applyFieldMask, parseFieldMask } from '../src/fields.js';
 import { resolveSafeOutputPath } from '../src/io.js';
 import { buildOnFailureTask } from '../src/shorthand.js';
@@ -65,6 +65,7 @@ import {
   getProvider as getIdentityProvider,
 } from '../src/identity/index.js';
 import { buildActorContext, buildStepUpContext } from '../src/actor-context.js';
+import { canonicalDigest } from '../src/canonical.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -92,6 +93,13 @@ function signedJwt(payload) {
   signer.update(signingInput);
   const signature = signer.sign(testKeyPair.privateKey).toString('base64url');
   return `${header}.${body}.${signature}`;
+}
+
+function signedManifestJwt(manifest, payload = {}) {
+  return signedJwt({
+    ...payload,
+    manifest_digest: canonicalDigest(manifest),
+  });
 }
 
 const exampleManifest = readExample('hello-world.json');
@@ -395,7 +403,7 @@ test('shell workflow validates and carries policy-based approval intent', () => 
   assert.equal(followup.trigger_condition, 'regex:(9[0-9]%|100%)');
 });
 
-test('structured shell execution is preserved in standalone plans and rendered for scheduler jobs', () => {
+test('standalone plans hash sensitive shell inputs and scheduler compilation rejects durable disclosure', () => {
   const manifest = {
     version: '0.1',
     workflows: [
@@ -428,20 +436,24 @@ test('structured shell execution is preserved in standalone plans and rendered f
   const validation = validateManifest(manifest);
   assert.equal(validation.ok, true);
 
-  const schedulerCompiled = compileManifestToScheduler(manifest);
-  assert.equal(schedulerCompiled.jobs[0].payload_message, 'cd \'/tmp/work dir\' && printf %s \'line one\nline two\' | KUBECONFIG=\'/tmp/kube config\' START_NS=\'1700000000000000000\' \'python3\' \'scripts/query_logs.py\' \'--namespace\' \'agent x\'');
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    error => (
+      error.validation?.errors.some(item => item.path.endsWith('.shell.env')) &&
+      error.validation?.errors.some(item => item.path.endsWith('.shell.stdin'))
+    )
+  );
 
   const standaloneCompiled = compileManifestToStandalone(manifest);
-  assert.deepEqual(standaloneCompiled.workflows[0].tasks[0].execution.payload, {
-    program: 'python3',
-    args: ['scripts/query_logs.py', '--namespace', 'agent x'],
-    env: {
-      START_NS: '1700000000000000000',
-      KUBECONFIG: '/tmp/kube config'
-    },
-    cwd: '/tmp/work dir',
-    stdin: 'line one\nline two'
-  });
+  const payload = standaloneCompiled.workflows[0].tasks[0].execution.payload;
+  assert.equal(payload.program, 'python3');
+  assert.deepEqual(payload.args, ['scripts/query_logs.py', '--namespace', 'agent x']);
+  assert.equal(payload.cwd, '/tmp/work dir');
+  assert.equal(payload.env, null);
+  assert.deepEqual(payload.env_keys, ['KUBECONFIG', 'START_NS']);
+  assert.match(payload.env_hash, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(payload.stdin, null);
+  assert.match(payload.stdin_hash, /^sha256:[a-f0-9]{64}$/);
 });
 
 test('shell.stdin accepts empty strings', () => {
@@ -675,8 +687,15 @@ test('cli init creates a valid manifest in cwd', async (t) => {
 
   assert.equal(output.ok, true);
   assert.ok(output.written_to.endsWith('agentcli.json'));
-  assert.equal(output.manifest.version, '0.1');
+  assert.equal(output.manifest.version, '0.2');
   assert.equal(output.manifest.workflows.length, 1);
+  assert.deepEqual(output.manifest.workflows[0].tasks[0].contract, {
+    sandbox: 'permissive',
+    network: 'unrestricted',
+    audit: 'always',
+  });
+  assert.equal(output.manifest.workflows[0].tasks[0].output.format, 'text');
+  assert.equal(validateManifest(output.manifest).ok, true);
 
   const written = JSON.parse(readFileSync(output.written_to, 'utf8'));
   assert.deepEqual(written, output.manifest);
@@ -784,13 +803,13 @@ test('npm global install exposes the agentcli alias on PATH', (t) => {
 });
 
 test('cli schema returns json', async () => {
-  const output = JSON.parse(await runCli(['schema', 'task']));
+  const output = JSON.parse(await runCli(['schema', 'task', '--legacy']));
   assert.equal(output.ok, true);
   assert.equal(output.schema.type, 'object');
 });
 
 test('cli schema manifest reflects v0.2 identity surfaces', async () => {
-  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   assert.equal(output.ok, true);
   assert.equal(output.schema.fields.version.const, '0.2');
   assert.ok(output.schema.fields.identity_profiles);
@@ -800,7 +819,7 @@ test('cli schema manifest reflects v0.2 identity surfaces', async () => {
 });
 
 test('cli schema manifest exposes authorization proof value_from sources', async () => {
-  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   const proofValueFrom = output.schema.fields.authorization_proof_profiles.items.fields.proof.fields.value_from.fields;
 
   assert.equal(output.ok, true);
@@ -810,7 +829,7 @@ test('cli schema manifest exposes authorization proof value_from sources', async
 });
 
 test('cli schema manifest marks workflow and task authorization refs as required', async () => {
-  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   const workflowFields = output.schema.fields.workflows.items.fields;
   const taskFields = workflowFields.tasks.items.fields;
 
@@ -822,7 +841,7 @@ test('cli schema manifest marks workflow and task authorization refs as required
 });
 
 test('cli schema exposes child_credential_policy on workflow and task surfaces', async () => {
-  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   const workflowFields = output.schema.fields.workflows.items.fields;
   const taskFields = workflowFields.tasks.items.fields;
 
@@ -975,7 +994,7 @@ test('openclaw-scheduler target does not advertise unsupported v0.2 runtime feat
   assert.equal(target.features.delegation_validation, false);
 });
 
-test('applyManifestToScheduler strips non-runtime scheduler metadata from backend specs', async () => {
+test('applyManifestToScheduler projects only versioned runtime fields to backend specs', async () => {
   const manifest = {
     version: '0.2',
     identity_profiles: [{
@@ -1010,7 +1029,7 @@ test('applyManifestToScheduler strips non-runtime scheduler metadata from backen
     queryCapabilities() {
       return {
         scheduler_version: '0.2.0',
-        handoff_version: '1',
+        handoff_version: '3',
         features: {
           trust_evaluation: true,
         }
@@ -1032,11 +1051,13 @@ test('applyManifestToScheduler strips non-runtime scheduler metadata from backen
   assert.equal(calls[0].origin, 'system');
   assert.equal(calls[0].run_timeout_ms, 300000);
   assert.equal(calls[0].delivery_opt_out_reason, 'delivery intentionally disabled by the agentcli manifest');
-  assert.equal('identity_ref' in calls[0], false);
-  assert.equal('identity' in calls[0], false);
-  assert.equal('contract_sandbox' in calls[0], false);
+  assert.equal(calls[0].identity_ref, 'profile');
+  assert.equal(typeof calls[0].identity, 'string');
+  assert.equal(calls[0].contract_sandbox, 'permissive');
   assert.equal('authorization_proof' in calls[0], false);
   assert.equal('evidence' in calls[0], false);
+  assert.equal('source' in calls[0], false);
+  assert.equal('explain' in calls[0], false);
 });
 
 test('applyManifestToScheduler uses replace-style updates for manifest-managed scheduler fields', async () => {
@@ -1688,8 +1709,9 @@ test('json-rpc compile errors include validation payload in error.data', async (
   assert.equal(response.id, 'compile-invalid');
   assert.equal(response.error.code, -32602);
   assert.equal(response.error.message, 'Manifest validation failed');
-  assert.equal(response.error.data.ok, false);
-  assert.ok(Array.isArray(response.error.data.errors));
+  assert.equal(response.error.data.code, 'validation_error');
+  assert.equal(response.error.data.validation.ok, false);
+  assert.ok(Array.isArray(response.error.data.validation.errors));
 });
 
 test('json-rpc caller-fixable parameter errors return invalid params', async () => {
@@ -2094,18 +2116,18 @@ test('malformed JSON input produces contextual parse error', async () => {
 });
 
 test('schema task has required fields on schedule and trigger', async () => {
-  const output = JSON.parse(await runCli(['schema', 'task']));
+  const output = JSON.parse(await runCli(['schema', 'task', '--legacy']));
   assert.deepEqual(output.schema.fields.schedule.required, ['cron']);
   assert.deepEqual(output.schema.fields.trigger.required, ['parent', 'on']);
 });
 
 test('schema task has mutual exclusion note', async () => {
-  const output = JSON.parse(await runCli(['schema', 'task']));
+  const output = JSON.parse(await runCli(['schema', 'task', '--legacy']));
   assert.match(output.schema.note, /Exactly one of schedule or trigger/);
 });
 
 test('schema task includes child_credential_policy', async () => {
-  const output = JSON.parse(await runCli(['schema', 'task']));
+  const output = JSON.parse(await runCli(['schema', 'task', '--legacy']));
   assert.deepEqual(
     output.schema.fields.child_credential_policy.enum,
     ['none', 'inherit', 'downscope', 'independent']
@@ -2113,7 +2135,7 @@ test('schema task includes child_credential_policy', async () => {
 });
 
 test('schema workflow and task identity surfaces include scope', async () => {
-  const output = JSON.parse(await runCli(['schema', 'manifest']));
+  const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   const workflowFields = output.schema.fields.workflows.items.fields;
   const taskFields = workflowFields.tasks.items.fields;
   assert.strictEqual(workflowFields.identity.fields.scope.type, 'string');
@@ -2274,14 +2296,14 @@ test('json-rpc compile includes target name in result', async () => {
 });
 
 test('standalone plan schema includes capabilities field', async () => {
-  const output = JSON.parse(await runCli(['schema', 'standalonePlan']));
+  const output = JSON.parse(await runCli(['schema', 'standalonePlan', '--legacy']));
   assert.ok(output.schema.fields.capabilities);
   assert.equal(output.schema.fields.capabilities.type, 'object');
   assert.ok(output.schema.fields.capabilities.fields.authoring);
 });
 
 test('rpcRequest schema allows string or number id', async () => {
-  const output = JSON.parse(await runCli(['schema', 'rpc-request']));
+  const output = JSON.parse(await runCli(['schema', 'rpc-request', '--legacy']));
   assert.deepEqual(output.schema.fields.id.type, ['string', 'number']);
 });
 
@@ -2340,7 +2362,7 @@ test('cli --fields without a value produces structured error', async () => {
 });
 
 test('rpcResponse schema allows string or number id', async () => {
-  const output = JSON.parse(await runCli(['schema', 'rpc-response']));
+  const output = JSON.parse(await runCli(['schema', 'rpc-response', '--legacy']));
   assert.deepEqual(output.schema.fields.id.type, ['string', 'number']);
 });
 
@@ -2421,7 +2443,7 @@ test('barrel export includes io utilities', async () => {
 });
 
 test('standalonePlan schema version has const constraint', async () => {
-  const output = JSON.parse(await runCli(['schema', 'standalone-plan']));
+  const output = JSON.parse(await runCli(['schema', 'standalone-plan', '--legacy']));
   assert.equal(output.schema.fields.version.const, '0.2');
 });
 
@@ -2631,7 +2653,7 @@ test('non-object schedule does not produce redundant mutual exclusion error', ()
 });
 
 test('schema exposes token format on validated fields', async () => {
-  const output = JSON.parse(await runCli(['schema', 'task']));
+  const output = JSON.parse(await runCli(['schema', 'task', '--legacy']));
   assert.equal(output.schema.fields.target.fields.agent_id.format, 'token');
   assert.equal(output.schema.fields.delivery.fields.channel.format, 'token');
   assert.equal(output.schema.fields.session.fields.preferred_key.format, 'token');
@@ -3078,11 +3100,14 @@ test('cli init rejects when agentcli.json already exists', async (t) => {
 
   const envOverride = { ...process.env, AGENTCLI_HOME: homeRoot };
   await runCli(['init'], { cwd: workdir, env: envOverride });
+  const manifestPath = join(workdir, 'agentcli.json');
+  const original = readFileSync(manifestPath, 'utf8');
 
   await assert.rejects(
     runCli(['init'], { cwd: workdir, env: envOverride }),
     /File already exists/
   );
+  assert.equal(readFileSync(manifestPath, 'utf8'), original);
 });
 
 // --- Sweep 10 tests ---
@@ -3248,7 +3273,7 @@ test('on_failure with explicit target overrides inference', () => {
 });
 
 test('cli schema accepts kebab-case aliases', async () => {
-  const output = JSON.parse(await runCli(['schema', 'scheduler-job']));
+  const output = JSON.parse(await runCli(['schema', 'scheduler-job', '--legacy']));
   assert.equal(output.ok, true);
   assert.ok(output.schema.fields.id);
 });
@@ -3702,7 +3727,7 @@ test('on_failure handler propagates identity, contract, and v0.2 auth/evidence v
         schedule: { cron: '0 * * * *' },
         on_failure: {
           prompt: 'Handle failure',
-          identity: { principal: 'ops@co.com' },
+          identity: { subject: { principal: 'ops@co.com' } },
           contract: { audit: 'on-failure' },
           authorization_proof: { ref: 'proof', verify: { required: true } },
           authorization: { ref: 'authz', on_error: 'deny' },
@@ -3716,7 +3741,7 @@ test('on_failure handler propagates identity, contract, and v0.2 auth/evidence v
   const expanded = expandManifestShorthands(manifest);
   const failureTask = expanded.workflows[0].tasks.find(t => t.id === 't.failure');
   assert.ok(failureTask);
-  assert.equal(failureTask.identity.principal, 'ops@co.com');
+  assert.equal(failureTask.identity.subject.principal, 'ops@co.com');
   assert.equal(failureTask.contract.audit, 'on-failure');
   assert.equal(failureTask.authorization_proof.ref, 'proof');
   assert.equal(failureTask.authorization_proof.verify.required, true);
@@ -3940,8 +3965,12 @@ test('exec dry-run does not spawn a process', () => {
   assert.equal(result.ok, true);
   assert.equal(result.dry_run, true);
   assert.equal(result.command.program, 'df');
-  assert.deepEqual(result.command.args, ['-h']);
-  assert.ok(!result.result);
+  assert.equal(result.command.args_count, 1);
+  assert.ok(result.command.env_keys.includes('PATH'));
+  assert.ok(result.command.env_keys.every(key => OPERATIONAL_ENV_KEYS.has(key) || key.startsWith('LC_')));
+  assert.match(result.command.args_hashes[0], /^sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(result.result, { status: 'dry_run' });
+  assert.ok(Object.values(result.phases).every(phase => phase === 'skipped'));
 });
 
 test('exec resolves identity from workflow to task', () => {
@@ -3961,8 +3990,9 @@ test('exec resolves identity from workflow to task', () => {
     }]
   };
   const result = executeTask(manifest, { taskId: 't' });
-  assert.equal(result.identity.principal, 'admin@co.com');
-  assert.equal(result.identity.run_as, 'builder');
+  assert.equal(result.principal_used, 'admin@co.com');
+  assert.equal(result.identity.subject.principal, null);
+  assert.equal(result.identity.subject.run_as, null);
 });
 
 test('exec enforces contract.allowed_paths against shell.cwd', () => {
@@ -3985,6 +4015,39 @@ test('exec enforces contract.allowed_paths against shell.cwd', () => {
   );
 });
 
+test('exec resolves symlinks before enforcing contract.allowed_paths', {
+  skip: process.platform === 'win32',
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-cwd-symlink-'));
+  const allowed = join(root, 'allowed');
+  const outside = join(root, 'outside');
+  const linked = join(allowed, 'linked');
+  try {
+    mkdirSync(allowed);
+    mkdirSync(outside);
+    symlinkSync(outside, linked);
+    const manifest = {
+      version: '0.1',
+      workflows: [{
+        id: 'w', name: 'W',
+        tasks: [{
+          id: 't', name: 'T',
+          shell: { program: 'true', args: [], cwd: linked },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+          contract: { allowed_paths: [allowed], audit: 'none' },
+        }],
+      }],
+    };
+    assert.throws(
+      () => executeTask(manifest, { taskId: 't' }),
+      error => error.code === 'contract_violation'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('exec allows cwd under an allowed path', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-cwd-'));
   try {
@@ -4001,23 +4064,32 @@ test('exec allows cwd under an allowed path', () => {
         }]
       }]
     };
-    const result = executeTask(manifest, { taskId: 't' });
-    assert.equal(result.ok, true);
+    if (resolveSandboxSupport()) {
+      const result = executeTask(manifest, { taskId: 't' });
+      assert.equal(result.ok, true);
+    } else {
+      assert.throws(
+        () => executeTask(manifest, { taskId: 't' }),
+        error => error.code === 'sandbox_enforcement_unavailable'
+      );
+    }
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
 });
 
-test('prepareSandboxedShellCommand falls back with warnings on unsupported platforms', () => {
-  const result = prepareSandboxedShellCommand(
-    { program: 'echo', args: ['hi'] },
-    { sandbox: 'strict', network: 'none' },
-    { cwd: process.cwd(), env: {}, platform: 'linux' }
+test('prepareSandboxedShellCommand fails closed on unsupported platforms', () => {
+  assert.throws(
+    () => prepareSandboxedShellCommand(
+      { program: 'echo', args: ['hi'] },
+      { sandbox: 'strict', network: 'none' },
+      { cwd: process.cwd(), env: {}, platform: 'linux' }
+    ),
+    error => (
+      error.code === 'sandbox_enforcement_unavailable' &&
+      error.constraints.includes('network denial')
+    )
   );
-
-  assert.equal(result.sandboxed, false);
-  assert.ok(result.warnings.some(w => w.includes('no supported local sandbox runner')));
-  assert.ok(result.warnings.some(w => w.includes('network')));
 });
 
 test('prepareSandboxedShellCommand keeps permissive sandbox advisory', () => {
@@ -4060,7 +4132,7 @@ test('prepareSandboxedShellCommand wraps strict contracts on supported darwin ru
   assert.equal(result.args[2], 'echo');
 });
 
-test('exec returns fallback warnings for strict sandbox and network none when sandboxing is disabled', () => {
+test('exec fails closed for strict sandbox and network none when sandboxing is disabled', () => {
   const manifest = {
     version: '0.1',
     workflows: [{
@@ -4074,12 +4146,13 @@ test('exec returns fallback warnings for strict sandbox and network none when sa
       }]
     }]
   };
-  const result = executeTask(manifest, {
-    taskId: 't',
-    env: { ...process.env, AGENTCLI_SANDBOX: 'off' },
-  });
-  assert.ok(result.warnings.some(w => w.includes('no supported local sandbox runner')));
-  assert.ok(result.warnings.some(w => w.includes('network')));
+  assert.throws(
+    () => executeTask(manifest, {
+      taskId: 't',
+      env: { ...process.env, AGENTCLI_SANDBOX: 'off' },
+    }),
+    error => error.code === 'sandbox_enforcement_unavailable'
+  );
 });
 
 test('exec strict sandbox allows writes inside cwd on supported darwin runners', () => {
@@ -4394,7 +4467,8 @@ test('cli exec --dry-run does not execute', async () => {
   const output = JSON.parse(await runCli(['exec', JSON.stringify(manifest), 't', '--dry-run']));
   assert.equal(output.ok, true);
   assert.equal(output.dry_run, true);
-  assert.ok(!output.result);
+  assert.deepEqual(output.result, { status: 'dry_run' });
+  assert.ok(Object.values(output.phases).every(phase => phase === 'skipped'));
 });
 
 test('cli exec --dry-run previews delegated non-shell tasks without scheduler config', async () => {
@@ -4489,6 +4563,68 @@ test('resolveSigningKey finds SSH key from home directory', () => {
 test('resolveSigningKey respects AGENTCLI_SIGNING_KEY env', () => {
   const key = resolveSigningKey({ env: { AGENTCLI_SIGNING_KEY: '/nonexistent/key' } });
   assert.equal(key, null);
+});
+
+test('generateAllowedSigners refuses a symbolic-link output directory', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-signers-dir-link-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const targetDirectory = join(root, 'target');
+  const linkedDirectory = join(root, 'linked');
+  mkdirSync(sshDirectory, { recursive: true });
+  mkdirSync(targetDirectory);
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  try {
+    symlinkSync(
+      targetDirectory,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('directory link creation is unavailable on this Windows runner');
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => generateAllowedSigners({
+      principal: 'agentcli@test',
+      homeDir: home,
+      outputPath: join(linkedDirectory, 'allowed_signers'),
+    }),
+    error => error.code === 'invalid_argument' && /symbolic-link directory/.test(error.message)
+  );
+  assert.equal(existsSync(join(targetDirectory, 'allowed_signers')), false);
+});
+
+test('generateAllowedSigners refuses a FIFO output without blocking', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-signers-fifo-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  const sshDirectory = join(home, '.ssh');
+  const outputPath = join(root, 'allowed_signers');
+  mkdirSync(sshDirectory, { recursive: true });
+  writeFileSync(join(sshDirectory, 'id_ed25519.pub'), 'ssh-ed25519 AAAATEST agentcli@test\n');
+  const created = spawnSync('mkfifo', [outputPath], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr || created.error?.message);
+  const reader = openSync(outputPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    assert.throws(
+      () => generateAllowedSigners({
+        principal: 'agentcli@test',
+        homeDir: home,
+        outputPath,
+      }),
+      error => error.code === 'invalid_argument' && /non-regular file/.test(error.message)
+    );
+  } finally {
+    closeSync(reader);
+  }
 });
 
 test('buildAttestationPayload produces deterministic canonical JSON', () => {
@@ -5224,9 +5360,69 @@ test('mergeManifests combines two manifests', () => {
     }]
   };
   const merged = mergeManifests([a, b]);
+  assert.equal(merged.version, '0.1');
   assert.equal(merged.workflows.length, 2);
   assert.equal(merged.workflows[0].id, 'a');
   assert.equal(merged.workflows[1].id, 'b');
+});
+
+test('mergeManifests rejects mixed manifest versions with conversion guidance', () => {
+  const v1 = {
+    version: '0.1',
+    workflows: [{
+      id: 'v1', name: 'V1',
+      tasks: [{ id: 't1', name: 'T1', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  const v2 = {
+    version: '0.2',
+    workflows: [{
+      id: 'v2', name: 'V2',
+      tasks: [{ id: 't2', name: 'T2', prompt: 'go', target: { session_target: 'main' }, schedule: { cron: '0 * * * *' } }]
+    }]
+  };
+  assert.throws(
+    () => mergeManifests([v1, v2]),
+    error => error.code === 'invalid_argument' && /convert v0\.1 inputs to v0\.2/.test(error.message)
+  );
+});
+
+test('mergeManifests preserves v0.2 profile collections and rejects conflicting definitions', () => {
+  const makeManifest = (workflowId, profileId, principal) => ({
+    version: '0.2',
+    identity_profiles: [{
+      id: profileId,
+      provider: 'none',
+      subject: { kind: 'service', principal },
+    }],
+    workflows: [{
+      id: workflowId,
+      name: workflowId,
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        prompt: 'go',
+        target: { session_target: 'main' },
+        schedule: { cron: '0 * * * *' },
+        identity: { ref: profileId },
+      }],
+    }],
+  });
+  const first = makeManifest('first', 'first-profile', 'agent://test/first');
+  const second = makeManifest('second', 'second-profile', 'agent://test/second');
+  const merged = mergeManifests([first, second]);
+  assert.equal(merged.version, '0.2');
+  assert.deepEqual(merged.identity_profiles.map(profile => profile.id), [
+    'first-profile',
+    'second-profile',
+  ]);
+  assert.equal(validateManifest(merged).ok, true);
+
+  const conflicting = makeManifest('conflicting', 'first-profile', 'agent://test/changed');
+  assert.throws(
+    () => mergeManifests([first, conflicting]),
+    /Conflicting identity_profiles id "first-profile"/
+  );
 });
 
 test('mergeManifests rejects duplicate workflow ids', () => {
@@ -6144,7 +6340,7 @@ test('none verifier verifyProof returns unverified', async () => {
   assert.strictEqual(result.method, 'none');
 });
 
-test('jwt verifier validates profile with issuer', async () => {
+test('jwt verifier rejects profiles without a configured trust source', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   const verifier = getVerifier('jwt');
@@ -6152,10 +6348,11 @@ test('jwt verifier validates profile with issuer', async () => {
     issuer: 'https://issuer.example.com',
     proof: { value_from: { env: 'JWT_TOKEN' } }
   }, {});
-  assert.strictEqual(result.valid, true);
+  assert.strictEqual(result.valid, false);
+  assert.ok(result.errors.some(error => error.field === 'verify'));
 });
 
-test('authorization proof verifiers accept literal proof sources', async () => {
+test('authorization proof verifiers reject circular literal proof sources', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   await import('../src/authorization-proof/detached-signature.js');
@@ -6164,9 +6361,11 @@ test('authorization proof verifiers accept literal proof sources', async () => {
   for (const method of ['jwt', 'detached-signature', 'certificate']) {
     const verifier = getVerifier(method);
     const result = verifier.validateProfile({
+      public_key: testKeyPair.publicKey,
       proof: { value_from: { literal: 'inline-proof-material' } }
     }, {});
-    assert.strictEqual(result.valid, true, `${method} should accept literal proof sources`);
+    assert.strictEqual(result.valid, false, `${method} should reject literal proof sources`);
+    assert.ok(result.errors.some(error => error.field === 'proof.value_from.literal'));
   }
 });
 
@@ -6203,7 +6402,7 @@ test('jwt verifier rejects token with wrong issuer when profile.issuer is set', 
   assert.strictEqual(result.claims_validated, false);
 });
 
-test('jwt verifier accepts token with correct issuer', async () => {
+test('jwt verifier validates issuer claims but rejects unsigned tokens', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   const verifier = getVerifier('jwt');
@@ -6211,9 +6410,11 @@ test('jwt verifier accepts token with correct issuer', async () => {
   const result = verifier.verifyProof(token, {
     issuer: 'https://expected.example.com',
   }, {});
-  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.verified, false);
   assert.strictEqual(result.method, 'jwt');
   assert.strictEqual(result.claims_validated, true);
+  assert.strictEqual(result.signature_verified, false);
+  assert.strictEqual(result.manifest_bound, false);
 });
 
 test('jwt verifier rejects token with wrong audience when profile.audience is set', async () => {
@@ -6230,7 +6431,7 @@ test('jwt verifier rejects token with wrong audience when profile.audience is se
   assert.strictEqual(result.claims_validated, false);
 });
 
-test('jwt verifier accepts token with array audience containing expected value', async () => {
+test('jwt verifier validates array audience claims but rejects unsigned tokens', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   const verifier = getVerifier('jwt');
@@ -6241,9 +6442,10 @@ test('jwt verifier accepts token with array audience containing expected value',
   const result = verifier.verifyProof(token, {
     audience: 'https://expected.api.com',
   }, {});
-  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.verified, false);
   assert.strictEqual(result.method, 'jwt');
   assert.strictEqual(result.claims_validated, true);
+  assert.strictEqual(result.signature_verified, false);
 });
 
 // -- verify.required / signatureRequired behavior --
@@ -6260,16 +6462,17 @@ test('jwt verifier with signatureRequired=true and no trusted key returns verifi
   assert.strictEqual(result.claims_validated, true);
 });
 
-test('jwt verifier with signatureRequired=false and no trusted key returns verified=true (claims-only)', async () => {
+test('jwt verifier never treats claims-only parsing as verification', async () => {
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   const verifier = getVerifier('jwt');
   const token = unsignedJwt({ sub: 'test' });
   const result = verifier.verifyProof(token, {}, { requireSignature: false });
-  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.verified, false);
   assert.strictEqual(result.signature_verified, false);
   assert.strictEqual(result.signature_required, false);
   assert.strictEqual(result.claims_validated, true);
+  assert.strictEqual(result.manifest_bound, false);
 });
 
 // -- Audit-safe claim extraction --
@@ -6298,7 +6501,8 @@ test('jwt verifier decoded_claims includes AUDIT_SAFE_CLAIMS from payload', asyn
   };
   const token = unsignedJwt(payload);
   const result = verifier.verifyProof(token, {}, {});
-  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.claims_validated, true);
   const dc = result.decoded_claims;
   assert.strictEqual(dc.sub, 'test-subject');
   assert.strictEqual(dc.iss, 'https://issuer.example.com');
@@ -6330,7 +6534,8 @@ test('jwt verifier decoded_claims does not include claims outside the audit-safe
   };
   const token = unsignedJwt(payload);
   const result = verifier.verifyProof(token, {}, {});
-  assert.strictEqual(result.verified, true);
+  assert.strictEqual(result.verified, false);
+  assert.strictEqual(result.claims_validated, true);
   const dc = result.decoded_claims;
   assert.strictEqual(dc.sub, 'test-subject');
   assert.strictEqual(dc.secret_internal_field, undefined);
@@ -6350,7 +6555,7 @@ test('jwt verifier validateProfile rejects verify.required=true without public_k
   }, {});
   assert.strictEqual(result.valid, false);
   const fieldNames = result.errors.map(e => e.field);
-  assert.ok(fieldNames.includes('verify.required'));
+  assert.ok(fieldNames.includes('verify'));
 });
 
 test('jwt verifier validateProfile accepts verify.required=true with public_key', async () => {
@@ -6397,11 +6602,13 @@ test('jwt verifier verifies signed token when trustedKey is provided in context'
   const { getVerifier } = await import('../src/authorization-proof/index.js');
   await import('../src/authorization-proof/jwt.js');
   const verifier = getVerifier('jwt');
+  const manifest = { version: '0.2', workflows: [] };
   const token = signedJwt({
     sub: 'signed-subject',
     iss: 'https://issuer.example.com',
     aud: 'https://api.example.com',
     org_id: 'org-signed',
+    manifest_digest: canonicalDigest(manifest),
   });
   const result = verifier.verifyProof(token, {
     issuer: 'https://issuer.example.com',
@@ -6410,11 +6617,13 @@ test('jwt verifier verifies signed token when trustedKey is provided in context'
     trustedKey: testKeyPair.publicKey,
     trustedKeySource: 'public_key',
     requireSignature: true,
+    manifestDigest: canonicalDigest(manifest),
   });
   assert.strictEqual(result.verified, true);
   assert.strictEqual(result.signature_verified, true);
   assert.strictEqual(result.signature_required, true);
   assert.strictEqual(result.claims_validated, true);
+  assert.strictEqual(result.manifest_bound, true);
   assert.strictEqual(result.key_source, 'public_key');
   assert.strictEqual(result.decoded_claims.org_id, 'org-signed');
 });
@@ -6459,7 +6668,7 @@ test('resolveJwtVerificationContext returns null trustedKey when no key source i
   assert.strictEqual(ctx.trustedKey, null);
   assert.strictEqual(ctx.trustedKeySource, null);
   assert.strictEqual(ctx.trustedKeyError, null);
-  assert.strictEqual(ctx.requireSignature, false);
+  assert.strictEqual(ctx.requireSignature, true);
 });
 
 test('resolveJwtVerificationContext inherits requireSignature from profile.verify.required', async () => {
@@ -6851,25 +7060,29 @@ test('v0.2 exec with none identity provider succeeds (dry run)', async () => {
   const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.dry_run, true);
-  assert.ok(result.declared_identity);
-  assert.ok(result.principal_used);
+  assert.strictEqual(result.identity.ref, 'local-agent');
+  assert.strictEqual(result.declared_identity, undefined);
+  assert.strictEqual(result.resolved_identity, undefined);
+  assert.strictEqual(result.principal_used, undefined);
+  assert.ok(Object.values(result.phases).every(phase => phase === 'skipped'));
 });
 
-test('v0.2 exec includes declared identity fields', async () => {
+test('v0.2 dry-run includes redacted declared identity fields without resolving a session', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
   const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
-  assert.strictEqual(result.declared_identity.provider, 'none');
-  assert.strictEqual(result.declared_identity.subject.principal, 'agent://local/test-agent');
-  assert.strictEqual(result.declared_identity.subject.kind, 'agent');
-  assert.strictEqual(result.declared_identity.trust_level, 'supervised');
+  assert.strictEqual(result.identity.provider, 'none');
+  assert.strictEqual(result.identity.subject.principal, 'agent://local/test-agent');
+  assert.strictEqual(result.identity.subject.kind, 'agent');
+  assert.strictEqual(result.identity.trust.level, 'supervised');
+  assert.strictEqual(result.resolved_identity, undefined);
 });
 
-test('v0.2 exec includes trust info', async () => {
+test('v0.2 dry-run includes declared trust without provider resolution', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
   const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
-  assert.ok(result.trust);
-  assert.strictEqual(result.trust.declared_level, 'supervised');
-  assert.strictEqual(result.trust.effective_level, 'supervised');
+  assert.strictEqual(result.identity.trust.level, 'supervised');
+  assert.strictEqual(result.trust, undefined);
+  assert.strictEqual(result.phases.identity_resolution, 'skipped');
 });
 
 test('v0.2 exec includes contract with trust fields', async () => {
@@ -6879,12 +7092,13 @@ test('v0.2 exec includes contract with trust fields', async () => {
   assert.strictEqual(result.contract.trust_enforcement, 'advisory');
 });
 
-test('v0.2 exec with env-bearer identity and missing optional token succeeds', async () => {
+test('v0.2 dry-run inspects env-bearer declarations without resolving the optional token', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
   const result = await executeTask(manifest, { taskId: 'env-token-task', dryRun: true });
   assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.declared_identity.provider, 'env-bearer');
-  assert.strictEqual(result.declared_identity.subject.kind, 'service');
+  assert.strictEqual(result.identity.provider, 'env-bearer');
+  assert.strictEqual(result.identity.subject.kind, 'service');
+  assert.strictEqual(result.phases.identity_resolution, 'skipped');
 });
 
 test('v0.2 exec passes identity scope through to scoped providers', async () => {
@@ -6941,7 +7155,7 @@ test('v0.2 exec passes identity scope through to scoped providers', async () => 
   assert.strictEqual(result.result.stdout, 'rk_test_readonly_scope_value_654321');
 });
 
-test('v0.2 exec awaits async handoff preparation and summarizes credentials', async () => {
+test('v0.2 local shell execution rejects unsupported non-none handoff declarations', async () => {
   const manifest = {
     version: '0.2',
     identity_profiles: [{
@@ -6969,21 +7183,15 @@ test('v0.2 exec awaits async handoff preparation and summarizes credentials', as
     }],
   };
 
-  const result = await executeTask(manifest, {
-    taskId: 'handoff-task',
-    dryRun: true,
-    presentationDebug: true,
-    signer: 'none',
-  });
-
-  assert.strictEqual(result.ok, true);
-  assert.deepStrictEqual(result.handoff, { mode: 'downscope', prepared: true });
-  assert.deepStrictEqual(result.presentation_debug.handoff, {
-    mode: 'downscope',
-    prepared: true,
-    credential_types: ['access_token'],
-    reason: null,
-  });
+  assert.throws(
+    () => executeTask(manifest, {
+      taskId: 'handoff-task',
+      dryRun: true,
+      presentationDebug: true,
+      signer: 'none',
+    }),
+    error => error.code === 'unsupported_capability'
+  );
 });
 
 test('v0.2 exec runs command and returns output', async () => {
@@ -6995,24 +7203,27 @@ test('v0.2 exec runs command and returns output', async () => {
   assert.ok(result.execution_id);
 });
 
-test('v0.2 exec principal_used matches profile principal', async () => {
+test('v0.2 dry-run does not claim a resolved principal', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
   const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
-  assert.strictEqual(result.principal_used, 'agent://local/test-agent');
+  assert.strictEqual(result.principal_used, undefined);
+  assert.strictEqual(result.identity.subject.principal, 'agent://local/test-agent');
 });
 
-test('v0.2 exec with resolved identity includes session description', async () => {
+test('v0.2 dry-run does not include a resolved identity session', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../examples/identity-v2.json', import.meta.url), 'utf8'));
   const result = await executeTask(manifest, { taskId: 'echo-identity', dryRun: true });
-  assert.ok(result.resolved_identity);
-  assert.strictEqual(result.resolved_identity.provider, 'none');
-  assert.deepStrictEqual(result.resolved_identity.credentials, {});
+  assert.strictEqual(result.resolved_identity, undefined);
+  assert.strictEqual(result.phases.identity_resolution, 'skipped');
 });
 
 test('v0.2 exec resolves authorization proof, authorization, and evidence', async () => {
   const result = await executeTask(proofEnabledManifest, {
     taskId: 'proof-task',
-    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
+    env: {
+      ...process.env,
+      TEST_AGENTCLI_JWT: signedManifestJwt(proofEnabledManifest, { sub: 'agentcli-proof' }),
+    }
   });
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof.verified, true);
@@ -7063,13 +7274,57 @@ test('convertManifestV1toV2 preserves workflow identity', async () => {
   assert.strictEqual(profile.subject.principal, 'deploy-bot@infra.example.com');
 });
 
-test('convertManifestV1toV2 creates authorization_proof_profile for oidc attestation', async () => {
+test('convertManifestV1toV2 preserves inherited legacy identity fields under partial overrides', async () => {
+  const { convertManifestV1toV2 } = await import('../src/convert.js');
+  const v1 = {
+    version: '0.1',
+    workflows: [{
+      id: 'partial-identity',
+      name: 'Partial Identity',
+      identity: {
+        principal: 'workflow@example.test',
+        run_as: 'workflow-user',
+        attestation: 'ssh',
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        identity: { run_as: 'task-user' },
+        on_failure: {
+          shell: { program: 'true', args: [] },
+          identity: { principal: 'handler@example.test' },
+        },
+      }],
+    }],
+  };
+  const converted = convertManifestV1toV2(v1);
+  const workflow = converted.workflows[0];
+  const task = workflow.tasks[0];
+  const taskProfile = converted.identity_profiles.find(profile => profile.id === task.identity.ref);
+  const failureProfile = converted.identity_profiles.find(profile => profile.id === task.on_failure.identity.ref);
+
+  assert.equal(taskProfile.subject.principal, 'workflow@example.test');
+  assert.equal(taskProfile.subject.run_as, 'task-user');
+  assert.equal(failureProfile.subject.principal, 'handler@example.test');
+  assert.equal(failureProfile.subject.run_as, 'workflow-user');
+  assert.ok(workflow.authorization_proof?.ref);
+  assert.equal(task.authorization_proof, undefined);
+  assert.equal(task.on_failure.authorization_proof, undefined);
+  assert.equal(validateManifest(converted).ok, true);
+});
+
+test('convertManifestV1toV2 preserves legacy attestation as a non-verifying declaration', async () => {
   const { convertManifestV1toV2 } = await import('../src/convert.js');
   const v1 = JSON.parse(readFileSync(new URL('../examples/identity-contract.json', import.meta.url), 'utf8'));
   const v2 = convertManifestV1toV2(v1);
   assert.ok(Array.isArray(v2.authorization_proof_profiles));
-  const jwtProfile = v2.authorization_proof_profiles.find(p => p.method === 'jwt');
-  assert.ok(jwtProfile, 'Should create a jwt authorization_proof_profile for oidc attestation');
+  const declaration = v2.authorization_proof_profiles.find(p => p.method === 'none');
+  assert.ok(declaration, 'Should preserve legacy attestation without claiming cryptographic verification');
+  assert.strictEqual(declaration.verify.required, false);
+  assert.strictEqual(validateManifest(v2).ok, true);
 });
 
 test('convertManifestV1toV2 rejects null input', async () => {
@@ -7092,7 +7347,7 @@ test('v0.2 standalone compilation preserves evidence profiles', () => {
   const compiled = compileManifestToStandalone(manifest);
   assert.ok(compiled.evidence_profiles);
   assert.strictEqual(compiled.evidence_profiles.length, 1);
-  assert.ok(compiled.capabilities.evidence_generation);
+  assert.strictEqual(compiled.capabilities.evidence_generation, false);
 });
 
 test('v0.2 standalone compilation preserves authorization_proof_profiles', () => {
@@ -7184,18 +7439,19 @@ test('v0.2 scheduler compilation redacts provider inputs from durable specs', ()
   const manifest = {
     version: '0.2',
     authorization_proof_profiles: [{
-      id: 'literal-proof',
+      id: 'external-proof',
       method: 'jwt',
+      public_key: testKeyPair.publicKey,
       proof: {
         value_from: {
-          literal: unsignedJwt({ sub: 'agentcli-proof' })
+          env: 'SECRET_PROOF'
         }
       },
       verify: { required: true }
     }],
     identity_profiles: [{
       id: 'secret-agent',
-      provider: 'none',
+      provider: TEST_ASYNC_HANDOFF_PROVIDER,
       provider_config: {
         profile_secret: 'profile-level-secret'
       },
@@ -7240,7 +7496,7 @@ test('v0.2 scheduler compilation redacts provider inputs from durable specs', ()
         shell: { program: 'echo', args: ['redact'] },
         schedule: { cron: '0 * * * *' },
         identity: { ref: 'secret-agent' },
-        authorization_proof: { ref: 'literal-proof' },
+        authorization_proof: { ref: 'external-proof' },
         authorization: {
           ref: 'secret-authz',
           provider_config: { task: 'redact-task' }
@@ -7250,16 +7506,24 @@ test('v0.2 scheduler compilation redacts provider inputs from durable specs', ()
     }]
   };
 
+  const validation = validateManifest(manifest);
+  assert.equal(validation.ok, true, JSON.stringify(validation.errors));
   const compiled = compileManifestToScheduler(manifest);
   const job = compiled.jobs.find(candidate => candidate.source.task_id === 'redact-task');
 
   assert.ok(job);
   assert.strictEqual(job.identity.auth.provider_config, null);
   assert.strictEqual(job.identity.auth.inputs, null);
-  assert.strictEqual(job.authorization_proof.proof.value_from, null);
+  assert.deepStrictEqual(job.authorization_proof.proof.value_from, {
+    env: 'SECRET_PROOF',
+    file: null,
+  });
   assert.strictEqual(job.authorization.provider_config, null);
   assert.strictEqual(job.evidence.provider_config, null);
-  assert.strictEqual(compiled.authorization_proof_profiles[0].proof.value_from, null);
+  assert.deepStrictEqual(compiled.authorization_proof_profiles[0].proof.value_from, {
+    env: 'SECRET_PROOF',
+    file: null,
+  });
   assert.strictEqual(compiled.identity_profiles[0].provider_config, null);
   assert.strictEqual(compiled.identity_profiles[0].auth.provider_config, null);
   assert.strictEqual(compiled.identity_profiles[0].auth.inputs, null);
@@ -7356,6 +7620,13 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: 'test',
+        handoff_version: '3',
+        features: { authorization_proof_verification: false },
+      };
+    },
     listJobs() {
       return [];
     },
@@ -7370,7 +7641,10 @@ test('applyManifestToScheduler returns authorization proof verification summarie
 
   const result = await applyManifestToScheduler(applyProofManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
+    env: {
+      ...process.env,
+      TEST_AGENTCLI_JWT: signedManifestJwt(applyProofManifest, { sub: 'agentcli-proof' }),
+    }
   });
 
   assert.strictEqual(result.ok, true);
@@ -7379,13 +7653,25 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-me');
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
   assert.strictEqual('authorization_proof_verification' in calls[0], false);
-  assert.strictEqual('authorization_proof' in calls[0], false);
+  const persistedProof = JSON.parse(calls[0].authorization_proof);
+  assert.strictEqual(persistedProof.ref, 'jwt-proof');
+  assert.deepStrictEqual(persistedProof.proof.value_from, {
+    env: 'TEST_AGENTCLI_JWT',
+    file: null,
+  });
 });
 
 test('applyManifestToScheduler resolves command-sourced authorization proofs', async () => {
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: 'test',
+        handoff_version: '3',
+        features: { authorization_proof_verification: false },
+      };
+    },
     listJobs() {
       return [];
     },
@@ -7398,12 +7684,12 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs', a
     }
   };
 
-  const result = await applyManifestToScheduler({
+  const manifest = {
     version: '0.2',
     authorization_proof_profiles: [{
       id: 'jwt-proof',
       method: 'jwt',
-      proof: { value_from: { command: `printf '%s' '${signedJwt({ sub: 'agentcli-proof' })}'` } },
+      proof: { value_from: { command: 'printf %s "$PROOF_TOKEN"' } },
       claims: { subject: 'agentcli-proof' },
       public_key: testKeyPair.publicKey,
       verify: { required: true }
@@ -7420,26 +7706,39 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs', a
         schedule: { cron: '0 * * * *' }
       }]
     }]
-  }, {
+  };
+  const result = await applyManifestToScheduler(manifest, {
     runner,
-    env: process.env
+    env: {
+      ...process.env,
+      PROOF_TOKEN: signedManifestJwt(manifest, { sub: 'agentcli-proof' }),
+    },
+    allowValueFromCommand: true,
   });
 
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
-  assert.strictEqual('authorization_proof' in calls[0], false);
+  const persistedProof = JSON.parse(calls[0].authorization_proof);
+  assert.strictEqual(persistedProof.ref, 'jwt-proof');
+  assert.strictEqual(persistedProof.proof.value_from, null);
 });
 
 test('applyManifestToScheduler resolves command-sourced authorization proofs relative to cwd', async () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-apply-proof-cwd-'));
   const scriptPath = join(workdir, 'emit.js');
-  const token = signedJwt({ sub: 'agentcli-proof' });
-  writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
+  writeFileSync(scriptPath, 'process.stdout.write(process.env.PROOF_TOKEN)\n');
 
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: 'test',
+        handoff_version: '3',
+        features: { authorization_proof_verification: false },
+      };
+    },
     listJobs() {
       return [];
     },
@@ -7453,7 +7752,7 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs rel
   };
 
   try {
-    const result = await applyManifestToScheduler({
+    const manifest = {
       version: '0.2',
       authorization_proof_profiles: [{
         id: 'jwt-proof',
@@ -7475,22 +7774,29 @@ test('applyManifestToScheduler resolves command-sourced authorization proofs rel
           schedule: { cron: '0 * * * *' }
         }]
       }]
-    }, {
+    };
+    const result = await applyManifestToScheduler(manifest, {
       runner,
       cwd: workdir,
-      env: process.env
+      env: {
+        ...process.env,
+        PROOF_TOKEN: signedManifestJwt(manifest, { sub: 'agentcli-proof' }),
+      },
+      allowValueFromCommand: true,
     });
 
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.authorization_proof_verifications.length, 1);
     assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
-    assert.strictEqual('authorization_proof' in calls[0], false);
+    const persistedProof = JSON.parse(calls[0].authorization_proof);
+    assert.strictEqual(persistedProof.ref, 'jwt-proof');
+    assert.strictEqual(persistedProof.proof.value_from, null);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
 });
 
-test('applyManifestToScheduler verifies literal authorization proofs without persisting them', async () => {
+test('applyManifestToScheduler rejects circular literal authorization proofs', async () => {
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
@@ -7506,7 +7812,7 @@ test('applyManifestToScheduler verifies literal authorization proofs without per
     }
   };
 
-  const result = await applyManifestToScheduler({
+  const manifest = {
     version: '0.2',
     authorization_proof_profiles: [{
       id: 'jwt-proof',
@@ -7528,16 +7834,15 @@ test('applyManifestToScheduler verifies literal authorization proofs without per
         schedule: { cron: '0 * * * *' }
       }]
     }]
-  }, {
-    runner,
-    env: process.env
-  });
+  };
 
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.authorization_proof_verifications.length, 1);
-  assert.strictEqual(result.authorization_proof_verifications[0].verification.verified, true);
-  assert.strictEqual('authorization_proof' in calls[0], false);
-  assert.strictEqual('authorization_proof_verification' in calls[0], false);
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner, env: process.env }),
+    error => error.validation?.errors.some(item => (
+      item.path.endsWith('.proof.value_from.literal') && /not supported/.test(item.message)
+    ))
+  );
+  assert.deepStrictEqual(calls, []);
 });
 
 test('applyManifestToScheduler rejects generated on_failure authorization when target lacks hook', async () => {
@@ -7569,6 +7874,13 @@ test('applyManifestToScheduler rejects generated on_failure authorization when t
     () => applyManifestToScheduler(manifest, {
       runner: {
         invocation: { label: 'fake-scheduler' },
+        queryCapabilities() {
+          return {
+            scheduler_version: 'test',
+            handoff_version: '3',
+            features: { authorization_hook: false },
+          };
+        },
         listJobs() {
           return [];
         },
@@ -7588,6 +7900,13 @@ test('applyManifestToScheduler proof fallback uses resolved task proof declarati
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: 'test',
+        handoff_version: '3',
+        features: { authorization_proof_verification: false },
+      };
+    },
     listJobs() {
       return [];
     },
@@ -7602,13 +7921,16 @@ test('applyManifestToScheduler proof fallback uses resolved task proof declarati
 
   const result = await applyManifestToScheduler(applyProofOverrideManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
+    env: {
+      ...process.env,
+      TEST_AGENTCLI_JWT: signedManifestJwt(applyProofOverrideManifest, { sub: 'agentcli-proof' }),
+    }
   });
 
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.authorization_proof_verifications.length, 1);
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'verify-override');
-  assert.strictEqual('authorization_proof' in calls[0], false);
+  assert.strictEqual(JSON.parse(calls[0].authorization_proof).ref, 'jwt-proof');
   assert.strictEqual('authorization_proof_verification' in calls[0], false);
 });
 
@@ -7616,6 +7938,13 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   const calls = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
+    queryCapabilities() {
+      return {
+        scheduler_version: 'test',
+        handoff_version: '3',
+        features: { authorization_proof_verification: false },
+      };
+    },
     listJobs() {
       return [];
     },
@@ -7630,7 +7959,10 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
 
   const result = await applyManifestToScheduler(applyOnFailureProofManifest, {
     runner,
-    env: { ...process.env, TEST_AGENTCLI_JWT: signedJwt({ sub: 'agentcli-proof' }) }
+    env: {
+      ...process.env,
+      TEST_AGENTCLI_JWT: signedManifestJwt(applyOnFailureProofManifest, { sub: 'agentcli-proof' }),
+    }
   });
 
   assert.strictEqual(result.ok, true);
@@ -7638,7 +7970,7 @@ test('applyManifestToScheduler proof fallback covers generated on_failure tasks'
   assert.strictEqual(result.authorization_proof_verifications[0].source.task_id, 'primary.failure');
   const failureSpec = calls.find(spec => spec.name === 'Handle Failure');
   assert.ok(failureSpec);
-  assert.strictEqual('authorization_proof' in failureSpec, false);
+  assert.strictEqual(JSON.parse(failureSpec.authorization_proof).ref, 'jwt-proof');
   assert.strictEqual('authorization_proof_verification' in failureSpec, false);
 });
 
@@ -7737,7 +8069,7 @@ test('resolveEffectiveFeatures upgrades static false to runtime true', () => {
   assert.strictEqual(result.features.credential_handoff, true);
 });
 
-test('resolveEffectiveFeatures cannot downgrade static true to runtime false', () => {
+test('resolveEffectiveFeatures treats live false values as authoritative downgrades', () => {
   const caps = {
     ok: true,
     features: {
@@ -7747,9 +8079,9 @@ test('resolveEffectiveFeatures cannot downgrade static true to runtime false', (
     }
   };
   const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
-  assert.strictEqual(result.features.runtime_execution, true);
-  assert.strictEqual(result.features.identity_declaration, true);
-  assert.strictEqual(result.features.audit_export, true);
+  assert.strictEqual(result.features.runtime_execution, false);
+  assert.strictEqual(result.features.identity_declaration, false);
+  assert.strictEqual(result.features.audit_export, false);
 });
 
 test('resolveEffectiveFeatures replaces string values from runtime', () => {
@@ -8038,7 +8370,7 @@ test('applyManifestToScheduler rejects unsupported trust and evidence capabiliti
     queryCapabilities() {
       return {
         scheduler_version: '0.2.0',
-        handoff_version: '1',
+        handoff_version: '3',
         features: {},
       };
     },
@@ -8384,7 +8716,7 @@ test('applyManifestToScheduler with handoff_version 2 sends v0.2 fields to addJo
   assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELD_VERSIONS['2'].length);
 });
 
-test('applyManifestToScheduler without capabilities (old scheduler) strips v0.2 fields', async () => {
+test('applyManifestToScheduler without capabilities rejects v0.2 fields', async () => {
   const manifest = {
     version: '0.2',
     identity_profiles: [{
@@ -8423,20 +8755,92 @@ test('applyManifestToScheduler without capabilities (old scheduler) strips v0.2 
     updateJob() { throw new Error('should not update'); }
   };
 
-  const result = await applyManifestToScheduler(manifest, { runner });
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(calls.length, 1);
-  // v0.2 fields should NOT be present
-  assert.strictEqual('identity_ref' in calls[0], false);
-  assert.strictEqual('identity' in calls[0], false);
-  assert.strictEqual('contract_sandbox' in calls[0], false);
-  assert.strictEqual('authorization_proof' in calls[0], false);
-  assert.strictEqual('evidence' in calls[0], false);
-  // handoff metadata
-  assert.ok(result.handoff);
-  assert.strictEqual(result.handoff.field_version, '1');
-  assert.strictEqual(result.handoff.v02_fields_included, false);
-  assert.strictEqual(result.handoff.projected_fields, SCHEDULER_FIELDS_V1.length);
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner }),
+    error => (
+      error.code === 'unsupported_capability' &&
+      error.required_handoff_version === '2' &&
+      error.advertised_handoff_version === '1'
+    )
+  );
+  assert.strictEqual(calls.length, 0);
+});
+
+test('v0.1 governance and verify fields require handoff v2 and project without loss', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'legacy-governed',
+      name: 'Legacy Governed',
+      identity: {
+        principal: 'deploy@example.test',
+        run_as: 'deployer',
+        attestation: 'ssh',
+      },
+      contract: {
+        sandbox: 'permissive',
+        network: 'unrestricted',
+        audit: 'always',
+      },
+      tasks: [{
+        id: 'task',
+        name: 'Task',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        verify: { shell: 'test -n "$PATH"', timeout_seconds: 7, on_failure: 'warn' },
+      }],
+    }],
+  };
+  const capabilityResponse = handoffVersion => ({
+    scheduler_version: 'test',
+    handoff_version: handoffVersion,
+    features: {
+      runtime_execution: true,
+      identity_declaration: true,
+      runtime_identity_resolution: true,
+      trust_evaluation: true,
+      authorization_proof_verification: true,
+      authorization_hook: true,
+      evidence_generation: true,
+      credential_handoff: true,
+      audit_export: true,
+    },
+  });
+  const makeRunner = (handoffVersion, calls) => ({
+    invocation: { label: `fake-scheduler-v${handoffVersion}` },
+    queryCapabilities: () => capabilityResponse(handoffVersion),
+    listJobs: () => [],
+    addJob(spec) {
+      calls.push(spec);
+      return { ok: true, job: spec };
+    },
+    updateJob() { throw new Error('should not update'); },
+  });
+
+  const v1Calls = [];
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner: makeRunner('1', v1Calls) }),
+    error => (
+      error.code === 'unsupported_capability' &&
+      error.required_handoff_version === '2' &&
+      error.advertised_handoff_version === '1'
+    )
+  );
+  assert.equal(v1Calls.length, 0);
+
+  const v2Calls = [];
+  const applied = await applyManifestToScheduler(manifest, {
+    runner: makeRunner('2', v2Calls),
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(v2Calls.length, 1);
+  assert.equal(v2Calls[0].verify_shell, 'test -n "$PATH"');
+  assert.equal(v2Calls[0].verify_timeout_s, 7);
+  assert.equal(v2Calls[0].verify_on_failure, 'warn');
+  assert.equal(v2Calls[0].contract_audit, 'always');
+  assert.equal(v2Calls[0].identity_principal, 'deploy@example.test');
+  assert.equal(v2Calls[0].identity_run_as, 'deployer');
 });
 
 test('applyManifestToScheduler with handoff_version 2 passes v0.2 fields to updateJob', async () => {
@@ -8512,9 +8916,10 @@ test('applyManifestToScheduler with handoff_version 2 passes v0.2 fields to upda
 test('compiler output includes handoff metadata', () => {
   const compiled = compileManifestToScheduler(exampleManifest);
   assert.ok(compiled.handoff);
-  assert.strictEqual(compiled.handoff.field_version, '2');
+  assert.strictEqual(compiled.handoff.field_version, '3');
   assert.strictEqual(compiled.handoff.v1_field_count, SCHEDULER_FIELDS_V1.length);
   assert.strictEqual(compiled.handoff.v2_field_count, SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length);
+  assert.strictEqual(compiled.handoff.v3_field_count, SCHEDULER_FIELD_VERSIONS['3'].length);
 });
 
 // ---------------------------------------------------------------------------
@@ -8715,10 +9120,6 @@ test('validation rejects contract trust floor above resolved identity max_autono
 });
 
 test('v0.2 exec rejects JWT authorization proof with wrong claims', async () => {
-  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({ sub: 'wrong-principal', aud: 'agentcli', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url');
-  const badJwt = `${header}.${payload}.`;
-
   const manifest = {
     version: '0.2',
     identity_profiles: [{ id: 'agent', provider: 'none', subject: { kind: 'agent' } }],
@@ -8727,6 +9128,7 @@ test('v0.2 exec rejects JWT authorization proof with wrong claims', async () => 
       method: 'jwt',
       proof: { value_from: { env: 'TEST_JWT' } },
       claims: { subject: 'expected-principal' },
+      public_key: testKeyPair.publicKey,
       verify: { required: true }
     }],
     workflows: [{
@@ -8743,6 +9145,11 @@ test('v0.2 exec rejects JWT authorization proof with wrong claims', async () => 
       }]
     }]
   };
+  const badJwt = signedManifestJwt(manifest, {
+    sub: 'wrong-principal',
+    aud: 'agentcli',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
 
   await assert.rejects(
     () => executeTask(manifest, { taskId: 'proof-task', env: { ...process.env, TEST_JWT: badJwt }, signer: 'none' }),
@@ -8917,7 +9324,8 @@ test('validation accepts authorization proof profiles with value_from proof sour
     authorization_proof_profiles: [{
       id: 'jwt-proof',
       method: 'jwt',
-      proof: { value_from: { literal: 'header.payload.signature' } },
+      public_key: testKeyPair.publicKey,
+      proof: { value_from: { env: 'JWT_PROOF' } },
       verify: { required: true }
     }],
     workflows: [{
@@ -9144,11 +9552,10 @@ test('file-bearer resolves command-sourced token file paths relative to ctx.cwd'
   }
 });
 
-test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', async () => {
+test('v0.2 exec dry-run skips command-sourced authorization proofs', async () => {
   const workdir = mkdtempSync(join(tmpdir(), 'agentcli-exec-proof-cwd-'));
   const scriptPath = join(workdir, 'emit.js');
-  const token = signedJwt({ sub: 'agentcli-proof' });
-  writeFileSync(scriptPath, `process.stdout.write(${JSON.stringify(token)})\n`);
+  writeFileSync(scriptPath, 'throw new Error("proof command must not execute during dry-run")\n');
 
   try {
     const manifest = {
@@ -9184,7 +9591,8 @@ test('v0.2 exec resolves command-sourced authorization proofs relative to cwd', 
     });
 
     assert.strictEqual(result.ok, true);
-    assert.strictEqual(result.authorization_proof.verified, true);
+    assert.strictEqual(result.authorization_proof, undefined);
+    assert.strictEqual(result.phases.authorization_proof, 'skipped');
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
@@ -9276,7 +9684,7 @@ test('scheduler adapter canExecute checks context and session_target', () => {
   assert.match(shellResult.reason, /Unsupported session target/);
 });
 
-test('compileManifestForDispatch caches compiled manifests by object identity', () => {
+test('compileManifestForDispatch recompiles mutable manifest objects', () => {
   const manifest = {
     version: '0.1',
     workflows: [{
@@ -9294,11 +9702,13 @@ test('compileManifestForDispatch caches compiled manifests by object identity', 
 
   const first = compileManifestForDispatch(manifest);
   const second = compileManifestForDispatch(manifest);
-  assert.strictEqual(second, first, 'same manifest object should reuse the cached compiled output');
+  assert.notStrictEqual(second, first, 'each dispatch should receive a fresh compiled output');
+  assert.deepStrictEqual(second, first);
 
-  const clonedManifest = structuredClone(manifest);
-  const third = compileManifestForDispatch(clonedManifest);
-  assert.notStrictEqual(third, first, 'different manifest objects should compile independently');
+  manifest.workflows[0].tasks[0].name = 'Changed Cache T';
+  const third = compileManifestForDispatch(manifest);
+  assert.notDeepStrictEqual(third, first, 'mutations must be reflected instead of returning stale output');
+  assert.strictEqual(third.jobs[0].name, 'Changed Cache T');
 });
 
 // ---------------------------------------------------------------------------
@@ -9442,7 +9852,7 @@ test('exec delegated task surfaces scheduler capability warnings', () => {
     '#!/bin/sh',
     'case "$*" in',
     '  *capabilities*)',
-    '    echo \'{"features":{"runtime_identity_resolution":false,"credential_handoff":false},"scheduler_version":"0.0.0-test"}\'',
+    '    echo \'{"features":{"runtime_identity_resolution":false,"credential_handoff":false},"handoff_version":"3","scheduler_version":"0.0.0-test"}\'',
     '    ;;',
     '  *"jobs add"*|*jobs\\ add*)',
     '    echo \'{"ok":true}\'',
@@ -9735,6 +10145,16 @@ test('child_credential_policy: downscope child with scope compiles OK', () => {
       id: 'stripe-live',
       provider: 'stripe-api-key',
       subject: { kind: 'service', principal: 'stripe:live' },
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_KEY_FULL' },
+            readonly: { key_env: 'STRIPE_KEY_READONLY' },
+          },
+        },
+      },
       trust: { level: 'supervised' },
     }],
     workflows: [{
@@ -9774,6 +10194,16 @@ test('child_credential_policy: downscope child without scope produces error', ()
       id: 'stripe-live',
       provider: 'stripe-api-key',
       subject: { kind: 'service', principal: 'stripe:live' },
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_KEY_FULL' },
+            readonly: { key_env: 'STRIPE_KEY_READONLY' },
+          },
+        },
+      },
       trust: { level: 'supervised' },
     }],
     workflows: [{
@@ -9815,6 +10245,16 @@ test('child_credential_policy: child with own policy independent overrides inher
       id: 'stripe-live',
       provider: 'stripe-api-key',
       subject: { kind: 'service', principal: 'stripe:live' },
+      auth: {
+        provider_config: {
+          key_strategy: 'precreated',
+          account_mode: 'test',
+          permission_sets: {
+            full: { key_env: 'STRIPE_KEY_FULL' },
+            readonly: { key_env: 'STRIPE_KEY_READONLY' },
+          },
+        },
+      },
       trust: { level: 'supervised' },
     }],
     workflows: [{
@@ -10077,7 +10517,8 @@ test('stripe-api-key resolveSession: returns error when env var is not set', () 
   const ctx = { env: {}, cwd: '/tmp' };
   const result = stripeApiKeyProvider.resolveSession(request, ctx);
   assert.strictEqual(result.ok, false);
-  assert.ok(/STRIPE_KEY_FULL/.test(result.error));
+  assert.match(result.error, /Credential environment source is not set or is empty/);
+  assert.doesNotMatch(result.error, /STRIPE_KEY_FULL/);
 });
 
 test('stripe-api-key resolveSession: rejects invalid key format', () => {
@@ -10237,7 +10678,7 @@ test('stripe-api-key materialize: additional presentation bindings are included'
         target: { kind: 'env', name: 'MY_STRIPE_KEY' },
       },
       {
-        source: 'provider_assertions.scope',
+        source: 'credentials.api_key.scope',
         target: { kind: 'env', name: 'STRIPE_SCOPE' },
       },
     ],
@@ -10247,6 +10688,16 @@ test('stripe-api-key materialize: additional presentation bindings are included'
   assert.strictEqual(result.env_vars['STRIPE_API_KEY'], 'sk_test_abc123def456');
   assert.strictEqual(result.env_vars['MY_STRIPE_KEY'], 'sk_test_abc123def456');
   assert.strictEqual(result.env_vars['STRIPE_SCOPE'], 'full');
+
+  assert.throws(
+    () => stripeApiKeyProvider.materialize(session, {
+      bindings: [{
+        source: 'provider_assertions.scope',
+        target: { kind: 'env', name: 'AUDIT_ONLY_SCOPE' },
+      }],
+    }, {}),
+    error => error.code === 'presentation_source_forbidden'
+  );
 });
 
 // -- prepareHandoff tests --
@@ -10439,7 +10890,7 @@ test('stripe-api-key validateDelegation: empty chain passes', () => {
 
 // -- describeSession tests --
 
-test('stripe-api-key describeSession: masks key values (shows prefix + last 4 chars)', () => {
+test('stripe-api-key describeSession: fully redacts key values', () => {
   const session = {
     provider: 'stripe-api-key',
     credentials: {
@@ -10456,8 +10907,8 @@ test('stripe-api-key describeSession: masks key values (shows prefix + last 4 ch
     },
   };
   const described = stripeApiKeyProvider.describeSession(session, {});
-  assert.strictEqual(described.credentials.api_key.value, 'rk_live_...mnop');
-  assert.strictEqual(described.credentials.api_key.scope, 'payments');
+  assert.strictEqual(described.credentials.api_key.value, '[REDACTED]');
+  assert.strictEqual(described.credentials.api_key.scope, '[REDACTED]');
   assert.strictEqual(described.provider_assertions.account_mode, 'live');
 });
 
@@ -10500,14 +10951,13 @@ test('stripe-api-key prepareHandoff: requires target_scope and parent_profile pe
   assert.strictEqual(result.session.credentials.api_key.value, 'rk_test_readonly_key_xyz789ab');
 });
 
-test('v0.2 exec stripe-api-key handoff with downscope produces prepared session', async () => {
+test('v0.2 local stripe-api-key handoff is rejected without resolving credentials', async () => {
   const manifest = {
     version: '0.2',
     identity_profiles: [{
       id: 'stripe-handoff',
       provider: 'stripe-api-key',
       subject: { kind: 'service', principal: 'stripe:test' },
-      scope: 'full',
       auth: {
         provider_config: {
           key_strategy: 'precreated',
@@ -10543,20 +10993,19 @@ test('v0.2 exec stripe-api-key handoff with downscope produces prepared session'
     }],
   };
 
-  const result = await executeTask(manifest, {
-    taskId: 'stripe-ho-task',
-    dryRun: true,
-    presentationDebug: true,
-    env: {
-      ...process.env,
-      STRIPE_HO_FULL: 'sk_test_handoff_full_key_123456',
-      STRIPE_HO_READONLY: 'rk_test_handoff_readonly_654321',
-    },
-  });
-
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.handoff?.prepared, true);
-  assert.strictEqual(result.handoff?.mode, 'downscope');
+  assert.throws(
+    () => executeTask(manifest, {
+      taskId: 'stripe-ho-task',
+      dryRun: true,
+      presentationDebug: true,
+      env: {
+        ...process.env,
+        STRIPE_HO_FULL: 'sk_test_handoff_full_key_123456',
+        STRIPE_HO_READONLY: 'rk_test_handoff_readonly_654321',
+      },
+    }),
+    error => error.code === 'unsupported_capability'
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -10650,7 +11099,8 @@ test('stripe-api-key resolveMasterKey: resolves from env', () => {
 test('stripe-api-key resolveMasterKey: returns error for missing env var', () => {
   const result = resolveMasterKey({ env: 'MISSING_VAR' }, {}, '/tmp');
   assert.strictEqual(result.ok, false);
-  assert.ok(/MISSING_VAR/.test(result.error));
+  assert.match(result.error, /Credential environment source is not set or is empty/);
+  assert.doesNotMatch(result.error, /MISSING_VAR/);
 });
 
 test('stripe-api-key resolveMasterKey: returns error when no source specified', () => {
@@ -10725,7 +11175,8 @@ test('stripe-api-key createRestrictedKey: API error returns structured error', a
     const result = await createRestrictedKey('sk_test_bad', { charges: 'read' }, mock.baseUrl);
     assert.strictEqual(result.ok, false);
     assert.strictEqual(result.transient, false);
-    assert.ok(/Invalid API Key/.test(result.error));
+    assert.match(result.error, /Stripe API error creating restricted key \(HTTP 401\)/);
+    assert.doesNotMatch(result.error, /Invalid API Key/);
   } finally {
     await mock.close();
   }
@@ -10774,7 +11225,8 @@ test('stripe-api-key createRestrictedKey: missing id/secret in response returns 
   try {
     const result = await createRestrictedKey('sk_test_key_xyz', { charges: 'read' }, mock.baseUrl);
     assert.strictEqual(result.ok, false);
-    assert.ok(/missing id or secret/.test(result.error));
+    assert.match(result.error, /incomplete restricted-key response/);
+    assert.doesNotMatch(result.error, /\{.*object.*api_key/);
   } finally {
     await mock.close();
   }
@@ -10815,7 +11267,8 @@ test('stripe-api-key deleteRestrictedKey: API error returns structured error', a
   try {
     const result = await deleteRestrictedKey('sk_test_master', 'rk_test_missing', mock.baseUrl);
     assert.strictEqual(result.ok, false);
-    assert.ok(/No such API key/.test(result.error));
+    assert.match(result.error, /Stripe API error deleting restricted key \(HTTP 404\)/);
+    assert.doesNotMatch(result.error, /No such API key/);
   } finally {
     await mock.close();
   }
@@ -10948,7 +11401,8 @@ test('stripe-api-key resolveSession dynamic: API failure propagates error', asyn
     };
     const result = await stripeApiKeyProvider.resolveSession(request, ctx);
     assert.strictEqual(result.ok, false);
-    assert.ok(/Insufficient permissions/.test(result.error));
+    assert.match(result.error, /Stripe API error creating restricted key \(HTTP 403\)/);
+    assert.doesNotMatch(result.error, /Insufficient permissions/);
   } finally {
     await mock.close();
   }
@@ -11070,7 +11524,7 @@ test('v0.2 exec stripe-api-key dynamic cleanup revokes minted key after executio
   }
 });
 
-test('v0.2 exec stripe-api-key dynamic handoff cleanup revokes prepared child key during dry-run', async () => {
+test('v0.2 dry-run never mints or revokes dynamic stripe handoff credentials', async () => {
   let createCount = 0;
   const mock = await createMockStripeServer((req, res, _body) => {
     if (req.method === 'POST' && req.url === '/v1/api_keys') {
@@ -11137,19 +11591,18 @@ test('v0.2 exec stripe-api-key dynamic handoff cleanup revokes prepared child ke
       }],
     };
 
-    const result = await executeTask(manifest, {
-      taskId: 't',
-      dryRun: true,
-      env: {
-        ...process.env,
-        STRIPE_MASTER_KEY: 'sk_test_master_key_handoff_cleanup_12345',
-      },
-    });
-
-    assert.strictEqual(result.ok, true);
-    assert.strictEqual(result.handoff?.prepared, true);
-    assert.strictEqual(mock.requests.filter(request => request.method === 'POST').length, 2);
-    assert.strictEqual(mock.requests.filter(request => request.method === 'DELETE').length, 2);
+    assert.throws(
+      () => executeTask(manifest, {
+        taskId: 't',
+        dryRun: true,
+        env: {
+          ...process.env,
+          STRIPE_MASTER_KEY: 'sk_test_master_key_handoff_cleanup_12345',
+        },
+      }),
+      error => error.code === 'unsupported_capability'
+    );
+    assert.strictEqual(mock.requests.length, 0);
   } finally {
     await mock.close();
   }
@@ -11217,7 +11670,8 @@ test('stripe-api-key cleanup: dynamic session with API failure returns warning',
     assert.strictEqual(result.cleaned, true);
     assert.ok(Array.isArray(result.warnings));
     assert.ok(result.warnings.length > 0);
-    assert.ok(result.warnings[0].includes('Internal error'));
+    assert.match(result.warnings[0], /Stripe API error deleting restricted key \(HTTP 500\)/);
+    assert.doesNotMatch(result.warnings[0], /Internal error/);
   } finally {
     await mock.close();
   }
@@ -11394,7 +11848,8 @@ test('stripe-api-key prepareHandoff dynamic: API failure during minting returns 
     const ctx = { env: { STRIPE_MASTER: 'sk_test_handoff_api_fail_master' }, cwd: '/tmp' };
     const result = await stripeApiKeyProvider.prepareHandoff(parentSession, handoff, ctx);
     assert.strictEqual(result.prepared, false);
-    assert.ok(/Service unavailable/.test(result.error));
+    assert.match(result.error, /Stripe API error creating restricted key \(HTTP 503\)/);
+    assert.doesNotMatch(result.error, /Service unavailable/);
   } finally {
     await mock.close();
   }
@@ -11554,7 +12009,7 @@ test('stripe-api-key materialize: dynamic session sets cleanup_required true', (
 
 // -- describeSession: dynamic session masks key and preserves stripe_key_id --
 
-test('stripe-api-key describeSession: dynamic session masks key but keeps metadata', () => {
+test('stripe-api-key describeSession: dynamic session redacts key but keeps metadata', () => {
   const session = {
     provider: 'stripe-api-key',
     credentials: {
@@ -11573,8 +12028,8 @@ test('stripe-api-key describeSession: dynamic session masks key but keeps metada
     },
   };
   const described = stripeApiKeyProvider.describeSession(session, {});
-  assert.strictEqual(described.credentials.api_key.value, 'rk_test_..._xyz');
-  assert.strictEqual(described.provider_assertions.stripe_key_id, 'rk_test_desc_key_id');
+  assert.strictEqual(described.credentials.api_key.value, '[REDACTED]');
+  assert.strictEqual(described.provider_assertions.stripe_key_id, '[REDACTED]');
   assert.strictEqual(described.provider_assertions.key_strategy, 'dynamic');
 });
 
@@ -11896,6 +12351,80 @@ test('exec verify: on_failure=warn adds warning but returns ok', () => {
   assert.ok(result.warnings.some(w => w.includes('Verify command failed')));
 });
 
+test('exec verify receives only the explicit child environment', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        verify: { shell: 'test -z "$AMBIENT_VERIFY_SECRET"' },
+      }],
+    }],
+  };
+  const result = executeTask(manifest, {
+    taskId: 't',
+    env: { ...process.env, AMBIENT_VERIFY_SECRET: 'must-not-be-inherited' },
+  });
+  assert.equal(result.verify.passed, true);
+});
+
+test('v0.1 verify output is hashed rather than copied into audits or errors', () => {
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-verify-audit-v1-'));
+  const canary = 'verify-output-secret-v1';
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  try {
+    for (const onFailure of ['warn', 'error']) {
+      const manifest = {
+        version: '0.1',
+        workflows: [{
+          id: `w-${onFailure}`, name: 'W',
+          tasks: [{
+            id: 't', name: 'T',
+            shell: {
+              program: 'true',
+              args: [],
+              env: { DECLARED_VERIFY_SECRET: canary },
+            },
+            target: { session_target: 'shell' },
+            schedule: { cron: '0 * * * *' },
+            contract: { audit: 'always' },
+            verify: {
+              shell: 'printf "%s" "$DECLARED_VERIFY_SECRET"; printf "%s" "$DECLARED_VERIFY_SECRET" >&2; exit 1',
+              on_failure: onFailure,
+            },
+          }],
+        }],
+      };
+      if (onFailure === 'warn') {
+        const result = executeTask(manifest, { taskId: 't', env });
+        assert.equal(result.ok, true);
+      } else {
+        assert.throws(
+          () => executeTask(manifest, { taskId: 't', env }),
+          error => error.code === 'verify_failed' && !JSON.stringify(error).includes(canary)
+        );
+      }
+    }
+
+    const records = readAuditLog({ auditPath: getAgentcliPaths({ env }).audit });
+    assert.equal(records.length, 2);
+    assert.equal(JSON.stringify(records).includes(canary), false);
+    for (const record of records) {
+      assert.match(record.verify.stdout_hash, /^sha256:[a-f0-9]{64}$/);
+      assert.match(record.verify.stderr_hash, /^sha256:[a-f0-9]{64}$/);
+      assert.equal(record.verify.stdout, undefined);
+      assert.equal(record.verify.stderr, undefined);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('exec verify: not run when shell command fails', () => {
   const manifest = {
     version: '0.1',
@@ -12130,6 +12659,53 @@ test('exec verify: v0.2 path verify failure with on_failure=error throws', async
       return true;
     }
   );
+});
+
+test('v0.2 evidence failures do not copy verify output into audits or errors', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'agentcli-verify-audit-v2-'));
+  const canary = 'verify-output-secret-v2';
+  const env = { ...process.env, AGENTCLI_HOME: home };
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [{
+      id: 'required-evidence',
+      provider: 'none',
+      verify: { required: true },
+    }],
+    workflows: [{
+      id: 'w', name: 'W',
+      tasks: [{
+        id: 't', name: 'T',
+        shell: {
+          program: 'true',
+          args: [],
+          env: { DECLARED_VERIFY_SECRET: canary },
+        },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'always' },
+        verify: {
+          shell: 'printf "%s" "$DECLARED_VERIFY_SECRET"; printf "%s" "$DECLARED_VERIFY_SECRET" >&2; exit 1',
+          on_failure: 'warn',
+        },
+        evidence: { ref: 'required-evidence' },
+      }],
+    }],
+  };
+
+  try {
+    await assert.rejects(
+      executeTask(manifest, { taskId: 't', env, signer: 'none' }),
+      error => error.code === 'evidence_failed' && !JSON.stringify(error).includes(canary)
+    );
+    const records = readAuditLog({ auditPath: getAgentcliPaths({ env }).audit });
+    assert.equal(records.length, 1);
+    assert.equal(JSON.stringify(records).includes(canary), false);
+    assert.match(records[0].verify.stdout_hash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(records[0].verify.stdout, undefined);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

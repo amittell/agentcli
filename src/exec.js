@@ -1,9 +1,9 @@
-import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
+import { canonicalDigest } from './canonical.js';
 import { validateManifest } from './validate.js';
-import { resolveCommandValue } from './command.js';
+import { resolveValueFrom } from './command.js';
 import { expandManifestShorthands } from './shorthand.js';
 import { normalizeShellExecution } from './shell.js';
 import {
@@ -11,10 +11,14 @@ import {
   mergeAuthorizationProofProfile,
   mergeEvidenceProfile,
   mergeIdentityProfile,
+  buildChildEnvironment,
+  buildEffectiveExecutionBinding,
+  computeEffectiveTaskHash,
   resolveAuthorization,
   resolveAuthorizationProof,
   resolveContract,
   resolveEvidence,
+  resolveExecutionCwd,
   resolveIdentity,
   resolveVerify
 } from './compiler/shared.js';
@@ -30,6 +34,7 @@ import {
   computeTaskApprovalHash,
   claimApproval,
   verifyApprovalSignature,
+  approverMatchesScope,
 } from './approvals.js';
 
 // Ensure the ssh signing provider is registered on import
@@ -50,15 +55,22 @@ import './identity/entra-agent-id.js';
 import { compareTrustLevels, redactSession, buildCredentialSummary } from './identity/session.js';
 
 // v0.2 evidence providers
-import { resolveEvidenceProvider } from './evidence/index.js';
+import { resolveEvidenceProvider, verifyEvidenceEnvelope } from './evidence/index.js';
 import './evidence/none.js';
-import './evidence/ssh.js';
-import { buildEvidencePayload, serializePayload, collectComplianceContext } from './evidence/payload.js';
+import { resolveAllowedSigners as resolveEvidenceAllowedSigners } from './evidence/ssh.js';
+import {
+  buildCompleteEvidencePayload,
+  serializePayload,
+  collectComplianceContext,
+} from './evidence/payload.js';
 
 // v0.2 authorization proof verifiers
-import { resolveVerifier } from './authorization-proof/index.js';
+import {
+  assertValidAuthorizationProofProfile,
+  verifyAuthorizationProof,
+} from './authorization-proof/index.js';
 import './authorization-proof/none.js';
-import { resolveJwtVerificationContext } from './authorization-proof/jwt.js';
+import './authorization-proof/jwt.js';
 import './authorization-proof/detached-signature.js';
 import './authorization-proof/certificate.js';
 
@@ -76,11 +88,11 @@ function isPathWithin(targetPath, rootPath) {
 function preflightContractChecks(contract, shell, { cwd = process.cwd() } = {}) {
   const violations = [];
   const warnings = [];
-  const executionCwd = resolvePath(cwd, shell.cwd || '.');
+  const executionCwd = resolveExecutionCwd(shell.cwd, cwd);
 
   if (contract.allowed_paths?.length) {
     const allowed = contract.allowed_paths.some(p =>
-      isPathWithin(executionCwd, resolvePath(cwd, p))
+      isPathWithin(executionCwd, resolveExecutionCwd(p, cwd))
     );
     if (!allowed) {
       violations.push({
@@ -119,7 +131,7 @@ function runVerify(verify, {
     usesSandbox ? ['-p', sandboxCommand.profile, verifyProgram, ...verifyArgs] : verifyArgs,
     {
     cwd,
-    env: { ...process.env, ...env },
+    env,
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 1 * 1024 * 1024,
@@ -138,6 +150,24 @@ function runVerify(verify, {
     stderr,
     timed_out: timedOut,
     duration_ms: durationMs,
+    stdout_bytes: Buffer.byteLength(stdout, 'utf8'),
+    stderr_bytes: Buffer.byteLength(stderr, 'utf8'),
+  };
+}
+
+function auditSafeVerifyResult(result) {
+  if (!result) return null;
+  const { stdout, stderr, structured, ...safe } = result;
+  const hash = value => value == null
+    ? null
+    : `sha256:${createHash('sha256').update(String(value), 'utf8').digest('hex')}`;
+  return {
+    ...safe,
+    stdout_hash: hash(stdout),
+    stderr_hash: hash(stderr),
+    structured_hash: structured == null
+      ? null
+      : canonicalDigest(structured),
   };
 }
 
@@ -149,53 +179,31 @@ function resolvePrincipal(identity) {
   return `${user}@${host}`;
 }
 
-/**
- * Resolve a value_from indirection to a concrete string.
- *
- * Supports env (environment variable) and file (filesystem path) sources.
- *
- * @param {object} valueFrom - The value_from descriptor.
- * @param {object} envObj    - Environment variable map.
- * @returns {string|null} The resolved value, or null if unresolvable.
- */
-function resolveValueFrom(valueFrom, envObj, { cwd = process.cwd() } = {}) {
-  if (!valueFrom) return null;
-  if (valueFrom.env) return envObj[valueFrom.env] || null;
-  if (valueFrom.file) {
-    try { return readFileSync(valueFrom.file, 'utf8').trim(); }
-    catch { return null; }
-  }
-  if (valueFrom.literal) return valueFrom.literal;
-  if (valueFrom.command) {
-    return resolveCommandValue(valueFrom.command, { env: envObj, cwd });
-  }
-  return null;
+function safeCommandMetadata(binding, shell, cwd) {
+  return {
+    program: shell.program,
+    cwd: binding.command?.cwd ?? resolveExecutionCwd(shell.cwd, cwd),
+    args_count: binding.command?.args_count ?? shell.args.length,
+    args_hashes: binding.command?.args_hashes ?? [],
+    env_keys: binding.command?.env_keys ?? Object.keys(shell.env),
+    env_hashes: binding.command?.env_hashes ?? {},
+    stdin_present: shell.stdin != null,
+    stdin_hash: binding.command?.stdin_hash ?? null,
+  };
 }
 
-function sortKeysDeep(value) {
-  if (value === null || value === undefined) {
-    return value;
+async function assertProviderProfileValid(provider, profile, kind, context = {}) {
+  if (!provider?.validateProfile) return;
+  const validation = await provider.validateProfile(profile, context);
+  if (validation?.valid === false) {
+    const details = Array.isArray(validation.errors)
+      ? validation.errors.map(error => typeof error === 'string' ? error : error.message).join('; ')
+      : 'provider rejected the profile';
+    throw Object.assign(
+      new Error(`${kind} profile validation failed: ${details}`),
+      { code: 'validation_error', provider: provider.name, validation }
+    );
   }
-
-  if (Array.isArray(value)) {
-    return value.map(item => sortKeysDeep(item));
-  }
-
-  if (typeof value === 'object') {
-    const sorted = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = sortKeysDeep(value[key]);
-    }
-    return sorted;
-  }
-
-  return value;
-}
-
-function computeManifestDigest(manifest) {
-  return createHash('sha256')
-    .update(JSON.stringify(sortKeysDeep(manifest)))
-    .digest('hex');
 }
 
 function summarizeMaterialization(materialization) {
@@ -264,7 +272,9 @@ async function cleanupProviderArtifacts(identityProviderInstance, {
   session = null,
   providerConfig = {},
   env = process.env,
+  commandEnv = buildChildEnvironment(env),
   cwd = process.cwd(),
+  runtimeCapabilities = {},
   warningPrefix = 'Credential cleanup',
 } = {}, warnings = []) {
   if (!identityProviderInstance?.cleanup) return;
@@ -287,8 +297,10 @@ async function cleanupProviderArtifacts(identityProviderInstance, {
     const cleanupResult = await identityProviderInstance.cleanup(cleanupMaterialization, {
       session: effectiveSession,
       env,
+      commandEnv,
       cwd,
       provider_config: providerConfig,
+      runtimeCapabilities,
     });
     for (const warning of cleanupResult?.warnings || []) {
       warnings.push(`${warningPrefix} warning: ${warning}`);
@@ -302,7 +314,7 @@ async function cleanupProviderArtifacts(identityProviderInstance, {
  * Validate and resolve common execution state shared by both v0.1 and v0.2 paths.
  *
  * Performs manifest validation, workflow/task lookup, shell-target check,
- * contract preflight, and signing provider resolution.
+ * contract preflight, without resolving providers or probing the host.
  *
  * @returns {object} All resolved common state fields.
  */
@@ -314,6 +326,7 @@ function resolveCommonState(manifest, {
   cwd = process.cwd(),
   env = process.env,
   timeoutMs,
+  allowUnsupportedHandoff = false,
 }) {
   if (!taskId) {
     throw Object.assign(
@@ -359,7 +372,29 @@ function resolveCommonState(manifest, {
   }
 
   if (task.target?.session_target !== 'shell') {
-    return { requiresDelegation: true, manifest: expanded, workflow, task };
+    const identity = resolveIdentity(workflow, task);
+    const contract = resolveContract(workflow, task);
+    return {
+      requiresDelegation: true,
+      manifest: expanded,
+      sourceManifest: manifest,
+      expanded,
+      workflow,
+      task,
+      isV2: manifest.version === '0.2' || Boolean(manifest.identity_profiles),
+      identity,
+      contract,
+      verify: resolveVerify(workflow, task),
+      auditPolicy: contract.audit ?? 'always',
+      shell: null,
+      effectiveTimeout: timeoutMs ?? task.runtime?.timeout_ms ?? null,
+      violations: [],
+      warnings: [],
+      signer,
+      explicitSigningKey,
+      cwd,
+      env,
+    };
   }
 
   if (!task.shell) {
@@ -372,14 +407,27 @@ function resolveCommonState(manifest, {
   const isV2 = manifest.version === '0.2' || Boolean(manifest.identity_profiles);
 
   const identity = resolveIdentity(workflow, task);
+  const identityDeclaration = mergeIdentityProfile(
+    identity.ref
+      ? expanded.identity_profiles?.find(profile => profile.id === identity.ref) ?? null
+      : null,
+    identity
+  );
+  const declaredHandoff = identityDeclaration.presentation?.handoff ?? 'none';
+  if (declaredHandoff !== 'none' && !allowUnsupportedHandoff) {
+    throw Object.assign(
+      new Error(`Credential handoff "${declaredHandoff}" is unsupported by the local shell runtime`),
+      { code: 'unsupported_capability' }
+    );
+  }
   const contract = resolveContract(workflow, task);
   const verify = resolveVerify(workflow, task);
   const auditPolicy = contract.audit ?? 'always';
   const shell = normalizeShellExecution(task.shell);
+  const executionCwd = resolveExecutionCwd(shell.cwd, cwd);
   const effectiveTimeout = timeoutMs ?? task.runtime?.timeout_ms ?? null;
   const { violations, warnings: preflightWarnings } = preflightContractChecks(contract, shell, { cwd });
-  const sandboxCommand = prepareSandboxedShellCommand(shell, contract, { cwd, env });
-  const warnings = [...preflightWarnings, ...sandboxCommand.warnings];
+  const warnings = [...preflightWarnings];
 
   if (violations.length > 0) {
     throw Object.assign(
@@ -388,14 +436,86 @@ function resolveCommonState(manifest, {
     );
   }
 
-  const provider = resolveProvider({ signer, env });
-  const providerConfig = provider.resolve({ env, signingKey: explicitSigningKey });
-
   return {
+    sourceManifest: manifest,
     expanded, workflow, task, isV2, identity, contract, verify,
-    auditPolicy, shell, sandboxCommand, effectiveTimeout, violations, warnings,
-    provider, providerConfig, cwd, env,
+    auditPolicy, shell, effectiveTimeout, violations, warnings,
+    signer, explicitSigningKey, cwd, executionCwd, env,
   };
+}
+
+function buildDryRunResult(common, { binding, taskHash, timestamp, executionId }) {
+  const { workflow, task, contract, shell, warnings, cwd } = common;
+  const command = safeCommandMetadata(binding, shell, cwd);
+  return {
+    ok: true,
+    dry_run: true,
+    execution_id: executionId,
+    timestamp,
+    source: { workflow_id: workflow.id, task_id: task.id },
+    effective_task_hash: taskHash,
+    manifest_digest: binding.manifest_digest,
+    identity: binding.identity,
+    contract,
+    command,
+    approval: {
+      policy: binding.approval.policy,
+      required: binding.approval.required === 1,
+      auto_reject: binding.approval.policy === 'auto-reject',
+      risk_level: binding.approval.risk_level,
+      approver_scope: binding.approval.approver_scope,
+      timeout_s: binding.approval.timeout_s,
+    },
+    sandbox: {
+      requested: contract.sandbox ?? 'permissive',
+      network: contract.network ?? 'unrestricted',
+      evaluated: false,
+    },
+    phases: {
+      authorization_proof: 'skipped',
+      identity_resolution: 'skipped',
+      authorization: 'skipped',
+      credential_materialization: 'skipped',
+      handoff: 'skipped',
+      signing: 'skipped',
+      evidence: 'skipped',
+      verify: 'skipped',
+      audit: 'skipped',
+    },
+    warnings: [...warnings],
+    result: { status: 'dry_run' },
+  };
+}
+
+function prepareLiveCommon(common, { signer, signingKey, env }) {
+  const sandboxCommand = prepareSandboxedShellCommand(
+    { ...common.shell, cwd: common.executionCwd },
+    common.contract,
+    { cwd: common.cwd, env }
+  );
+  common.warnings.push(...sandboxCommand.warnings);
+  const provider = resolveProvider({ signer, env });
+  const providerConfig = provider.resolve({ env, signingKey });
+  return { ...common, sandboxCommand, provider, providerConfig };
+}
+
+async function executeApprovedV2(common, options) {
+  const approvalUsed = enforceApprovalGate({
+    workflow: common.workflow,
+    task: common.task,
+    executionId: options.executionId,
+    approvalId: options.approvalId,
+    env: options.env,
+    binding: options.binding,
+    taskHash: options.taskHash,
+  });
+  const liveCommon = prepareLiveCommon(common, {
+    signer: options.signer,
+    signingKey: options.signingKey,
+    cwd: options.cwd,
+    env: options.env,
+  });
+  return executeV2(liveCommon, { ...options, approvalUsed });
 }
 
 /**
@@ -427,8 +547,7 @@ export function executeTask(manifest, {
   cwd = process.cwd(),
   env = process.env,
 } = {}) {
-  // Resolve all common state (validation, lookup, preflight).
-  // This throws synchronously for all error cases shared between v0.1 and v0.2.
+  // Resolve only side-effect-free common state before the approval boundary.
   const common = resolveCommonState(manifest, {
     workflowId, taskId, signer, signingKey: explicitSigningKey,
     cwd, env, timeoutMs,
@@ -441,20 +560,148 @@ export function executeTask(manifest, {
     });
   }
 
-  // v0.1 path: fully synchronous, preserves exact existing behavior
-  if (!common.isV2) {
-    return executeV1(common, { dryRun, approvalId });
+  const timestamp = new Date().toISOString();
+  const executionId = generateExecutionId(common.workflow.id, common.task.id, timestamp);
+  const binding = buildEffectiveExecutionBinding({
+    manifest,
+    expanded: common.expanded,
+    workflow: common.workflow,
+    task: common.task,
+    cwd,
+    env,
+    timeoutMs: common.effectiveTimeout,
+    instanceId,
+  });
+  const taskHash = computeEffectiveTaskHash(binding);
+
+  if (dryRun) {
+    const preview = buildDryRunResult(common, { binding, taskHash, timestamp, executionId });
+    return common.isV2 ? Promise.resolve(preview) : preview;
   }
 
-  // v0.2 path: returns a Promise (resolveSession may be async)
+  if (common.isV2) {
+    return executeApprovedV2(common, {
+      evidenceProviderOverride,
+      instanceId,
+      requireEvidence,
+      requireAuthorization,
+      identityDebug,
+      presentationDebug,
+      approvalId,
+      env,
+      cwd,
+      signer,
+      signingKey: explicitSigningKey,
+      binding,
+      taskHash,
+      timestamp,
+      executionId,
+    });
+  }
+
+  const approvalUsed = enforceApprovalGate({
+    workflow: common.workflow,
+    task: common.task,
+    executionId,
+    approvalId,
+    env,
+    binding,
+    taskHash,
+  });
+  const liveCommon = prepareLiveCommon(common, {
+    signer,
+    signingKey: explicitSigningKey,
+    cwd,
+    env,
+  });
+
+  // v0.1 path: fully synchronous, preserves exact existing behavior
+  return executeV1(liveCommon, { approvalUsed, binding, taskHash, timestamp, executionId });
+}
+
+async function inspectTaskGovernance(manifest, mode, {
+  workflowId,
+  taskId,
+  instanceId,
+  identityDebug = false,
+  cwd = process.cwd(),
+  env = process.env,
+} = {}) {
+  const common = resolveCommonState(manifest, {
+    workflowId,
+    taskId,
+    cwd,
+    env,
+    allowUnsupportedHandoff: true,
+  });
+  const timestamp = new Date().toISOString();
+  const executionId = generateExecutionId(common.workflow.id, common.task.id, timestamp);
+  const binding = buildEffectiveExecutionBinding({
+    manifest,
+    expanded: common.expanded,
+    workflow: common.workflow,
+    task: common.task,
+    cwd,
+    env,
+    timeoutMs: common.effectiveTimeout,
+    instanceId,
+  });
+  const taskHash = computeEffectiveTaskHash(binding);
+
+  if (!common.isV2) {
+    if (mode === 'authorization' || mode === 'proof') {
+      throw Object.assign(
+        new Error(`${mode === 'proof' ? 'Authorization proof verification' : 'Authorization evaluation'} requires a version 0.2 manifest`),
+        { code: 'invalid_argument' }
+      );
+    }
+    return {
+      ok: true,
+      mode,
+      source: { workflow_id: common.workflow.id, task_id: common.task.id },
+      declared_identity: binding.identity,
+      resolved_identity: null,
+      principal_used: resolvePrincipal(common.identity),
+      trust: null,
+      delegation: null,
+      warnings: common.warnings,
+    };
+  }
+
   return executeV2(common, {
-    dryRun, evidenceProviderOverride, instanceId,
-    requireEvidence, requireAuthorization,
-    identityDebug, presentationDebug, approvalId, env,
+    inspectionMode: mode,
+    instanceId,
+    requireEvidence: false,
+    requireAuthorization: mode === 'authorization',
+    identityDebug: identityDebug || mode === 'delegation',
+    presentationDebug: false,
+    env,
+    cwd,
+    approvalUsed: null,
+    binding,
+    taskHash,
+    timestamp,
+    executionId,
   });
 }
 
-function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
+export function inspectTaskIdentity(manifest, options = {}) {
+  return inspectTaskGovernance(manifest, 'identity', options);
+}
+
+export function validateTaskDelegation(manifest, options = {}) {
+  return inspectTaskGovernance(manifest, 'delegation', options);
+}
+
+export function evaluateTaskAuthorization(manifest, options = {}) {
+  return inspectTaskGovernance(manifest, 'authorization', options);
+}
+
+export function verifyTaskAuthorizationProof(manifest, options = {}) {
+  return inspectTaskGovernance(manifest, 'proof', options);
+}
+
+function enforceApprovalGate({ workflow, task, executionId, approvalId, env, binding, taskHash }) {
   if (!task.approval) return null;
   if (approvalPolicyAutoRejects(task.approval)) {
     throw Object.assign(
@@ -466,11 +713,11 @@ function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
     );
   }
   if (!approvalPolicyRequiresApproval(task.approval)) return null;
-  const taskHash = computeTaskApprovalHash({ workflowId: workflow.id, task });
+  const effectiveTaskHash = taskHash || computeTaskApprovalHash({ binding });
   const grant = claimApproval({
     workflowId: workflow.id,
     taskId: task.id,
-    taskHash,
+    taskHash: effectiveTaskHash,
     approvalId,
     executionId,
     env,
@@ -500,12 +747,20 @@ function enforceApprovalGate({ workflow, task, executionId, approvalId, env }) {
       { code: 'approval_signature_invalid' }
     );
   }
+  const currentScope = task.approval.approver_scope ?? null;
+  if ((grant.approver_scope ?? null) !== currentScope || !approverMatchesScope(grant.approver, currentScope)) {
+    throw Object.assign(
+      new Error(`Approval ${grant.approval_id} does not satisfy the task's current approver scope`),
+      { code: 'approval_scope_mismatch' }
+    );
+  }
   return {
     approval_id: grant.approval_id,
     task_hash: grant.task_hash,
     approver: grant.approver,
     reason: grant.reason ?? null,
     risk_level: grant.risk_level ?? null,
+    approver_scope: grant.approver_scope ?? null,
     granted_at: grant.granted_at,
     expires_at: grant.expires_at,
     signature_verified: sigCheck.verified === true,
@@ -527,6 +782,13 @@ function executeDelegated(common, options) {
 
   const effectivePrefix = schedulerPrefix || env.AGENTCLI_SCHEDULER_PREFIX || '';
   const effectiveBin = schedulerBin || env.AGENTCLI_SCHEDULER_BIN || '';
+
+  if (!dryRun && approvalPolicyAutoRejects(task.approval)) {
+    throw Object.assign(
+      new Error(`Task "${task.id}" has approval.policy="auto-reject"; runtime dispatch refused.`),
+      { code: 'approval_auto_rejected' }
+    );
+  }
 
   if (!effectivePrefix && !effectiveBin && !dryRun) {
     throw Object.assign(
@@ -563,10 +825,10 @@ function executeDelegated(common, options) {
 // v0.1 execution path -- fully synchronous
 // ---------------------------------------------------------------------------
 
-function executeV1(common, { dryRun, approvalId }) {
+function executeV1(common, { approvalUsed, binding, taskHash, timestamp, executionId }) {
   const {
     workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
-    effectiveTimeout, warnings, provider, providerConfig, cwd, env,
+    effectiveTimeout, warnings, provider, providerConfig, cwd, executionCwd, env,
   } = common;
 
   let declaredIdentity = null;
@@ -574,16 +836,7 @@ function executeV1(common, { dryRun, approvalId }) {
   let trustInfo = null;
   const principal = resolvePrincipal(identity);
 
-  const timestamp = new Date().toISOString();
-  const executionId = generateExecutionId(workflow.id, task.id, timestamp);
-
-  const commandMeta = {
-    program: shell.program,
-    args: shell.args,
-    cwd: shell.cwd || cwd,
-    env_keys: Object.keys(shell.env),
-    stdin_present: shell.stdin != null,
-  };
+  const commandMeta = safeCommandMetadata(binding, shell, cwd);
 
   const cmdHash = commandHash(shell);
 
@@ -611,72 +864,10 @@ function executeV1(common, { dryRun, approvalId }) {
     return { attestation: sigResult.attestation, attestation_note: null };
   }
 
-  if (dryRun) {
-    const { attestation, attestation_note } = buildAndSign();
-
-    const record = {
-      execution_id: executionId,
-      timestamp,
-      source: { workflow_id: workflow.id, task_id: task.id },
-      declared_identity: declaredIdentity,
-      resolved_identity: resolvedIdentity,
-      identity: {
-        principal: identity.principal ?? (identity.subject?.principal ?? null),
-        run_as: identity.run_as ?? null,
-        attestation_present: identity.attestation != null,
-      },
-      principal_used: principal,
-      contract,
-      command: commandMeta,
-      command_hash: cmdHash,
-      authorization_proof: null,
-      authorization: null,
-      trust: trustInfo,
-      signer: provider.name,
-      attestation,
-      attestation_note,
-      warnings,
-      dry_run: true,
-      result: { status: 'dry_run' },
-    };
-
-    if (auditPolicy === 'always') {
-      const paths = getAgentcliPaths({ env: common.env });
-      writeAuditRecord(record, { auditPath: paths.audit });
-    }
-
-    return {
-      ok: true,
-      dry_run: true,
-      execution_id: executionId,
-      source: record.source,
-      declared_identity: declaredIdentity,
-      resolved_identity: resolvedIdentity,
-      identity,
-      principal_used: principal,
-      contract,
-      command: commandMeta,
-      command_hash: cmdHash,
-      authorization_proof: null,
-      authorization: null,
-      trust: trustInfo,
-      signer: provider.name,
-      attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
-      attestation_note,
-      warnings,
-    };
-  }
-
-  const approvalUsed = enforceApprovalGate({
-    workflow, task, executionId, approvalId, env: common.env,
-  });
-
-  const spawnEnv = Object.keys(shell.env).length > 0
-    ? { ...process.env, ...env, ...shell.env }
-    : { ...process.env, ...env };
+  const spawnEnv = buildChildEnvironment(env, shell.env);
 
   const spawnOpts = {
-    cwd: shell.cwd || cwd,
+    cwd: executionCwd,
     env: spawnEnv,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
@@ -759,20 +950,21 @@ function executeV1(common, { dryRun, approvalId }) {
 
   let verifyResult = null;
   let verifyFailed = false;
-  if (verify && exitCode === 0 && !dryRun) {
+  if (verify && exitCode === 0) {
     verifyResult = runVerify(verify, {
-      cwd: shell.cwd || cwd,
+      cwd: executionCwd,
       env: spawnEnv,
       sandboxCommand,
     });
     if (!verifyResult.passed) {
       if (verify.on_failure === 'warn') {
-        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted from audit records`);
       } else {
         verifyFailed = true;
       }
     }
   }
+  const auditVerifyResult = auditSafeVerifyResult(verifyResult);
 
   const effectiveOk = exitCode === 0 && !verifyFailed;
 
@@ -787,20 +979,18 @@ function executeV1(common, { dryRun, approvalId }) {
       source: { workflow_id: workflow.id, task_id: task.id },
       declared_identity: declaredIdentity,
       resolved_identity: resolvedIdentity,
-      identity: {
-        principal: identity.principal ?? (identity.subject?.principal ?? null),
-        run_as: identity.run_as ?? null,
-        attestation_present: identity.attestation != null,
-      },
+      identity: binding.identity,
       principal_used: principal,
       contract,
       command: commandMeta,
       command_hash: cmdHash,
+      effective_task_hash: taskHash,
+      manifest_digest: binding.manifest_digest,
       trust: trustInfo,
       signer: provider.name,
       attestation,
       attestation_note,
-      verify: verifyResult,
+      verify: auditVerifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -811,14 +1001,11 @@ function executeV1(common, { dryRun, approvalId }) {
   }
 
   if (verifyFailed) {
-    const verifyStdout = verifyResult.stdout || '';
-    const verifyStderr = verifyResult.stderr || '';
-    const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
-      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted`),
       {
         code: 'verify_failed',
-        verify: verifyResult,
+        verify: auditVerifyResult,
         execution_id: executionId,
         source: { workflow_id: workflow.id, task_id: task.id },
       }
@@ -831,9 +1018,12 @@ function executeV1(common, { dryRun, approvalId }) {
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
     resolved_identity: resolvedIdentity,
-    identity,
+    identity: binding.identity,
     principal_used: principal,
     contract,
+    command: commandMeta,
+    effective_task_hash: taskHash,
+    manifest_digest: binding.manifest_digest,
     result,
     verify: verifyResult,
     trust: trustInfo,
@@ -850,35 +1040,80 @@ function executeV1(common, { dryRun, approvalId }) {
 // v0.2 execution path -- async (returns Promise)
 // ---------------------------------------------------------------------------
 
-async function executeV2(common, {
-  dryRun,
+async function executeV2(common, options) {
+  const cleanupState = {};
+  let primaryError = null;
+  const warningStart = common.warnings.length;
+  try {
+    return await executeV2Core(common, options, cleanupState);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    await cleanupProviderArtifacts(cleanupState.identityProviderInstance, {
+      materialization: cleanupState.materialization,
+      session: cleanupState.identitySession,
+      providerConfig: cleanupState.providerConfig || {},
+      env: common.env,
+      commandEnv: cleanupState.commandEnv,
+      cwd: common.cwd,
+      runtimeCapabilities: cleanupState.runtimeCapabilities,
+    }, common.warnings);
+    await cleanupProviderArtifacts(cleanupState.identityProviderInstance, {
+      session: cleanupState.handoffResult?.session ?? null,
+      providerConfig: cleanupState.providerConfig || {},
+      env: common.env,
+      commandEnv: cleanupState.commandEnv,
+      cwd: common.cwd,
+      runtimeCapabilities: cleanupState.runtimeCapabilities,
+      warningPrefix: 'Credential handoff cleanup',
+    }, common.warnings);
+    if (primaryError && common.warnings.length > warningStart) {
+      primaryError.cleanup_warnings = common.warnings.slice(warningStart);
+    }
+  }
+}
+
+async function executeV2Core(common, {
   evidenceProviderOverride,
   instanceId,
   requireEvidence,
   requireAuthorization,
   identityDebug: includeIdentityDebug,
   presentationDebug: includePresentationDebug,
-  approvalId,
   env,
-}) {
+  approvalUsed,
+  binding,
+  taskHash,
+  timestamp,
+  executionId,
+  inspectionMode = null,
+}, cleanupState) {
   const {
-    expanded, workflow, task, identity, contract, verify, auditPolicy, shell, sandboxCommand,
-    effectiveTimeout, warnings, provider, providerConfig, cwd,
+    sourceManifest, expanded, workflow, task, identity, contract, verify, auditPolicy, shell,
+    sandboxCommand, effectiveTimeout, warnings, provider, providerConfig, cwd, executionCwd,
   } = common;
 
-  const timestamp = new Date().toISOString();
-  const executionId = generateExecutionId(workflow.id, task.id, timestamp);
+  const authorizationCommand = shell
+    ? {
+        program: shell.program,
+        args: shell.args,
+        cwd: executionCwd,
+        env_keys: binding.command?.env_keys ?? Object.keys(shell.env),
+        stdin_present: shell.stdin != null,
+      }
+    : {
+        session_target: task.target?.session_target ?? null,
+        payload_kind: task.target?.payload_kind ?? null,
+      };
+  const commandMeta = shell
+    ? safeCommandMetadata(binding, shell, cwd)
+    : binding.command;
 
-  const commandMeta = {
-    program: shell.program,
-    args: shell.args,
-    cwd: shell.cwd || cwd,
-    env_keys: Object.keys(shell.env),
-    stdin_present: shell.stdin != null,
-  };
-
-  const cmdHash = commandHash(shell);
-  const manifestDigest = computeManifestDigest(expanded);
+  const cmdHash = shell
+    ? commandHash(shell)
+    : binding.command?.digest ?? binding.manifest_digest;
+  const manifestDigest = binding.manifest_digest;
   const identityDeclaration = mergeIdentityProfile(
     identity.ref
       ? expanded.identity_profiles?.find(profile => profile.id === identity.ref) ?? null
@@ -888,12 +1123,21 @@ async function executeV2(common, {
   const authorizationProof = resolveAuthorizationProof(workflow, task);
   const authorization = resolveAuthorization(workflow, task);
   const evidence = resolveEvidence(workflow, task);
+  const runtimeCapabilities = {
+    credentialRefresh: false,
+    credentialCache: false,
+    credentialHandoff: false,
+  };
+  const identityCommandEnv = buildChildEnvironment(env, shell?.env || {});
+  cleanupState.commandEnv = identityCommandEnv;
+  cleanupState.runtimeCapabilities = runtimeCapabilities;
 
   // ------------------------------------------------------------------
   // Phase 1: Authorization Proof Verification
   // ------------------------------------------------------------------
 
   let authorizationProofSummary = null;
+  const inspectIdentityOnly = inspectionMode === 'identity' || inspectionMode === 'delegation';
   const authorizationProofDeclaration = authorizationProof?.ref
     ? mergeAuthorizationProofProfile(
         expanded.authorization_proof_profiles?.find(profile => profile.id === authorizationProof.ref) ?? null,
@@ -901,108 +1145,84 @@ async function executeV2(common, {
       )
     : null;
   const proofRef = authorizationProofDeclaration?.ref ?? null;
-  if (proofRef) {
-    if (authorizationProofDeclaration) {
-      const verifier = resolveVerifier(authorizationProofDeclaration.method || 'none');
-      const verifyRequired = authorizationProofDeclaration.verify?.required === true;
+  if (!inspectIdentityOnly && proofRef && authorizationProofDeclaration) {
+    const proofBindingEnvironment = {
+      AGENTCLI_MANIFEST_DIGEST: manifestDigest,
+      AGENTCLI_EFFECTIVE_TASK_HASH: taskHash,
+    };
+    const proofEnv = { ...env, ...proofBindingEnvironment };
+    const verifier = assertValidAuthorizationProofProfile(
+      authorizationProofDeclaration,
+      { env: proofEnv, cwd }
+    );
+    const method = authorizationProofDeclaration.method || 'none';
+    const mustVerify = method !== 'none' || authorizationProofDeclaration.verify?.required === true;
+    let verificationResult;
+    try {
+      const proofValue = authorizationProofDeclaration.proof?.value_from
+        ? resolveValueFrom(authorizationProofDeclaration.proof.value_from, {
+            env: proofEnv,
+            commandEnv: buildChildEnvironment(env, proofBindingEnvironment),
+            cwd,
+            allowCommand: true,
+          })
+        : null;
+      verificationResult = proofValue
+        ? await verifyAuthorizationProof(proofValue, authorizationProofDeclaration, {
+            manifest: sourceManifest,
+            manifestDigest,
+            env: proofEnv,
+            cwd,
+          })
+        : { verified: false, method, reason: 'proof value not available' };
+    } catch (error) {
+      verificationResult = {
+        verified: false,
+        method,
+        reason: error.message,
+      };
+    }
 
-      let proofValue = null;
-      if (authorizationProofDeclaration.proof?.value_from) {
-        proofValue = resolveValueFrom(authorizationProofDeclaration.proof.value_from, env, { cwd });
-      }
-
-      if (proofValue) {
-        let verificationContext = {
-          env,
-          manifestDigest,
-        };
-        if (authorizationProofDeclaration.method === 'jwt') {
-          verificationContext = await resolveJwtVerificationContext(
-            proofValue,
-            authorizationProofDeclaration,
-            verificationContext,
-          );
-        }
-        const verifyResult = await verifier.verifyProof(
-          proofValue,
-          authorizationProofDeclaration,
-          verificationContext,
-        );
-        authorizationProofSummary = verifier.describeVerification(verifyResult, {});
-
-        if (verifyRequired && !verifyResult.verified) {
-          const failRecord = {
-            execution_id: executionId,
-            timestamp,
-            source: { workflow_id: workflow.id, task_id: task.id },
-            declared_identity: {
-              provider: identityDeclaration.provider || 'none',
-              subject: {
-                principal: identityDeclaration.subject?.principal || null,
-                kind: identityDeclaration.subject?.kind || null,
-                issuer: identityDeclaration.subject?.issuer || null,
-              },
-              trust_level: identityDeclaration.trust?.level || null,
-            },
-            actor_context: buildActorContext({
-              identityDeclaration,
-              authorizationProofSummary,
-              principal: resolvePrincipal(identityDeclaration),
-              target: task.target,
-            }),
-            authorization_proof: authorizationProofSummary,
-            resolved_identity: null,
-            result: null,
-            warnings,
-          };
-          const paths = getAgentcliPaths({ env });
-          writeAuditRecord(failRecord, { auditPath: paths.audit });
-          throw Object.assign(
-            new Error(`Authorization proof verification failed: ${verifyResult.reason || 'verification failed'}`),
-            { code: 'authorization_proof_failed' }
-          );
-        }
-      } else if (verifyRequired) {
-        const failRecord = {
+    authorizationProofSummary = verifier.describeVerification(verificationResult, {});
+    if (!verificationResult.verified && mustVerify) {
+      if (auditPolicy !== 'none' && !inspectionMode) {
+        const paths = getAgentcliPaths({ env });
+        writeAuditRecord({
           execution_id: executionId,
           timestamp,
           source: { workflow_id: workflow.id, task_id: task.id },
-          declared_identity: {
-            provider: identityDeclaration.provider || 'none',
-            subject: {
-              principal: identityDeclaration.subject?.principal || null,
-              kind: identityDeclaration.subject?.kind || null,
-              issuer: identityDeclaration.subject?.issuer || null,
-            },
-            trust_level: identityDeclaration.trust?.level || null,
-          },
-          actor_context: buildActorContext({
-            identityDeclaration,
-            authorizationProofSummary: {
-              method: authorizationProofDeclaration.method,
-              verified: false,
-              reason: 'proof value not available',
-            },
-            principal: resolvePrincipal(identityDeclaration),
-            target: task.target,
-          }),
-          authorization_proof: {
-            method: authorizationProofDeclaration.method,
-            verified: false,
-            reason: 'proof value not available'
-          },
-          resolved_identity: null,
+          identity: binding.identity,
+          authorization_proof: authorizationProofSummary,
+          command: commandMeta,
+          effective_task_hash: taskHash,
+          manifest_digest: manifestDigest,
           result: null,
           warnings,
-        };
-        const paths = getAgentcliPaths({ env });
-        writeAuditRecord(failRecord, { auditPath: paths.audit });
-        throw Object.assign(
-          new Error(`Authorization proof value not available for "${proofRef}"`),
-          { code: 'authorization_proof_failed' }
-        );
+        }, { auditPath: paths.audit });
       }
+      throw Object.assign(
+        new Error(`Authorization proof verification failed: ${verificationResult.reason || 'verification failed'}`),
+        { code: 'authorization_proof_failed' }
+      );
     }
+  }
+
+  if (inspectionMode === 'proof') {
+    if (!proofRef) {
+      throw Object.assign(
+        new Error('Authorization proof verification requires a resolved authorization_proof block'),
+        { code: 'invalid_argument' }
+      );
+    }
+    return {
+      ok: true,
+      mode: inspectionMode,
+      source: { workflow_id: workflow.id, task_id: task.id },
+      authorization_proof: authorizationProofSummary,
+      effective_task_hash: taskHash,
+      manifest_digest: manifestDigest,
+      warnings,
+    };
   }
 
   // ------------------------------------------------------------------
@@ -1024,8 +1244,16 @@ async function executeV2(common, {
       const providerName = identityDeclaration.provider || 'none';
       const idProvider = resolveIdentityProvider(providerName);
       identityProviderInstance = idProvider;
+      cleanupState.identityProviderInstance = idProvider;
+      cleanupState.providerConfig = identityDeclaration.auth?.provider_config || {};
 
       try {
+        await assertProviderProfileValid(idProvider, identityDeclaration, 'Identity', {
+          env,
+          commandEnv: identityCommandEnv,
+          cwd,
+          runtimeCapabilities,
+        });
         identitySession = normalizeIdentitySessionResult(
           await idProvider.resolveSession(
             {
@@ -1034,10 +1262,20 @@ async function executeV2(common, {
               scope: identityDeclaration.scope ?? null,
               task_timeout_s: effectiveTimeout != null ? Math.max(1, Math.ceil(effectiveTimeout / 1000)) : null,
             },
-            { env, cwd }
+            { env, commandEnv: identityCommandEnv, cwd, runtimeCapabilities }
           ),
           providerName
         );
+        cleanupState.identitySession = identitySession;
+        if (identitySession.delegation_validation?.valid === false) {
+          throw Object.assign(
+            new Error(`Identity provider "${providerName}" returned an invalid delegation chain`),
+            {
+              code: 'identity_resolution_failed',
+              delegation_validation: identitySession.delegation_validation,
+            }
+          );
+        }
         resolvedIdentity = idProvider.describeSession(identitySession, { env });
       } catch (resolveError) {
         // Write resolution failure audit record
@@ -1152,8 +1390,26 @@ async function executeV2(common, {
   const stepUpContext = buildStepUpContext(authorizationProofSummary);
   let authorizationDecision = null;
 
+  if (inspectIdentityOnly) {
+    const safeDelegation = identityDebug?.session?.delegation_validation
+      ?? resolvedIdentity?.delegation_validation
+      ?? null;
+    return {
+      ok: true,
+      mode: inspectionMode,
+      source: { workflow_id: workflow.id, task_id: task.id },
+      declared_identity: declaredIdentity,
+      resolved_identity: resolvedIdentity,
+      principal_used: principal,
+      trust: trustInfo,
+      delegation: safeDelegation,
+      warnings,
+      ...(includeIdentityDebug ? { identity_debug: identityDebug } : {}),
+    };
+  }
+
   function writePreExecutionFailureAuditRecord(failureKey, failureValue) {
-    if (auditPolicy === 'none') return;
+    if (auditPolicy === 'none' || inspectionMode) return;
     const paths = getAgentcliPaths({ env });
     writeAuditRecord({
       execution_id: executionId,
@@ -1179,8 +1435,8 @@ async function executeV2(common, {
   // Phase 4: Trust Level Enforcement
   // ------------------------------------------------------------------
 
-  if (contract.required_trust_level && trustInfo) {
-    const effectiveLevel = trustInfo.effective_level || null;
+  if (contract.required_trust_level) {
+    const effectiveLevel = trustInfo?.effective_level || null;
     const enforcement = contract.trust_enforcement || 'none';
     if (!effectiveLevel) {
       if (enforcement === 'advisory') {
@@ -1218,7 +1474,12 @@ async function executeV2(common, {
       if (trustError.code === 'trust_level_insufficient') {
         throw trustError;
       }
-      // Unknown trust levels: treat as warning
+      if (enforcement === 'strict') {
+        throw Object.assign(
+          new Error(`Trust level comparison failed under strict enforcement: ${trustError.message}`),
+          { code: 'trust_level_insufficient', cause: trustError }
+        );
+      }
       warnings.push(`Trust level comparison failed: ${trustError.message}`);
     }
     }
@@ -1238,12 +1499,13 @@ async function executeV2(common, {
   if (authRef) {
     if (authorizationDeclaration) {
       const authProvider = resolveAuthorizationProvider(authorizationDeclaration.provider || 'none');
+      await assertProviderProfileValid(authProvider, authorizationDeclaration, 'Authorization', { env, cwd });
       const includeFields = authorizationDeclaration.request?.include || ['identity', 'contract', 'command'];
       const authRequest = normalizeAuthorizationRequest({
         source: { workflow_id: workflow.id, task_id: task.id },
         identity: { principal, trust_level: trustInfo?.effective_level },
         contract,
-        command: commandMeta,
+        command: authorizationCommand,
         actor: actorContext,
         stepUp: stepUpContext,
         resource: null,
@@ -1254,31 +1516,40 @@ async function executeV2(common, {
       const rawDecisionValue = typeof rawDecision === 'object' && rawDecision !== null
         ? (rawDecision.decision ?? rawDecision.result ?? rawDecision.value ?? rawDecision)
         : rawDecision;
-      const normalized = normalizeDecision(rawDecisionValue, authorizationDeclaration.decision || {});
+      const decisionConfig = authorizationDeclaration.decision || {};
+      const hasExplicitMapping = ['allow_values', 'deny_values', 'escalate_values']
+        .some(key => Array.isArray(decisionConfig[key]) && decisionConfig[key].length > 0);
+      const normalized = !hasExplicitMapping && ['permit', 'deny', 'require-escalation'].includes(rawDecisionValue)
+        ? { decision: rawDecisionValue, original_value: rawDecisionValue, mapped: true }
+        : normalizeDecision(rawDecisionValue, decisionConfig);
       authorizationDecision = authProvider.describeDecision(
         { ...(typeof rawDecision === 'object' && rawDecision !== null ? rawDecision : {}), decision: normalized.decision },
         {}
       );
 
       if (normalized.decision === 'deny') {
-        writePreExecutionFailureAuditRecord('authorization_error', {
-          code: 'authorization_denied',
-          message: 'Authorization denied',
-        });
-        throw Object.assign(
-          new Error('Authorization denied'),
-          { code: 'authorization_denied' }
-        );
+        if (inspectionMode !== 'authorization') {
+          writePreExecutionFailureAuditRecord('authorization_error', {
+            code: 'authorization_denied',
+            message: 'Authorization denied',
+          });
+          throw Object.assign(
+            new Error('Authorization denied'),
+            { code: 'authorization_denied' }
+          );
+        }
       }
       if (normalized.decision === 'require-escalation') {
-        writePreExecutionFailureAuditRecord('authorization_error', {
-          code: 'authorization_escalation_required',
-          message: 'Authorization requires escalation',
-        });
-        throw Object.assign(
-          new Error('Authorization requires escalation'),
-          { code: 'authorization_escalation_required' }
-        );
+        if (inspectionMode !== 'authorization') {
+          writePreExecutionFailureAuditRecord('authorization_error', {
+            code: 'authorization_escalation_required',
+            message: 'Authorization requires escalation',
+          });
+          throw Object.assign(
+            new Error('Authorization requires escalation'),
+            { code: 'authorization_escalation_required' }
+          );
+        }
       }
     }
   } else if (requireAuthorization) {
@@ -1286,6 +1557,21 @@ async function executeV2(common, {
       new Error('--require-authorization specified but no authorization block resolved'),
       { code: 'invalid_argument' }
     );
+  }
+
+  if (inspectionMode === 'authorization') {
+    return {
+      ok: true,
+      mode: inspectionMode,
+      source: { workflow_id: workflow.id, task_id: task.id },
+      declared_identity: declaredIdentity,
+      resolved_identity: resolvedIdentity,
+      principal_used: principal,
+      trust: trustInfo,
+      authorization_proof: authorizationProofSummary,
+      authorization: authorizationDecision,
+      warnings,
+    };
   }
 
   // ------------------------------------------------------------------
@@ -1321,13 +1607,16 @@ async function executeV2(common, {
   // ------------------------------------------------------------------
 
   let materialization = null;
-  const spawnEnv = Object.keys(shell.env).length > 0
-    ? { ...process.env, ...common.env, ...shell.env }
-    : { ...process.env, ...common.env };
+  const spawnEnv = { ...identityCommandEnv };
 
   if (identitySession && identityProviderInstance) {
     const presentation = identityDeclaration.presentation || {};
-    materialization = identityProviderInstance.materialize(identitySession, presentation, { env });
+    materialization = await identityProviderInstance.materialize(
+      identitySession,
+      presentation,
+      { env, commandEnv: identityCommandEnv, cwd, runtimeCapabilities }
+    );
+    cleanupState.materialization = materialization;
     // Merge materialized env vars into spawn environment
     if (materialization && materialization.env_vars) {
       Object.assign(spawnEnv, materialization.env_vars);
@@ -1341,23 +1630,12 @@ async function executeV2(common, {
   let handoffResult = null;
   const declaredHandoff = identityDeclaration.presentation?.handoff || 'none';
   if (declaredHandoff !== 'none' && identitySession && identityProviderInstance) {
-    if (identityProviderInstance.prepareHandoff && identityProviderInstance.capabilities?.handoff_modes?.includes(declaredHandoff)) {
-      try {
-        handoffResult = await identityProviderInstance.prepareHandoff(
-          identitySession,
-          {
-            mode: declaredHandoff,
-            target_scope: identityDeclaration.scope ?? identityDeclaration.auth?.scopes?.[0] ?? null,
-            parent_profile: identityDeclaration,
-          },
-          { env, cwd }
-        );
-      } catch (err) {
-        warnings.push(`Credential handoff (${declaredHandoff}) failed: ${err.message}`);
-      }
-    } else {
-      warnings.push(`Credential handoff "${declaredHandoff}" requested but provider does not support it`);
-    }
+    throw Object.assign(
+      new Error(
+        `Credential handoff "${declaredHandoff}" cannot be enforced by the local shell runtime`
+      ),
+      { code: 'unsupported_capability' }
+    );
   }
 
   const presentationDebug = includePresentationDebug
@@ -1367,98 +1645,8 @@ async function executeV2(common, {
       }
     : null;
 
-  // ------------------------------------------------------------------
-  // Dry-run exit point
-  // ------------------------------------------------------------------
-
-  if (dryRun) {
-    const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
-    await cleanupProviderArtifacts(identityProviderInstance, {
-      materialization,
-      session: identitySession,
-      providerConfig: identityProviderConfig,
-      env,
-      cwd,
-    }, warnings);
-    await cleanupProviderArtifacts(identityProviderInstance, {
-      session: handoffResult?.session ?? null,
-      providerConfig: identityProviderConfig,
-      env,
-      cwd,
-      warningPrefix: 'Credential handoff cleanup',
-    }, warnings);
-
-    const { attestation, attestation_note } = buildAndSign();
-
-    const record = {
-      execution_id: executionId,
-      timestamp,
-      source: { workflow_id: workflow.id, task_id: task.id },
-      declared_identity: declaredIdentity,
-      resolved_identity: resolvedIdentity,
-      identity: identityDeclaration,
-      principal_used: principal,
-      actor_context: actorContext,
-      step_up: stepUpContext,
-      authorization_proof: authorizationProofSummary,
-      authorization: authorizationDecision,
-      contract,
-      command: commandMeta,
-      command_hash: cmdHash,
-      trust: trustInfo,
-      hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
-      signer: provider.name,
-      attestation,
-      attestation_note,
-      warnings,
-      dry_run: true,
-      result: { status: 'dry_run' },
-    };
-
-    if (auditPolicy === 'always') {
-      const paths = getAgentcliPaths({ env });
-      writeAuditRecord(record, { auditPath: paths.audit });
-    }
-
-    return {
-      ok: true,
-      dry_run: true,
-      execution_id: executionId,
-      source: record.source,
-      declared_identity: declaredIdentity,
-      resolved_identity: resolvedIdentity,
-      identity: identityDeclaration,
-      principal_used: principal,
-      actor_context: actorContext,
-      step_up: stepUpContext,
-      contract,
-      command: commandMeta,
-      command_hash: cmdHash,
-      authorization_proof: authorizationProofSummary,
-      authorization: authorizationDecision,
-      trust: trustInfo,
-      hashes: { command: cmdHash, result: null },
-      handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
-      signer: provider.name,
-      attestation: attestation ? { method: attestation.method, key_fingerprint: attestation.key_fingerprint } : null,
-      attestation_note,
-      warnings,
-      ...(identityDebug ? { identity_debug: identityDebug } : {}),
-      ...(presentationDebug ? { presentation_debug: presentationDebug } : {}),
-    };
-  }
-
-  // ------------------------------------------------------------------
-  // Live execution: spawn the process
-  // ------------------------------------------------------------------
-
-  const approvalUsed = enforceApprovalGate({
-    workflow, task, executionId, approvalId, env,
-  });
-
   const spawnOpts = {
-    cwd: shell.cwd || cwd,
+    cwd: executionCwd,
     env: spawnEnv,
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
@@ -1468,8 +1656,14 @@ async function executeV2(common, {
     spawnOpts.timeout = effectiveTimeout;
   }
 
-  if (shell.stdin != null) {
-    spawnOpts.input = shell.stdin;
+  if (shell.stdin != null && materialization?.stdin != null) {
+    throw Object.assign(
+      new Error('Both shell.stdin and identity presentation target stdin; refusing ambiguous input'),
+      { code: 'validation_error' }
+    );
+  }
+  if (shell.stdin != null || materialization?.stdin != null) {
+    spawnOpts.input = shell.stdin ?? materialization.stdin;
   }
 
   const startMs = Date.now();
@@ -1524,10 +1718,6 @@ async function executeV2(common, {
 
   const { attestation, attestation_note } = buildAndSign();
 
-  // ------------------------------------------------------------------
-  // Phase 6: Evidence
-  // ------------------------------------------------------------------
-
   let evidenceMetadata = null;
   const evidenceDeclaration = evidence?.ref
     ? mergeEvidenceProfile(
@@ -1536,107 +1726,6 @@ async function executeV2(common, {
       )
     : null;
   const evidRef = evidenceDeclaration?.ref ?? null;
-  if (evidRef) {
-    if (evidenceDeclaration) {
-      const evProvider = resolveEvidenceProvider({
-        evidenceProvider: evidenceProviderOverride || evidenceDeclaration.provider,
-        env
-      });
-      const evConfig = evProvider.resolve(evidenceDeclaration.provider_config || {}, { env });
-      const bindTargets = evidenceDeclaration.payload?.bind || ['execution_id', 'command', 'result'];
-      const complianceCtx = collectComplianceContext({ compliance_context: {} }, evidenceDeclaration.payload?.context || {});
-      const evPayload = buildEvidencePayload({
-        executionId,
-        timestamp,
-        source: { workflow_id: workflow.id, task_id: task.id },
-        declaredIdentity,
-        resolvedIdentity,
-        authorizationProof: authorizationProofSummary,
-        authorization: authorizationDecision,
-        actorContext,
-        contract,
-        command: commandMeta,
-        result: {
-          exit_code: exitCode,
-          duration_ms: durationMs,
-          stdout_bytes: result.stdout_bytes,
-          stderr_bytes: result.stderr_bytes,
-          structured_present: structured != null,
-          output_hash: result.output_hash,
-        },
-        complianceContext: complianceCtx,
-        bindTargets,
-      });
-      const serialized = serializePayload(evPayload, evidenceDeclaration.payload?.format || 'canonical-json');
-      const attestResult = evProvider.attest(serialized, evConfig || {}, { env });
-      if (attestResult.attested) {
-        evidenceMetadata = evProvider.describe(attestResult.envelope, {});
-      } else {
-        evidenceMetadata = { provider: evProvider.name, attested: false, reason: attestResult.reason };
-      }
-
-      if (requireEvidence && !attestResult.attested) {
-        throw Object.assign(
-          new Error(`Evidence required but attestation failed: ${attestResult.reason}`),
-          { code: 'evidence_failed' }
-        );
-      }
-    }
-  } else if (requireEvidence) {
-    throw Object.assign(
-      new Error('--require-evidence specified but no evidence block resolved'),
-      { code: 'invalid_argument' }
-    );
-  }
-
-  // ------------------------------------------------------------------
-  // Post-execution verify phase
-  //
-  // Runs AFTER evidence attestation. Evidence proves what the command did
-  // (exit status, output hashes); verify is an operator-local check that
-  // the expected deliverable exists. These are complementary, not sequential
-  // dependencies. If end-to-end proof including verify is needed, extend the
-  // evidence payload rather than reordering phases.
-  // ------------------------------------------------------------------
-
-  let verifyResult = null;
-  let verifyFailed = false;
-  if (verify && exitCode === 0) {
-    verifyResult = runVerify(verify, {
-      cwd: shell.cwd || cwd,
-      env: spawnEnv,
-      sandboxCommand,
-    });
-    if (!verifyResult.passed) {
-      if (verify.on_failure === 'warn') {
-        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}): ${verifyResult.stderr || verifyResult.stdout || '(no output)'}`);
-      } else {
-        verifyFailed = true;
-      }
-    }
-  }
-
-  const effectiveOk = exitCode === 0 && !verifyFailed;
-
-  const identityProviderConfig = identityDeclaration.auth?.provider_config || {};
-  await cleanupProviderArtifacts(identityProviderInstance, {
-    materialization,
-    session: identitySession,
-    providerConfig: identityProviderConfig,
-    env,
-    cwd,
-  }, warnings);
-  await cleanupProviderArtifacts(identityProviderInstance, {
-    session: handoffResult?.session ?? null,
-    providerConfig: identityProviderConfig,
-    env,
-    cwd,
-    warningPrefix: 'Credential handoff cleanup',
-  }, warnings);
-
-  // ------------------------------------------------------------------
-  // Phase 7: Enhanced Audit Record
-  // ------------------------------------------------------------------
 
   const auditResult = {
     exit_code: exitCode,
@@ -1648,6 +1737,166 @@ async function executeV2(common, {
     output_hash: result.output_hash,
     structured_present: structured != null,
   };
+
+  // ------------------------------------------------------------------
+  // Post-execution verify phase. Evidence is generated afterwards so its
+  // signed payload binds this verification outcome as well as command output.
+  // ------------------------------------------------------------------
+
+  let verifyResult = null;
+  let verifyFailed = false;
+  if (verify && exitCode === 0) {
+    verifyResult = runVerify(verify, {
+      cwd: executionCwd,
+      env: spawnEnv,
+      sandboxCommand,
+    });
+    if (!verifyResult.passed) {
+      if (verify.on_failure === 'warn') {
+        warnings.push(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted from audit records`);
+      } else {
+        verifyFailed = true;
+      }
+    }
+  }
+  const auditVerifyResult = auditSafeVerifyResult(verifyResult);
+
+  // ------------------------------------------------------------------
+  // Phase 6: Complete, versioned evidence
+  // ------------------------------------------------------------------
+
+  const evidenceVerificationRequired = evidenceDeclaration?.verify?.required === true;
+  const evidenceProductionRequired = requireEvidence || evidenceVerificationRequired;
+  try {
+    if (evidRef && evidenceDeclaration) {
+      const evProvider = resolveEvidenceProvider({
+        evidenceProvider: evidenceProviderOverride || evidenceDeclaration.provider,
+        env,
+      });
+      const evConfig = evProvider.resolve(evidenceDeclaration.provider_config || {}, { env });
+      const complianceCtx = collectComplianceContext(
+        { compliance_context: {} },
+        evidenceDeclaration.payload?.context || {}
+      );
+      const evPayload = buildCompleteEvidencePayload({
+        executionId,
+        timestamp,
+        source: { workflow_id: workflow.id, task_id: task.id },
+        manifestDigest: binding.manifest_digest,
+        effectiveTaskHash: taskHash,
+        declaredIdentity,
+        resolvedIdentity,
+        authorizationProof: authorizationProofSummary,
+        authorization: authorizationDecision,
+        actorContext,
+        contract,
+        command: {
+          ...binding.command,
+          env: spawnEnv,
+          stdin: spawnOpts.input ?? null,
+        },
+        result,
+        verify: auditVerifyResult,
+        complianceContext: complianceCtx,
+      });
+      const serialized = serializePayload(
+        evPayload,
+        evidenceDeclaration.payload?.format || 'canonical-json'
+      );
+      const attestResult = evProvider.attest(serialized, evConfig || {}, { env });
+      if (attestResult.attested) {
+        evidenceMetadata = {
+          ...evProvider.describe(attestResult.envelope, {}),
+          envelope: attestResult.envelope,
+        };
+        if (evidenceVerificationRequired) {
+          const providerConfig = evidenceDeclaration.provider_config || {};
+          const paths = getAgentcliPaths({ env });
+          const allowedSignersPath = providerConfig.allowed_signers ||
+            providerConfig.allowed_signers_path ||
+            resolveEvidenceAllowedSigners({ env, statePath: paths.allowed_signers });
+          const verification = await verifyEvidenceEnvelope(attestResult.envelope, {
+            ...providerConfig,
+            allowedSignersPath,
+            principal: providerConfig.principal || attestResult.envelope?.principal || null,
+          }, { env });
+          evidenceMetadata.verification = {
+            required: true,
+            verified: verification.verified === true,
+            reason: verification.reason || null,
+            principal: verification.principal || null,
+            key_fingerprint: verification.key_fingerprint || null,
+            payload_digest: verification.payload_digest || null,
+            envelope_version: verification.envelope_version || null,
+          };
+          if (!verification.verified) {
+            throw Object.assign(
+              new Error(`Evidence verification required but failed: ${verification.reason || 'verification did not succeed'}`),
+              { code: 'evidence_failed' }
+            );
+          }
+        }
+      } else {
+        evidenceMetadata = {
+          provider: evProvider.name,
+          attested: false,
+          reason: attestResult.reason,
+          envelope: null,
+        };
+      }
+      if (evidenceProductionRequired && !attestResult.attested) {
+        throw Object.assign(
+          new Error(`Evidence required but attestation failed: ${attestResult.reason}`),
+          { code: 'evidence_failed' }
+        );
+      }
+    } else if (evidenceProductionRequired) {
+      throw Object.assign(
+        new Error('Evidence is required but no evidence block resolved'),
+        { code: 'evidence_failed' }
+      );
+    }
+  } catch (evidenceError) {
+    const evidenceFailure = {
+      code: evidenceError.code || 'evidence_failed',
+      message: evidenceError.message,
+    };
+    if (auditPolicy !== 'none') {
+      const paths = getAgentcliPaths({ env });
+      writeAuditRecord({
+        execution_id: executionId,
+        timestamp,
+        source: { workflow_id: workflow.id, task_id: task.id },
+        declared_identity: declaredIdentity,
+        resolved_identity: resolvedIdentity,
+        principal_used: principal,
+        actor_context: actorContext,
+        authorization_proof: authorizationProofSummary,
+        authorization: authorizationDecision,
+        trust: trustInfo,
+        contract,
+        command: commandMeta,
+        identity: binding.identity,
+        effective_task_hash: taskHash,
+        manifest_digest: binding.manifest_digest,
+        verify: auditVerifyResult,
+        evidence: evidenceMetadata,
+        evidence_error: evidenceFailure,
+        warnings,
+        dry_run: false,
+        result: auditResult,
+        approval_used: approvalUsed,
+      }, { auditPath: paths.audit });
+    }
+    if (!evidenceError.code) evidenceError.code = 'evidence_failed';
+    throw evidenceError;
+  }
+
+  const effectiveOk = exitCode === 0 && !verifyFailed;
+
+  // ------------------------------------------------------------------
+  // Phase 7: Enhanced Audit Record
+  // ------------------------------------------------------------------
 
   const shouldAudit =
     auditPolicy === 'always' ||
@@ -1671,12 +1920,14 @@ async function executeV2(common, {
       hashes: { command: cmdHash, result: `sha256:${outputHash}` },
       handoff: { mode: declaredHandoff, prepared: handoffPrepared(handoffResult) },
       evidence: evidenceMetadata,
-      identity: identityDeclaration,
+      identity: binding.identity,
+      effective_task_hash: taskHash,
+      manifest_digest: binding.manifest_digest,
       command_hash: cmdHash,
       signer: provider.name,
       attestation,
       attestation_note,
-      verify: verifyResult,
+      verify: auditVerifyResult,
       warnings,
       dry_run: false,
       result: auditResult,
@@ -1687,14 +1938,11 @@ async function executeV2(common, {
   }
 
   if (verifyFailed) {
-    const verifyStdout = verifyResult.stdout || '';
-    const verifyStderr = verifyResult.stderr || '';
-    const detail = verifyStderr || verifyStdout || '(no output)';
     throw Object.assign(
-      new Error(`Verify command failed (exit ${verifyResult.exit_code}): ${detail}`),
+      new Error(`Verify command failed (exit ${verifyResult.exit_code}); raw verify output is omitted`),
       {
         code: 'verify_failed',
-        verify: verifyResult,
+        verify: auditVerifyResult,
         execution_id: executionId,
         source: { workflow_id: workflow.id, task_id: task.id },
       }
@@ -1711,11 +1959,14 @@ async function executeV2(common, {
     source: { workflow_id: workflow.id, task_id: task.id },
     declared_identity: declaredIdentity,
     resolved_identity: resolvedIdentity,
-    identity: identityDeclaration,
+    identity: binding.identity,
     principal_used: principal,
     actor_context: actorContext,
     step_up: stepUpContext,
     contract,
+    command: commandMeta,
+    effective_task_hash: taskHash,
+    manifest_digest: binding.manifest_digest,
     result,
     verify: verifyResult,
     authorization_proof: authorizationProofSummary,

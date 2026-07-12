@@ -4,11 +4,40 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { runCli, runWorkflow } from '../src/index.js';
+import { canonicalDigest, executeTask, runCli, runWorkflow } from '../src/index.js';
 
 function makeTempHome() {
   return mkdtempSync(join(tmpdir(), 'agentcli-run-'));
 }
+
+test('direct exec and workflow run bind the original manifest before shorthand expansion', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'source-digest',
+      name: 'Source Digest',
+      tasks: [{
+        id: 'root',
+        name: 'Root',
+        shell: { program: 'true', args: [] },
+        target: { session_target: 'shell' },
+        schedule: { cron: '0 * * * *' },
+        contract: { audit: 'none' },
+        on_failure: {
+          shell: { program: 'true', args: [] },
+          contract: { audit: 'none' },
+        },
+      }],
+    }],
+  };
+  const expectedDigest = canonicalDigest(manifest);
+  const direct = await executeTask(manifest, { taskId: 'root', signer: 'none' });
+  const run = await runWorkflow(manifest, { rootTaskId: 'root', signer: 'none' });
+  const root = run.tasks.find(task => task.source.task_id === 'root');
+
+  assert.equal(direct.manifest_digest, expectedDigest);
+  assert.equal(root.execution.manifest_digest, expectedDigest);
+});
 
 test('runWorkflow executes a shell DAG and evaluates trigger conditions', async () => {
   const manifest = {
@@ -243,4 +272,79 @@ test('cli run --all-roots dry-run plans every selected root graph', async () => 
   } finally {
     rmSync(tempHome, { recursive: true, force: true });
   }
+});
+
+test('runWorkflow skips disabled tasks and their dependent trigger branches', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'disabled-flow',
+      name: 'Disabled Flow',
+      tasks: [
+        {
+          id: 'root',
+          name: 'Root',
+          enabled: false,
+          shell: { program: 'sh', args: ['-c', 'exit 99'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+        },
+        {
+          id: 'child',
+          name: 'Child',
+          shell: { program: 'sh', args: ['-c', 'exit 98'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'root', on: 'failure' },
+        },
+        {
+          id: 'grandchild',
+          name: 'Grandchild',
+          shell: { program: 'sh', args: ['-c', 'exit 97'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'child', on: 'complete' },
+        },
+      ],
+    }],
+  };
+
+  const result = await runWorkflow(manifest, { rootTaskId: 'root', signer: 'none' });
+  assert.equal(result.ok, true);
+  assert.equal(result.summary.total, 3);
+  assert.equal(result.summary.failed, 0);
+  assert.equal(result.summary.skipped, 3);
+  assert(result.tasks.every(task => task.status === 'skipped'));
+  assert.match(result.tasks[0].reason, /disabled/);
+  assert.match(result.tasks[1].reason, /ancestor task/);
+});
+
+test('runWorkflow dry-run marks disabled branches as skipped instead of planned', async () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'disabled-plan',
+      name: 'Disabled Plan',
+      tasks: [
+        {
+          id: 'root',
+          name: 'Root',
+          enabled: false,
+          shell: { program: 'echo', args: ['root'] },
+          target: { session_target: 'shell' },
+          schedule: { cron: '0 * * * *' },
+        },
+        {
+          id: 'child',
+          name: 'Child',
+          shell: { program: 'echo', args: ['child'] },
+          target: { session_target: 'shell' },
+          trigger: { parent: 'root', on: 'success' },
+        },
+      ],
+    }],
+  };
+
+  const result = await runWorkflow(manifest, { rootTaskId: 'root', dryRun: true });
+  assert.equal(result.summary.planned, 0);
+  assert.equal(result.summary.skipped, 2);
+  assert(result.tasks.every(task => task.status === 'skipped'));
 });

@@ -28,6 +28,19 @@ import { URL } from 'node:url';
 // usage grows beyond a handful of scopes, add a max-entries cap.
 // ---------------------------------------------------------------------------
 const commandCache = new Map();
+const standaloneCleanupResults = new WeakMap();
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function isLoopbackHostname(hostname) {
+  const normalized = String(hostname || '').replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return true;
+  const octets = normalized.split('.');
+  return octets.length === 4 && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255) && Number(octets[0]) === 127;
+}
+
+function stripeIdentityError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
 
 /**
  * Purge expired entries from the command cache. Called before reads
@@ -70,9 +83,10 @@ function envFingerprint(env) {
  */
 function commandSourceCacheKey(command, opts) {
   const cwdPart = opts && opts.cwd != null ? String(opts.cwd) : '';
+  const effectiveEnv = opts && (opts.commandEnv || opts.env);
   let envPart = '@inherit';
-  if (opts && opts.env != null && typeof opts.env === 'object' && opts.env !== process.env) {
-    envPart = envFingerprint(opts.env);
+  if (effectiveEnv != null && typeof effectiveEnv === 'object' && effectiveEnv !== process.env) {
+    envPart = envFingerprint(effectiveEnv);
   }
   return `${command}\0${cwdPart}\0${envPart}`;
 }
@@ -106,7 +120,7 @@ function resolveCommandSource(command, ttlMs, opts) {
       maxBuffer: 1024 * 1024,
       shell: true,
       cwd: opts && opts.cwd,
-      env: opts && opts.env,
+      env: opts && (opts.commandEnv || opts.env),
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -115,7 +129,7 @@ function resolveCommandSource(command, ttlMs, opts) {
       return {
         ok: false,
         transient: false,
-        error: `Command returned empty output: ${command}`,
+        error: 'Credential command returned empty output',
       };
     }
     commandCache.set(cacheKey, { value, expiresAt: Date.now() + ttlMs });
@@ -125,7 +139,7 @@ function resolveCommandSource(command, ttlMs, opts) {
     return {
       ok: false,
       transient: isTimeout,
-      error: `Command failed (exit ${err.status || 'unknown'}): ${command}`,
+      error: `Credential command failed (exit ${err.status || 'unknown'})`,
     };
   }
 }
@@ -143,7 +157,7 @@ function resolveFileSource(filePath) {
       return {
         ok: false,
         transient: false,
-        error: `Key file is empty: ${filePath}`,
+        error: 'Credential file is empty',
       };
     }
     return { ok: true, value: content };
@@ -152,7 +166,7 @@ function resolveFileSource(filePath) {
     return {
       ok: false,
       transient: isTransient,
-      error: `Failed to read key file "${filePath}": ${err.message}`,
+      error: 'Credential file could not be read',
     };
   }
 }
@@ -170,7 +184,7 @@ function resolveEnvSource(envVar, env) {
     return {
       ok: false,
       transient: false,
-      error: `Environment variable "${envVar}" is not set or is empty`,
+      error: 'Credential environment source is not set or is empty',
     };
   }
   return { ok: true, value: value.trim() };
@@ -307,17 +321,13 @@ function isScopeReachable(hierarchy, parentScope, targetScope) {
 }
 
 /**
- * Mask a key value for safe display: show prefix and last 4 characters.
+ * Redact a key value for safe display without preserving key fingerprints.
  *
  * @param {string} key - The Stripe API key.
- * @returns {string} Masked representation (e.g. "rk_live_...ab1c").
+ * @returns {string} Redacted representation.
  */
-function maskKeyValue(key) {
-  if (typeof key !== 'string' || key.length < 12) return '[INVALID_KEY]';
-  const prefixMatch = key.match(/^(sk_live_|sk_test_|rk_live_|rk_test_)/);
-  if (!prefixMatch) return '[UNKNOWN_FORMAT]';
-  const suffix = key.slice(-4);
-  return `${prefixMatch[1]}...${suffix}`;
+function maskKeyValue(_key) {
+  return '[REDACTED]';
 }
 
 // ---------------------------------------------------------------------------
@@ -528,26 +538,23 @@ async function createRestrictedKey(masterKey, permissions, apiBase) {
         return {
           ok: false,
           transient: false,
-          error: `Stripe API returned success but missing id or secret in response: ${JSON.stringify(res.body)}`,
+          error: 'Stripe API returned an incomplete restricted-key response',
         };
       }
       return { ok: true, key_id: keyId, key_secret: keySecret };
     }
 
     const isTransient = res.statusCode === 429 || res.statusCode >= 500;
-    const errorMsg = (res.body && res.body.error && res.body.error.message)
-      ? res.body.error.message
-      : `HTTP ${res.statusCode}`;
     return {
       ok: false,
       transient: isTransient,
-      error: `Stripe API error creating restricted key: ${errorMsg}`,
+      error: `Stripe API error creating restricted key (HTTP ${res.statusCode})`,
     };
-  } catch (err) {
+  } catch (_err) {
     return {
       ok: false,
       transient: true,
-      error: `Stripe API request failed: ${err.message}`,
+      error: 'Stripe API request failed while creating a restricted key',
     };
   }
 }
@@ -579,12 +586,9 @@ async function deleteRestrictedKey(masterKey, keyId, apiBase) {
       return { ok: true };
     }
 
-    const errorMsg = (res.body && res.body.error && res.body.error.message)
-      ? res.body.error.message
-      : `HTTP ${res.statusCode}`;
-    return { ok: false, error: `Stripe API error deleting key ${keyId}: ${errorMsg}` };
-  } catch (err) {
-    return { ok: false, error: `Stripe API request failed during key deletion: ${err.message}` };
+    return { ok: false, error: `Stripe API error deleting restricted key (HTTP ${res.statusCode})` };
+  } catch (_err) {
+    return { ok: false, error: 'Stripe API request failed during restricted-key deletion' };
   }
 }
 
@@ -596,7 +600,7 @@ async function deleteRestrictedKey(masterKey, keyId, apiBase) {
  * @param {string} cwd - Working directory.
  * @returns {{ ok: boolean, value?: string, error?: string, transient?: boolean }}
  */
-function resolveMasterKey(masterKeySource, env, cwd) {
+function resolveMasterKey(masterKeySource, env, cwd, commandEnv = env) {
   if (!masterKeySource || typeof masterKeySource !== 'object') {
     return { ok: false, transient: false, error: 'master_key_source is missing or not an object' };
   }
@@ -607,7 +611,7 @@ function resolveMasterKey(masterKeySource, env, cwd) {
     return resolveFileSource(masterKeySource.file);
   }
   if (typeof masterKeySource.command === 'string' && masterKeySource.command.length > 0) {
-    return resolveCommandSource(masterKeySource.command, 60000, { cwd, env });
+    return resolveCommandSource(masterKeySource.command, 60000, { cwd, env, commandEnv });
   }
   return {
     ok: false,
@@ -647,7 +651,46 @@ const stripeApiKeyProvider = {
    */
   validateProfile(profile, _ctx) {
     const errors = [];
-    const config = (profile.auth && profile.auth.provider_config) || {};
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+      return { valid: false, errors: ['identity profile must be an object'] };
+    }
+    const auth = (profile.auth && typeof profile.auth === 'object' && !Array.isArray(profile.auth))
+      ? profile.auth
+      : {};
+    const presentation = (profile.presentation && typeof profile.presentation === 'object' && !Array.isArray(profile.presentation))
+      ? profile.presentation
+      : {};
+    const config = (auth.provider_config && typeof auth.provider_config === 'object' && !Array.isArray(auth.provider_config))
+      ? auth.provider_config
+      : {};
+
+    if (profile.auth != null && profile.auth !== auth) errors.push('auth must be an object');
+    if (profile.presentation != null && profile.presentation !== presentation) errors.push('presentation must be an object');
+    if (auth.mode != null && auth.mode !== 'service') errors.push('auth.mode must be "service"');
+    if (auth.cache != null && auth.cache !== 'none') errors.push('auth.cache is unsupported; use "none"');
+    if (auth.refresh != null && auth.refresh !== 'never') errors.push('auth.refresh is unsupported; use "never"');
+    if (presentation.handoff != null && !['none', 'downscope'].includes(presentation.handoff)) {
+      errors.push('presentation.handoff must be "none" or "downscope"');
+    }
+    if (presentation.bindings != null && !Array.isArray(presentation.bindings)) {
+      errors.push('presentation.bindings must be an array');
+    } else {
+      for (const [index, binding] of (presentation.bindings || []).entries()) {
+        if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
+          errors.push(`presentation.bindings[${index}] must be an object`);
+          continue;
+        }
+        if (typeof binding.source !== 'string' || binding.source.length === 0) {
+          errors.push(`presentation.bindings[${index}].source must be a non-empty string`);
+        } else if (binding.source === 'provider_assertions' || binding.source.startsWith('provider_assertions.') ||
+                   binding.source === 'delegation_chain' || binding.source.startsWith('delegation_chain.')) {
+          errors.push(`presentation.bindings[${index}].source cannot reference audit-only data`);
+        }
+        if (!binding.target || binding.target.kind !== 'env' || !ENV_NAME.test(binding.target.name || '')) {
+          errors.push(`presentation.bindings[${index}].target must name an environment variable`);
+        }
+      }
+    }
 
     // key_strategy
     const validStrategies = ['precreated', 'dynamic'];
@@ -681,14 +724,11 @@ const stripeApiKeyProvider = {
             errors.push(`permission_sets["${scopeName}"] must be an object`);
             continue;
           }
-          const hasSource = (
-            (typeof entry.key_env === 'string' && entry.key_env.length > 0) ||
-            (typeof entry.key_file === 'string' && entry.key_file.length > 0) ||
-            (typeof entry.key_command === 'string' && entry.key_command.length > 0)
-          );
-          if (!hasSource) {
+          const sourceCount = [entry.key_env, entry.key_file, entry.key_command]
+            .filter(source => typeof source === 'string' && source.length > 0).length;
+          if (sourceCount !== 1) {
             errors.push(
-              `permission_sets["${scopeName}"] must declare at least one key source: key_env, key_file, or key_command`
+              `permission_sets["${scopeName}"] must declare exactly one key source: key_env, key_file, or key_command`
             );
           }
         }
@@ -728,13 +768,10 @@ const stripeApiKeyProvider = {
         errors.push('provider_config.master_key_source is required for dynamic strategy');
       } else {
         const src = config.master_key_source;
-        const hasSource = (
-          (typeof src.env === 'string' && src.env.length > 0) ||
-          (typeof src.file === 'string' && src.file.length > 0) ||
-          (typeof src.command === 'string' && src.command.length > 0)
-        );
-        if (!hasSource) {
-          errors.push('master_key_source must declare at least one source: env, file, or command');
+        const sourceCount = [src.env, src.file, src.command]
+          .filter(source => typeof source === 'string' && source.length > 0).length;
+        if (sourceCount !== 1) {
+          errors.push('master_key_source must declare exactly one source: env, file, or command');
         }
       }
 
@@ -745,20 +782,22 @@ const stripeApiKeyProvider = {
         } else {
           try {
             const parsed = new URL(config.api_base);
+            if (parsed.username || parsed.password) {
+              errors.push('provider_config.api_base must not contain URL credentials');
+            }
             if (parsed.protocol === 'https:') {
               // OK: HTTPS is always allowed
             } else if (parsed.protocol === 'http:') {
-              const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-              if (!isLocalhost && config.allow_insecure_http !== true) {
+              if (!isLoopbackHostname(parsed.hostname)) {
                 errors.push(
-                  'provider_config.api_base using http: is only allowed for localhost or when provider_config.allow_insecure_http is true'
+                  'provider_config.api_base using HTTP is allowed only for loopback endpoints'
                 );
               }
             } else {
               errors.push('provider_config.api_base must use https: protocol');
             }
           } catch (_urlErr) {
-            errors.push(`provider_config.api_base is not a valid URL: ${config.api_base}`);
+            errors.push('provider_config.api_base is not a valid URL');
           }
         }
       }
@@ -802,13 +841,14 @@ const stripeApiKeyProvider = {
   resolveSession(request, ctx) {
     const env = (ctx && ctx.env) || process.env;
     const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
     const profile = request.profile || {};
     const config = (profile.auth && profile.auth.provider_config) || {};
     const scope = request.scope || null;
     const trustLevel = (profile.trust && profile.trust.level) || 'supervised';
 
     if (config.key_strategy === 'dynamic') {
-      return this._resolveDynamicSession(request, config, env, cwd, trustLevel);
+      return this._resolveDynamicSession(request, config, env, cwd, trustLevel, commandEnv);
     }
 
     // Precreated strategy
@@ -841,7 +881,7 @@ const stripeApiKeyProvider = {
     } else if (typeof permSet.key_file === 'string' && permSet.key_file.length > 0) {
       keyResult = resolveFileSource(permSet.key_file);
     } else if (typeof permSet.key_command === 'string' && permSet.key_command.length > 0) {
-      keyResult = resolveCommandSource(permSet.key_command, cacheTtlMs, { cwd, env });
+      keyResult = resolveCommandSource(permSet.key_command, cacheTtlMs, { cwd, env, commandEnv });
     } else {
       return {
         ok: false,
@@ -929,7 +969,7 @@ const stripeApiKeyProvider = {
    * @param {string} trustLevel - Effective trust level.
    * @returns {Promise<{ ok: boolean, session?: object, transient?: boolean, error?: string }>}
    */
-  async _resolveDynamicSession(request, config, env, cwd, trustLevel) {
+  async _resolveDynamicSession(request, config, env, cwd, trustLevel, commandEnv = env) {
     const scope = request.scope || 'full';
     const accountMode = config.account_mode || 'test';
     const apiBase = config.api_base || DEFAULT_API_BASE;
@@ -938,7 +978,7 @@ const stripeApiKeyProvider = {
       : DEFAULT_EXPIRY_BUFFER_S;
 
     // Resolve the master key
-    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd);
+    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd, commandEnv);
     if (!masterKeyResult.ok) {
       return {
         ok: false,
@@ -1058,13 +1098,39 @@ const stripeApiKeyProvider = {
 
     // Additional bindings from presentation
     const bindings = (presentation && presentation.bindings) || [];
-    for (const binding of bindings) {
+    for (const [index, binding] of bindings.entries()) {
+      if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
+        throw stripeIdentityError('presentation_binding_invalid', `Credential presentation binding ${index} is invalid`);
+      }
       const target = binding.target || {};
-      if (target.kind !== 'env' || !target.name) continue;
+      if (binding.source === 'provider_assertions' || binding.source?.startsWith('provider_assertions.') ||
+          binding.source === 'delegation_chain' || binding.source?.startsWith('delegation_chain.')) {
+        throw stripeIdentityError(
+          'presentation_source_forbidden',
+          'Credential presentation cannot use audit-only session data'
+        );
+      }
+      if (target.kind !== 'env') {
+        throw stripeIdentityError('presentation_target_unsupported', 'Stripe credentials support env presentation only');
+      }
+      if (!ENV_NAME.test(target.name || '')) {
+        throw stripeIdentityError('presentation_target_invalid', 'Credential environment target name is invalid');
+      }
 
       const value = resolveSessionPath(session, binding.source);
       if (value !== undefined && value !== null) {
-        envVars[target.name] = String(value);
+        if (binding.format === 'json' || (binding.format == null && typeof value === 'object')) {
+          envVars[target.name] = JSON.stringify(value);
+        } else if (binding.format === 'base64') {
+          envVars[target.name] = Buffer.from(String(value)).toString('base64');
+        } else {
+          envVars[target.name] = String(value);
+        }
+      } else if (binding.required === true) {
+        throw stripeIdentityError(
+          'presentation_binding_missing',
+          `Required credential presentation binding ${index} is unavailable`
+        );
       }
     }
 
@@ -1077,7 +1143,12 @@ const stripeApiKeyProvider = {
     // Embed session reference so cleanup() can access stripe_key_id and
     // provider_config without callers needing to thread the session through ctx.
     if (config.key_strategy === 'dynamic') {
-      result.session = session;
+      Object.defineProperty(result, 'session', {
+        value: session,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
     }
 
     return result;
@@ -1096,46 +1167,62 @@ const stripeApiKeyProvider = {
    * @returns {Promise<{ cleaned: boolean, warnings?: string[] }>|{ cleaned: boolean, warnings?: string[] }}
    */
   cleanup(materialization, ctx) {
+    const trackable = materialization && typeof materialization === 'object';
+    if (trackable) {
+      const existing = standaloneCleanupResults.get(materialization);
+      if (existing) return existing;
+    }
+    const remember = result => {
+      if (trackable) {
+        if ((result?.warnings || []).length > 0) standaloneCleanupResults.delete(materialization);
+        else standaloneCleanupResults.set(materialization, result);
+      }
+      return result;
+    };
+
     const session = (ctx && ctx.session) || (materialization && materialization.session) || null;
     if (!session) {
-      return { cleaned: true };
+      return remember({ cleaned: true });
     }
 
     const assertions = session.provider_assertions || {};
     if (assertions.key_strategy !== 'dynamic') {
       // Precreated keys need no cleanup -- they are long-lived and not minted per-job
-      return { cleaned: true };
+      return remember({ cleaned: true });
     }
 
     const keyId = assertions.stripe_key_id;
     if (!keyId) {
-      return { cleaned: true, warnings: ['Dynamic session has no stripe_key_id; nothing to revoke'] };
+      return remember({ cleaned: true, warnings: ['Dynamic session has no stripe_key_id; nothing to revoke'] });
     }
 
     // Resolve master key for deletion
     const env = (ctx && ctx.env) || process.env;
     const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
     const config = (ctx && ctx.provider_config) || {};
     const masterKeySource = config.master_key_source || {};
     const apiBase = assertions.api_base || config.api_base || DEFAULT_API_BASE;
 
-    const masterKeyResult = resolveMasterKey(masterKeySource, env, cwd);
+    const masterKeyResult = resolveMasterKey(masterKeySource, env, cwd, commandEnv);
     if (!masterKeyResult.ok) {
-      return {
+      return remember({
         cleaned: true,
         warnings: [`Could not resolve master key for cleanup: ${masterKeyResult.error}`],
-      };
+      });
     }
 
     // Async deletion, best-effort
-    return deleteRestrictedKey(masterKeyResult.value, keyId, apiBase).then((delResult) => {
+    const operation = deleteRestrictedKey(masterKeyResult.value, keyId, apiBase).then((delResult) => {
       if (!delResult.ok) {
-        return { cleaned: true, warnings: [delResult.error] };
+        return remember({ cleaned: true, warnings: [delResult.error] });
       }
-      return { cleaned: true };
-    }).catch((err) => {
-      return { cleaned: true, warnings: [`Key revocation failed: ${err.message}`] };
+      return remember({ cleaned: true });
+    }).catch((_err) => {
+      return remember({ cleaned: true, warnings: ['Restricted-key revocation failed'] });
     });
+    if (trackable) standaloneCleanupResults.set(materialization, operation);
+    return operation;
   },
 
   /**
@@ -1155,6 +1242,7 @@ const stripeApiKeyProvider = {
   prepareHandoff(session, handoff, ctx) {
     const env = (ctx && ctx.env) || process.env;
     const cwd = (ctx && ctx.cwd) || process.cwd();
+    const commandEnv = (ctx && ctx.commandEnv) || env;
     const targetScope = handoff && handoff.target_scope;
     const parentProfile = handoff && handoff.parent_profile;
 
@@ -1186,7 +1274,7 @@ const stripeApiKeyProvider = {
     }
 
     if (config.key_strategy === 'dynamic') {
-      return this._prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd);
+      return this._prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd, commandEnv);
     }
 
     // Look up the target scope's permission set (precreated strategy)
@@ -1209,7 +1297,7 @@ const stripeApiKeyProvider = {
     } else if (typeof targetPermSet.key_file === 'string' && targetPermSet.key_file.length > 0) {
       keyResult = resolveFileSource(targetPermSet.key_file);
     } else if (typeof targetPermSet.key_command === 'string' && targetPermSet.key_command.length > 0) {
-      keyResult = resolveCommandSource(targetPermSet.key_command, cacheTtlMs, { cwd, env });
+      keyResult = resolveCommandSource(targetPermSet.key_command, cacheTtlMs, { cwd, env, commandEnv });
     } else {
       return {
         prepared: false,
@@ -1294,7 +1382,7 @@ const stripeApiKeyProvider = {
    * @param {string} cwd - Working directory.
    * @returns {Promise<{ prepared: boolean, session?: object, error?: string }>}
    */
-  async _prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd) {
+  async _prepareDynamicHandoff(session, targetScope, parentScope, config, env, cwd, commandEnv = env) {
     const accountMode = config.account_mode || 'test';
     const apiBase = config.api_base || DEFAULT_API_BASE;
     const expiryBufferS = (typeof config.default_expiry_buffer_s === 'number' && config.default_expiry_buffer_s > 0)
@@ -1302,7 +1390,7 @@ const stripeApiKeyProvider = {
       : DEFAULT_EXPIRY_BUFFER_S;
 
     // Resolve the master key for minting the child key
-    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd);
+    const masterKeyResult = resolveMasterKey(config.master_key_source, env, cwd, commandEnv);
     if (!masterKeyResult.ok) {
       return { prepared: false, error: `Failed to resolve master key for handoff: ${masterKeyResult.error}` };
     }
@@ -1454,8 +1542,8 @@ const stripeApiKeyProvider = {
   },
 
   /**
-   * Describe a session for audit purposes. Redacts all key values;
-   * shows only prefix and last 4 characters.
+   * Describe a session for audit purposes. Redacts all key values without
+   * preserving prefixes or suffixes that could become credential fingerprints.
    *
    * @param {object} session - The credential session.
    * @param {object} _ctx    - Resolution context.
@@ -1467,6 +1555,18 @@ const stripeApiKeyProvider = {
     if (described.credentials && described.credentials.api_key) {
       const original = described.credentials.api_key.value;
       described.credentials.api_key.value = maskKeyValue(original);
+    }
+    if (typeof described.provider_assertions?.api_base === 'string') {
+      try {
+        const apiBase = new URL(described.provider_assertions.api_base);
+        apiBase.username = '';
+        apiBase.password = '';
+        apiBase.search = '';
+        apiBase.hash = '';
+        described.provider_assertions.api_base = apiBase.toString();
+      } catch {
+        described.provider_assertions.api_base = '[REDACTED]';
+      }
     }
 
     return described;

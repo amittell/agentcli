@@ -1,5 +1,27 @@
 import { MANIFEST_VERSION } from './schema.js';
 import { onFailureTaskId } from './shorthand.js';
+import { getProvider as getIdentityProvider } from './identity/index.js';
+import { getVerifier } from './authorization-proof/index.js';
+import { getAuthorizationProvider } from './authorization/index.js';
+import { getEvidenceProvider } from './evidence/index.js';
+import './identity/none.js';
+import './identity/env-bearer.js';
+import './identity/file-bearer.js';
+import './identity/oidc-client-credentials.js';
+import './identity/oidc-token-exchange.js';
+import './identity/azure-managed-identity.js';
+import './identity/aws-sts-assume-role.js';
+import './identity/gcp-workload-identity.js';
+import './identity/spiffe-jwt-svid.js';
+import './identity/entra-agent-id.js';
+import './authorization-proof/none.js';
+import './authorization-proof/jwt.js';
+import './authorization-proof/detached-signature.js';
+import './authorization-proof/certificate.js';
+import './authorization/none.js';
+import './authorization/opa.js';
+import './evidence/none.js';
+import './evidence/ssh.js';
 
 const SUPPORTED_VERSIONS = ['0.1', MANIFEST_VERSION];
 const TRUST_LEVELS = ['untrusted', 'restricted', 'supervised', 'autonomous'];
@@ -8,6 +30,7 @@ const CHILD_CREDENTIAL_POLICIES = ['none', 'inherit', 'downscope', 'independent'
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TOKEN_RE = /^[A-Za-z0-9@:_./-]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const FILE_PREFIX_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
 const KNOWN_MANIFEST_KEYS = new Set([
   'version', 'workflows',
@@ -37,6 +60,51 @@ const KNOWN_ON_FAILURE_KEYS = new Set([
   'authorization_proof', 'authorization', 'evidence'
 ]);
 
+const V2_KEYS = Object.freeze({
+  target: new Set(['session_target', 'agent_id', 'payload_kind']),
+  shell: new Set(['program', 'args', 'env', 'cwd', 'stdin']),
+  modelPolicy: new Set(['provider', 'model', 'thinking']),
+  intent: new Set(['mode', 'read_only']),
+  output: new Set(['preview_bytes', 'offload', 'retrieve', 'format']),
+  budgets: new Set(['max_iterations', 'max_fanout', 'max_context_items', 'max_pending_approvals', 'max_queued_dispatches']),
+  schedule: new Set(['cron', 'tz']),
+  trigger: new Set(['parent', 'on', 'delay_s', 'condition']),
+  delivery: new Set(['mode', 'channel', 'to']),
+  reliability: new Set(['guarantee', 'max_retries', 'overlap_policy']),
+  runtime: new Set(['timeout_ms']),
+  approval: new Set(['required', 'policy', 'risk_level', 'approver_scope', 'timeout_s', 'auto']),
+  context: new Set(['retrieval', 'limit']),
+  session: new Set(['preferred_key']),
+  subject: new Set(['kind', 'principal', 'display_name', 'run_as', 'issuer', 'delegation_mode', 'attributes']),
+  auth: new Set(['mode', 'scopes', 'audience', 'resource', 'cache', 'refresh', 'required', 'delegation_policy', 'provider_config', 'inputs']),
+  delegationPolicy: new Set(['max_depth', 'allowed_delegators', 'require_grant_per_hop']),
+  trust: new Set(['level', 'constraints']),
+  trustConstraints: new Set(['escalation', 'max_autonomy', 'escalation_timeout', 'require_justification']),
+  presentation: new Set(['bindings', 'handoff', 'cleanup', 'default_redaction']),
+  presentationBinding: new Set(['source', 'target', 'required', 'redact', 'format']),
+  presentationTarget: new Set(['kind', 'name', 'prefix', 'expose_as']),
+  identity: new Set(['ref', 'scope', 'subject', 'auth', 'trust', 'presentation']),
+  contract: new Set(['sandbox', 'allowed_paths', 'network', 'max_cost_usd', 'audit', 'required_trust_level', 'trust_enforcement']),
+  authorizationProofRef: new Set(['ref', 'claims', 'verify']),
+  authorizationRef: new Set(['ref', 'provider_config', 'on_error', 'request', 'decision']),
+  authorizationRequest: new Set(['include']),
+  authorizationDecision: new Set(['allow_values', 'deny_values', 'escalate_values']),
+  evidenceRef: new Set(['ref', 'payload', 'verify']),
+  evidencePayload: new Set(['bind', 'context', 'format']),
+  requiredVerify: new Set(['required']),
+  verify: new Set(['shell', 'timeout_seconds', 'on_failure']),
+  valueFrom: new Set(['env', 'file', 'literal', 'command']),
+  proof: new Set(['value_from']),
+  identityProfile: new Set(['id', 'provider', 'subject', 'auth', 'trust', 'presentation', 'provider_config']),
+  authorizationProofProfile: new Set([
+    'id', 'method', 'issuer', 'audience', 'jwks_uri', 'public_key',
+    'allowed_signers', 'principal', 'namespace', 'ca_certificate', 'ca_certificate_from',
+    'proof', 'claims', 'verify'
+  ]),
+  authorizationProfile: new Set(['id', 'provider', 'provider_config', 'on_error', 'request', 'decision']),
+  evidenceProfile: new Set(['id', 'provider', 'methods', 'provider_config', 'payload', 'verify']),
+});
+
 function isObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -50,6 +118,15 @@ function checkUnknownKeys(warnings, path, value, knownKeys) {
   for (const key of Object.keys(value)) {
     if (!knownKeys.has(key)) {
       warnings.push({ path: `${path}.${key}`, message: `unknown key "${key}"` });
+    }
+  }
+}
+
+function rejectUnknownKeys(errors, path, value, knownKeys) {
+  if (!isObject(value)) return;
+  for (const key of Object.keys(value)) {
+    if (!knownKeys.has(key)) {
+      addError(errors, `${path}.${key}`, `unknown key "${key}" is not allowed in a v0.2 manifest`);
     }
   }
 }
@@ -307,6 +384,12 @@ function validateAuth(errors, path, value) {
   checkEnum(errors, `${path}.cache`, value.cache, ['none', 'memory', 'state']);
   checkEnum(errors, `${path}.refresh`, value.refresh, ['never', 'manual', 'auto']);
   checkBoolean(errors, `${path}.required`, value.required);
+  if (value.provider_config != null && !isObject(value.provider_config)) {
+    addError(errors, `${path}.provider_config`, 'must be an object');
+  }
+  if (value.inputs != null && !isObject(value.inputs)) {
+    addError(errors, `${path}.inputs`, 'must be an object');
+  }
   if (checkOptionalObject(errors, `${path}.delegation_policy`, value.delegation_policy)) {
     validateDelegationPolicy(errors, `${path}.delegation_policy`, value.delegation_policy);
   }
@@ -339,6 +422,18 @@ function validatePresentation(errors, path, value) {
         if (checkOptionalObject(errors, `${bp}.target`, binding.target)) {
           checkEnum(errors, `${bp}.target.kind`, binding.target.kind, ['env', 'file', 'stdin', 'none']);
           checkString(errors, `${bp}.target.name`, binding.target.name, { required: false });
+          checkString(errors, `${bp}.target.prefix`, binding.target.prefix, { required: false });
+          if (binding.target.prefix != null &&
+              typeof binding.target.prefix === 'string' &&
+              !FILE_PREFIX_RE.test(binding.target.prefix)) {
+            addError(errors, `${bp}.target.prefix`, 'must be a safe file prefix of at most 80 characters');
+          }
+          checkString(errors, `${bp}.target.expose_as`, binding.target.expose_as, { required: false });
+          if (binding.target.expose_as != null &&
+              typeof binding.target.expose_as === 'string' &&
+              !ENV_NAME_RE.test(binding.target.expose_as)) {
+            addError(errors, `${bp}.target.expose_as`, 'must be a valid environment variable name');
+          }
         }
         checkBoolean(errors, `${bp}.required`, binding.required);
         checkBoolean(errors, `${bp}.redact`, binding.redact);
@@ -637,7 +732,7 @@ function validateVerify(errors, path, value) {
   checkEnum(errors, `${path}.on_failure`, value.on_failure, ['error', 'warn']);
 }
 
-function validateOnFailure(errors, warnings, path, task) {
+function validateOnFailure(errors, warnings, path, task, { strictUnknown = false } = {}) {
   if (task.on_failure == null) return;
   if (!isObject(task.on_failure)) {
     addError(errors, path, 'must be an object');
@@ -645,7 +740,7 @@ function validateOnFailure(errors, warnings, path, task) {
   }
 
   const handler = task.on_failure;
-  checkUnknownKeys(warnings, path, handler, KNOWN_ON_FAILURE_KEYS);
+  if (!strictUnknown) checkUnknownKeys(warnings, path, handler, KNOWN_ON_FAILURE_KEYS);
   checkIdentifier(errors, `${path}.id`, handler.id, { required: false });
   checkString(errors, `${path}.name`, handler.name, { required: false });
   checkBoolean(errors, `${path}.enabled`, handler.enabled);
@@ -659,6 +754,253 @@ function validateOnFailure(errors, warnings, path, task) {
   const inferredSessionTarget = handler.target?.session_target || (handler.shell ? 'shell' : 'isolated');
   validateExecutionSurface(errors, path, handler, inferredSessionTarget);
   validateOptionalBlocks(errors, warnings, path, handler);
+}
+
+function validateV2IdentityUnknownKeys(errors, path, identity) {
+  rejectUnknownKeys(errors, path, identity, V2_KEYS.identity);
+  if (!isObject(identity)) return;
+
+  rejectUnknownKeys(errors, `${path}.subject`, identity.subject, V2_KEYS.subject);
+  rejectUnknownKeys(errors, `${path}.auth`, identity.auth, V2_KEYS.auth);
+  if (isObject(identity.auth)) {
+    rejectUnknownKeys(
+      errors,
+      `${path}.auth.delegation_policy`,
+      identity.auth.delegation_policy,
+      V2_KEYS.delegationPolicy
+    );
+  }
+  rejectUnknownKeys(errors, `${path}.trust`, identity.trust, V2_KEYS.trust);
+  if (isObject(identity.trust)) {
+    rejectUnknownKeys(
+      errors,
+      `${path}.trust.constraints`,
+      identity.trust.constraints,
+      V2_KEYS.trustConstraints
+    );
+  }
+  rejectUnknownKeys(errors, `${path}.presentation`, identity.presentation, V2_KEYS.presentation);
+  if (Array.isArray(identity.presentation?.bindings)) {
+    for (const [index, binding] of identity.presentation.bindings.entries()) {
+      const bindingPath = `${path}.presentation.bindings[${index}]`;
+      rejectUnknownKeys(errors, bindingPath, binding, V2_KEYS.presentationBinding);
+      if (isObject(binding)) {
+        rejectUnknownKeys(errors, `${bindingPath}.target`, binding.target, V2_KEYS.presentationTarget);
+      }
+    }
+  }
+}
+
+function validateV2AuthorizationProofUnknownKeys(errors, path, declaration) {
+  rejectUnknownKeys(errors, path, declaration, V2_KEYS.authorizationProofRef);
+  if (isObject(declaration)) {
+    rejectUnknownKeys(errors, `${path}.verify`, declaration.verify, V2_KEYS.requiredVerify);
+  }
+}
+
+function validateV2AuthorizationUnknownKeys(errors, path, declaration) {
+  rejectUnknownKeys(errors, path, declaration, V2_KEYS.authorizationRef);
+  if (!isObject(declaration)) return;
+  rejectUnknownKeys(errors, `${path}.request`, declaration.request, V2_KEYS.authorizationRequest);
+  rejectUnknownKeys(errors, `${path}.decision`, declaration.decision, V2_KEYS.authorizationDecision);
+}
+
+function validateV2EvidenceUnknownKeys(errors, path, declaration) {
+  rejectUnknownKeys(errors, path, declaration, V2_KEYS.evidenceRef);
+  if (!isObject(declaration)) return;
+  rejectUnknownKeys(errors, `${path}.payload`, declaration.payload, V2_KEYS.evidencePayload);
+  rejectUnknownKeys(errors, `${path}.verify`, declaration.verify, V2_KEYS.requiredVerify);
+}
+
+function validateV2CommonUnknownKeys(errors, path, value) {
+  if (!isObject(value)) return;
+  rejectUnknownKeys(errors, `${path}.target`, value.target, V2_KEYS.target);
+  rejectUnknownKeys(errors, `${path}.shell`, value.shell, V2_KEYS.shell);
+  rejectUnknownKeys(errors, `${path}.model_policy`, value.model_policy, V2_KEYS.modelPolicy);
+  rejectUnknownKeys(errors, `${path}.intent`, value.intent, V2_KEYS.intent);
+  rejectUnknownKeys(errors, `${path}.output`, value.output, V2_KEYS.output);
+  rejectUnknownKeys(errors, `${path}.budgets`, value.budgets, V2_KEYS.budgets);
+  rejectUnknownKeys(errors, `${path}.delivery`, value.delivery, V2_KEYS.delivery);
+  rejectUnknownKeys(errors, `${path}.reliability`, value.reliability, V2_KEYS.reliability);
+  rejectUnknownKeys(errors, `${path}.runtime`, value.runtime, V2_KEYS.runtime);
+  rejectUnknownKeys(errors, `${path}.approval`, value.approval, V2_KEYS.approval);
+  rejectUnknownKeys(errors, `${path}.context`, value.context, V2_KEYS.context);
+  rejectUnknownKeys(errors, `${path}.session`, value.session, V2_KEYS.session);
+  validateV2IdentityUnknownKeys(errors, `${path}.identity`, value.identity);
+  rejectUnknownKeys(errors, `${path}.contract`, value.contract, V2_KEYS.contract);
+  validateV2AuthorizationProofUnknownKeys(errors, `${path}.authorization_proof`, value.authorization_proof);
+  validateV2AuthorizationUnknownKeys(errors, `${path}.authorization`, value.authorization);
+  validateV2EvidenceUnknownKeys(errors, `${path}.evidence`, value.evidence);
+  rejectUnknownKeys(errors, `${path}.verify`, value.verify, V2_KEYS.verify);
+}
+
+function validateV2UnknownKeys(errors, manifest) {
+  rejectUnknownKeys(errors, '$', manifest, KNOWN_MANIFEST_KEYS);
+
+  if (Array.isArray(manifest.identity_profiles)) {
+    for (const [index, profile] of manifest.identity_profiles.entries()) {
+      const path = `$.identity_profiles[${index}]`;
+      rejectUnknownKeys(errors, path, profile, V2_KEYS.identityProfile);
+      if (!isObject(profile)) continue;
+      validateV2IdentityUnknownKeys(errors, path, {
+        subject: profile.subject,
+        auth: profile.auth,
+        trust: profile.trust,
+        presentation: profile.presentation,
+      });
+    }
+  }
+
+  if (Array.isArray(manifest.authorization_proof_profiles)) {
+    for (const [index, profile] of manifest.authorization_proof_profiles.entries()) {
+      const path = `$.authorization_proof_profiles[${index}]`;
+      rejectUnknownKeys(errors, path, profile, V2_KEYS.authorizationProofProfile);
+      if (!isObject(profile)) continue;
+      rejectUnknownKeys(errors, `${path}.proof`, profile.proof, V2_KEYS.proof);
+      if (isObject(profile.proof)) {
+        rejectUnknownKeys(errors, `${path}.proof.value_from`, profile.proof.value_from, V2_KEYS.valueFrom);
+      }
+      rejectUnknownKeys(errors, `${path}.ca_certificate_from`, profile.ca_certificate_from, V2_KEYS.valueFrom);
+      rejectUnknownKeys(errors, `${path}.verify`, profile.verify, V2_KEYS.requiredVerify);
+    }
+  }
+
+  if (Array.isArray(manifest.authorization_profiles)) {
+    for (const [index, profile] of manifest.authorization_profiles.entries()) {
+      const path = `$.authorization_profiles[${index}]`;
+      rejectUnknownKeys(errors, path, profile, V2_KEYS.authorizationProfile);
+      if (!isObject(profile)) continue;
+      rejectUnknownKeys(errors, `${path}.request`, profile.request, V2_KEYS.authorizationRequest);
+      rejectUnknownKeys(errors, `${path}.decision`, profile.decision, V2_KEYS.authorizationDecision);
+    }
+  }
+
+  if (Array.isArray(manifest.evidence_profiles)) {
+    for (const [index, profile] of manifest.evidence_profiles.entries()) {
+      const path = `$.evidence_profiles[${index}]`;
+      rejectUnknownKeys(errors, path, profile, V2_KEYS.evidenceProfile);
+      if (!isObject(profile)) continue;
+      rejectUnknownKeys(errors, `${path}.payload`, profile.payload, V2_KEYS.evidencePayload);
+      rejectUnknownKeys(errors, `${path}.verify`, profile.verify, V2_KEYS.requiredVerify);
+    }
+  }
+
+  if (!Array.isArray(manifest.workflows)) return;
+  for (const [workflowIndex, workflow] of manifest.workflows.entries()) {
+    const workflowPath = `$.workflows[${workflowIndex}]`;
+    rejectUnknownKeys(errors, workflowPath, workflow, KNOWN_WORKFLOW_KEYS);
+    if (!isObject(workflow)) continue;
+    validateV2CommonUnknownKeys(errors, workflowPath, workflow);
+
+    if (!Array.isArray(workflow.tasks)) continue;
+    for (const [taskIndex, task] of workflow.tasks.entries()) {
+      const taskPath = `${workflowPath}.tasks[${taskIndex}]`;
+      rejectUnknownKeys(errors, taskPath, task, KNOWN_TASK_KEYS);
+      if (!isObject(task)) continue;
+      validateV2CommonUnknownKeys(errors, taskPath, task);
+      rejectUnknownKeys(errors, `${taskPath}.schedule`, task.schedule, V2_KEYS.schedule);
+      rejectUnknownKeys(errors, `${taskPath}.trigger`, task.trigger, V2_KEYS.trigger);
+      if (isObject(task.on_failure)) {
+        const failurePath = `${taskPath}.on_failure`;
+        rejectUnknownKeys(errors, failurePath, task.on_failure, KNOWN_ON_FAILURE_KEYS);
+        validateV2CommonUnknownKeys(errors, failurePath, task.on_failure);
+      }
+    }
+  }
+}
+
+const STRUCTURAL_PROVIDER_CONTEXT = Object.freeze({
+  structural: true,
+  allowInsecure: false,
+  resolveCredentials: false,
+  performIo: false,
+});
+
+function applyStructuralProfileValidation(errors, path, profile, component) {
+  if (typeof component?.validateProfile !== 'function') return;
+
+  let result;
+  try {
+    result = component.validateProfile(profile, STRUCTURAL_PROVIDER_CONTEXT);
+  } catch (err) {
+    addError(errors, path, `provider structural validation failed: ${err.message}`);
+    return;
+  }
+
+  if (result && typeof result.then === 'function') {
+    addError(errors, path, 'provider validateProfile must be synchronous and must not perform I/O');
+    return;
+  }
+  if (!result || result.valid !== false) return;
+
+  const providerErrors = Array.isArray(result.errors) && result.errors.length > 0
+    ? result.errors
+    : ['provider rejected the profile'];
+  for (const providerError of providerErrors) {
+    if (typeof providerError === 'string') {
+      addError(errors, path, providerError);
+      continue;
+    }
+    const field = typeof providerError?.field === 'string' && providerError.field
+      ? `.${providerError.field}`
+      : '';
+    addError(errors, `${path}${field}`, providerError?.message || 'provider rejected the profile');
+  }
+}
+
+function validateV2ProfileProviders(errors, manifest) {
+  const identityProfiles = Array.isArray(manifest.identity_profiles) ? manifest.identity_profiles : [];
+  const proofProfiles = Array.isArray(manifest.authorization_proof_profiles)
+    ? manifest.authorization_proof_profiles
+    : [];
+  const authorizationProfiles = Array.isArray(manifest.authorization_profiles)
+    ? manifest.authorization_profiles
+    : [];
+  const evidenceProfiles = Array.isArray(manifest.evidence_profiles) ? manifest.evidence_profiles : [];
+
+  for (const [index, profile] of identityProfiles.entries()) {
+    if (!isObject(profile) || typeof profile.provider !== 'string' || !profile.provider) continue;
+    const path = `$.identity_profiles[${index}]`;
+    const provider = getIdentityProvider(profile.provider);
+    if (!provider) {
+      addError(errors, `${path}.provider`, `unknown identity provider "${profile.provider}"`);
+      continue;
+    }
+    applyStructuralProfileValidation(errors, path, profile, provider);
+  }
+
+  for (const [index, profile] of proofProfiles.entries()) {
+    if (!isObject(profile) || typeof profile.method !== 'string' || !profile.method) continue;
+    const path = `$.authorization_proof_profiles[${index}]`;
+    const verifier = getVerifier(profile.method);
+    if (!verifier) {
+      addError(errors, `${path}.method`, `unknown authorization proof verifier "${profile.method}"`);
+      continue;
+    }
+    applyStructuralProfileValidation(errors, path, profile, verifier);
+  }
+
+  for (const [index, profile] of authorizationProfiles.entries()) {
+    if (!isObject(profile) || typeof profile.provider !== 'string' || !profile.provider) continue;
+    const path = `$.authorization_profiles[${index}]`;
+    const provider = getAuthorizationProvider(profile.provider);
+    if (!provider) {
+      addError(errors, `${path}.provider`, `unknown authorization provider "${profile.provider}"`);
+      continue;
+    }
+    applyStructuralProfileValidation(errors, path, profile, provider);
+  }
+
+  for (const [index, profile] of evidenceProfiles.entries()) {
+    if (!isObject(profile) || typeof profile.provider !== 'string' || !profile.provider) continue;
+    const path = `$.evidence_profiles[${index}]`;
+    const provider = getEvidenceProvider(profile.provider);
+    if (!provider) {
+      addError(errors, `${path}.provider`, `unknown evidence provider "${profile.provider}"`);
+      continue;
+    }
+    applyStructuralProfileValidation(errors, path, profile, provider);
+  }
 }
 
 function compareTrustLevels(a, b) {
@@ -714,7 +1056,9 @@ export function validateManifest(manifest) {
     addError(errors, '$.version', `must be one of: ${SUPPORTED_VERSIONS.join(', ')}`);
   }
 
-  checkUnknownKeys(warnings, '$', manifest, KNOWN_MANIFEST_KEYS);
+  if (manifest.version !== MANIFEST_VERSION) {
+    checkUnknownKeys(warnings, '$', manifest, KNOWN_MANIFEST_KEYS);
+  }
 
   // Validate v0.2 profile arrays
   if (manifest.identity_profiles != null) {
@@ -727,6 +1071,9 @@ export function validateManifest(manifest) {
         if (!isObject(profile)) { addError(errors, pp, 'must be an object'); continue; }
         checkIdentifier(errors, `${pp}.id`, profile.id);
         checkString(errors, `${pp}.provider`, profile.provider);
+        if (profile.provider_config != null && !isObject(profile.provider_config)) {
+          addError(errors, `${pp}.provider_config`, 'must be an object');
+        }
         if (profile.id) {
           if (profileIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
           profileIds.add(profile.id);
@@ -765,9 +1112,21 @@ export function validateManifest(manifest) {
         checkString(errors, `${pp}.audience`, profile.audience, { required: false });
         checkString(errors, `${pp}.jwks_uri`, profile.jwks_uri, { required: false });
         checkString(errors, `${pp}.public_key`, profile.public_key, { required: false });
+        checkString(errors, `${pp}.allowed_signers`, profile.allowed_signers, { required: false });
+        checkString(errors, `${pp}.principal`, profile.principal, { required: false });
+        checkString(errors, `${pp}.namespace`, profile.namespace, { required: false });
+        checkString(errors, `${pp}.ca_certificate`, profile.ca_certificate, { required: false });
+        if (checkOptionalObject(errors, `${pp}.ca_certificate_from`, profile.ca_certificate_from)) {
+          validateValueFrom(errors, `${pp}.ca_certificate_from`, profile.ca_certificate_from);
+        }
         if (checkOptionalObject(errors, `${pp}.proof`, profile.proof)) {
           if (checkOptionalObject(errors, `${pp}.proof.value_from`, profile.proof.value_from)) {
-            validateValueFrom(errors, `${pp}.proof.value_from`, profile.proof.value_from);
+            validateValueFrom(
+              errors,
+              `${pp}.proof.value_from`,
+              profile.proof.value_from,
+              { allowLiteral: false }
+            );
           }
         }
         if (profile.claims != null && !isObject(profile.claims)) {
@@ -851,7 +1210,9 @@ export function validateManifest(manifest) {
         addError(errors, workflowPath, 'must be an object');
         continue;
       }
-      checkUnknownKeys(warnings, workflowPath, workflow, KNOWN_WORKFLOW_KEYS);
+      if (manifest.version !== MANIFEST_VERSION) {
+        checkUnknownKeys(warnings, workflowPath, workflow, KNOWN_WORKFLOW_KEYS);
+      }
       checkIdentifier(errors, `${workflowPath}.id`, workflow.id);
       checkString(errors, `${workflowPath}.name`, workflow.name);
       if (checkOptionalObject(errors, `${workflowPath}.model_policy`, workflow.model_policy)) {
@@ -893,7 +1254,9 @@ export function validateManifest(manifest) {
           continue;
         }
 
-        checkUnknownKeys(warnings, taskPath, task, KNOWN_TASK_KEYS);
+        if (manifest.version !== MANIFEST_VERSION) {
+          checkUnknownKeys(warnings, taskPath, task, KNOWN_TASK_KEYS);
+        }
         checkIdentifier(errors, `${taskPath}.id`, task.id);
         checkString(errors, `${taskPath}.name`, task.name);
         checkBoolean(errors, `${taskPath}.enabled`, task.enabled);
@@ -951,7 +1314,13 @@ export function validateManifest(manifest) {
             message: 'shell targets do not get a first-class planning boundary in every backend; intent may be advisory only'
           });
         }
-        validateOnFailure(errors, warnings, `${taskPath}.on_failure`, task);
+        validateOnFailure(
+          errors,
+          warnings,
+          `${taskPath}.on_failure`,
+          task,
+          { strictUnknown: manifest.version === MANIFEST_VERSION }
+        );
       }
 
       const validTaskIds = new Set(workflow.tasks.filter(isObject).map(task => task.id).filter(Boolean));
@@ -994,12 +1363,25 @@ export function validateManifest(manifest) {
     }
   }
 
+  if (manifest.version === MANIFEST_VERSION) {
+    validateV2UnknownKeys(errors, manifest);
+    validateV2ProfileProviders(errors, manifest);
+  }
+
   // Cross-reference validation: verify ref targets exist in profile arrays
-  const identityProfileIds = new Set((manifest.identity_profiles || []).filter(p => p.id).map(p => p.id));
-  const identityProfilesById = new Map((manifest.identity_profiles || []).filter(p => p.id).map(p => [p.id, p]));
-  const proofProfileIds = new Set((manifest.authorization_proof_profiles || []).filter(p => p.id).map(p => p.id));
-  const authzProfileIds = new Set((manifest.authorization_profiles || []).filter(p => p.id).map(p => p.id));
-  const evidProfileIds = new Set((manifest.evidence_profiles || []).filter(p => p.id).map(p => p.id));
+  const identityProfiles = Array.isArray(manifest.identity_profiles) ? manifest.identity_profiles : [];
+  const proofProfiles = Array.isArray(manifest.authorization_proof_profiles)
+    ? manifest.authorization_proof_profiles
+    : [];
+  const authorizationProfiles = Array.isArray(manifest.authorization_profiles)
+    ? manifest.authorization_profiles
+    : [];
+  const evidenceProfiles = Array.isArray(manifest.evidence_profiles) ? manifest.evidence_profiles : [];
+  const identityProfileIds = new Set(identityProfiles.filter(p => isObject(p) && p.id).map(p => p.id));
+  const identityProfilesById = new Map(identityProfiles.filter(p => isObject(p) && p.id).map(p => [p.id, p]));
+  const proofProfileIds = new Set(proofProfiles.filter(p => isObject(p) && p.id).map(p => p.id));
+  const authzProfileIds = new Set(authorizationProfiles.filter(p => isObject(p) && p.id).map(p => p.id));
+  const evidProfileIds = new Set(evidenceProfiles.filter(p => isObject(p) && p.id).map(p => p.id));
   const trustSatisfiabilityErrors = new Set();
 
   function checkRef(refPath, ref, profileSet, profileType) {

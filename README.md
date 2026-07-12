@@ -114,7 +114,7 @@ AGENTCLI_SCHEDULER_DB=~/.openclaw/scheduler/scheduler.db \
   agentcli inspect jobs --fields id,name,last_status
 ```
 
-Node 22.5.0 or newer is required. Scheduler inspection uses `node:sqlite`, which became stable in Node 23.4.0.
+Node 22.13.0 or newer is required. The minimum is tested in CI alongside the current Node 24 line.
 
 ## Why Teams Use It
 
@@ -127,6 +127,20 @@ Node 22.5.0 or newer is required. Scheduler inspection uses `node:sqlite`, which
 - one path from local execution to durable scheduler-backed execution
 
 If you are trying to add controls to an existing loop, start with `agentcli` alone. Add `openclaw-scheduler` when you need durable runtime behavior.
+
+### Security and execution guarantees
+
+- `exec --dry-run` is a static preview. It does not consume approvals, run proof commands, resolve providers, call token or policy endpoints, probe a sandbox, materialize credentials, sign evidence, execute postconditions, or write audit records.
+- Manual approvals are single-use and bind the complete effective execution configuration, including the manifest digest, resolved profiles, command argument hashes, declared environment and stdin hashes, contract, verification, proof, evidence, and approval policy. `approver_scope` and `timeout_s` are enforced. Unexpected unsigned approval records are rejected; unsigned grants exist only when signing was explicitly disabled.
+- Every non-`none` authorization proof is cryptographically verified and bound to the canonical manifest. JWT, detached-signature, and certificate declarations fail closed when their trust material or manifest binding is missing.
+- Evidence uses a versioned canonical payload bound to the manifest, effective task, identity, command, result, and postcondition. Verification detects an envelope copied to another execution.
+- Requested filesystem or network isolation fails closed when the host cannot enforce it. Use a container or a runtime with the needed isolation capabilities for production workloads.
+- Child processes inherit only a small operational allowlist such as PATH, HOME, temporary-directory, locale, shell, user, timezone, terminal, and Windows equivalents. Every other ambient variable requires explicit `shell.env` declaration or identity-provider materialization.
+- Never put credentials in `shell.args` or prompts. Arguments remain executable payload and may be visible in process listings; prompts may be persisted by a durable runtime. Use identity-provider env, file, or stdin materialization.
+- `agentcli run` skips disabled roots, descendants, and failure handlers. It remains a local, non-durable shell DAG runner.
+- Durable scheduler apply refuses `shell.env` and `shell.stdin` because persisting credential-bearing values in scheduler job records would cross the trust boundary. Use runtime identity materialization instead.
+
+Dry-run and governance inspection are deliberately separate. Use `identity resolve`, `identity validate-delegation`, `authorization-proof verify`, or `authorization evaluate` when you intentionally want a live, read-only governance check without spawning the target command. Those commands may read declared proof or credential sources and contact configured identity, JWKS, or policy endpoints; they do not generate execution evidence or audit records.
 
 ## Better Together
 
@@ -155,7 +169,7 @@ For example, [flyctl-ops.json](examples/flyctl-ops.json) wraps a simple `flyctl 
 
 ```bash
 agentcli validate examples/flyctl-ops.json
-agentcli exec examples/flyctl-ops.json check-app-status --dry-run --identity-debug
+agentcli identity resolve examples/flyctl-ops.json check-app-status
 agentcli compile examples/flyctl-ops.json --target openclaw-scheduler --explain
 ```
 
@@ -203,7 +217,7 @@ This works with any CLI that prints a credential to stdout: Vault, 1Password, AW
 Stripe Projects, Doppler, macOS Keychain, and others. See
 [stripe-projects.json](examples/stripe-projects.json) for a full example and
 [docs/guide-identity.md](docs/guide-identity.md#dynamic-credential-acquisition) for the
-complete reference.
+complete reference. Command-based proof acquisition is disabled during scheduler apply unless the caller explicitly enables it; `exec` runs a declared proof command only after any manual approval gate succeeds.
 
 ## Core Model
 
@@ -287,7 +301,7 @@ For the full guide: [Identity Setup](docs/guide-identity.md) | [Wrapping CLI Too
 | `azure-managed-identity` | Acquires a token from the Azure Instance Metadata Service (IMDS). Works on Azure VMs, App Service, and Container Instances. |
 | `aws-sts-assume-role` | Assumes an AWS IAM role via STS and returns temporary credentials. Includes AWS Signature V4 signing. |
 | `gcp-workload-identity` | Acquires a token from the GCP metadata server. Works on Compute Engine, Cloud Run, and GKE. |
-| `spiffe-jwt-svid` | Acquires a JWT-SVID from the SPIFFE Workload API or a projected volume file. Works in SPIFFE-enabled Kubernetes clusters. |
+| `spiffe-jwt-svid` | Reads a file-mounted JWT-SVID and verifies its issuer, audience, lifetime, subject, and signature against exactly one local trust source. Workload API sockets are not accepted. |
 | `entra-agent-id` | Acquires a token via Microsoft Entra Agent ID using JWT bearer client assertion. Supports Agent Registry, Conditional Access, and IMDS fallback. |
 | `stripe-api-key` | Resolves Stripe API keys with scope-aware permissions. Supports precreated restricted keys by scope name and dynamic key minting via the Stripe API. |
 
@@ -305,6 +319,8 @@ Authorization proof verifies that the manifest itself was approved before execut
 | `certificate` | Manifest approval via an X.509 certificate chain. |
 
 Use `agentcli authorization-proof methods` to list available methods and `agentcli authorization-proof schema <method>` to inspect verifier metadata for a method.
+
+`jwt`, `detached-signature`, and `certificate` are always cryptographic, manifest-bound checks. `verify.required: false` does not turn a non-`none` method into a claims-only or presence-only check. Use `method: "none"` when a declaration is intentionally informational and unverifiable.
 
 ## Authorization Providers
 
@@ -324,6 +340,8 @@ Use `agentcli authorization providers` to list registered providers and `agentcl
 
 Use `agentcli evidence providers` to list registered providers and `agentcli evidence schema <provider>` to inspect provider metadata.
 
+Evidence envelopes retain the complete versioned payload needed for later verification. The payload contains hashes and audit-safe descriptors, not raw credential values, stdin, stdout, or stderr.
+
 ## Signing Providers
 
 `agentcli exec` and `agentcli run` use signing providers for execution attestations.
@@ -339,7 +357,7 @@ Use `agentcli signing providers` to list the registered signing providers and th
 | `version` | Show package and manifest spec version. |
 | `init [--tool program] [--output path] [--workflow-id id] [--task-id id]` | Initialize agentcli home directory with starter manifests. |
 | `paths` | Show resolved agentcli home, manifest, output, state, and audit paths. |
-| `schema [target]` | Emit JSON schema for manifest, workflow, task, schedulerJob, standalonePlan, rpcRequest, or rpcResponse. |
+| `schema [target] [--legacy]` | Emit Draft 2020-12 JSON Schema for manifest, workflow, task, schedulerJob, standalonePlan, rpcRequest, or rpcResponse. `--legacy` opts into the older agentcli descriptor format. |
 | `describe [target]` | Describe manifest, workflow, task, targets, commands, or rpc surfaces as structured JSON. |
 | `targets` | List available compilation targets. |
 | `skill-path` | Print the path to the agentcli skill manifest for MCP tool registration. |
@@ -366,6 +384,7 @@ Use `agentcli signing providers` to list the registered signing providers and th
 
 - It only executes tasks with `target.session_target: "shell"`.
 - It runs one workflow DAG locally from a selected scheduled root, or from every root when `--all-roots` is set.
+- It skips every task whose effective `enabled` value is `false`, including roots, triggered descendants, and failure handlers.
 - It does not add queueing, retries, or durable state. Approval gates declared on tasks are enforced through the same local mechanism that `exec` uses.
 - Manifests that include `main` or `isolated` tasks still need a runtime adapter such as `openclaw-scheduler`.
 
@@ -373,17 +392,17 @@ Use `agentcli signing providers` to list the registered signing providers and th
 
 | Command | Description |
 |---|---|
-| `approve <path> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--signer ssh\|none] [--signing-key path]` | Grant a single-use local approval for a gated task. Writes an ssh-signed record bound to the exact task hash to `~/.agentcli/state/approvals.ndjson`. |
+| `approve <path> <task-id> [--workflow id] [--by principal] [--reason text] [--ttl-s seconds] [--signer ssh\|none] [--signing-key path]` | Grant a single-use local approval for a gated task. Writes a signed record bound to the complete effective execution hash to `~/.agentcli/state/approvals.ndjson`. |
 | `approvals list [--status pending\|consumed\|expired\|revoked\|all] [--workflow id] [--task id]` | List approval records with current status, approver, reason, and signature metadata. |
 | `approvals revoke <approval-id> [--by principal] [--reason text]` | Revoke a pending approval. |
 
 `agentcli exec` enforces `approval.policy` at runtime:
 
-- `manual`: exec refuses (`error_type: approval_required`) unless a matching, unconsumed, unrevoked, unexpired approval record exists. The grant's task hash must match the exact task (workflow id, task id, `shell.program`, `shell.args`, `shell.cwd`, `identity.ref`, policy, risk level). Any drift invalidates prior grants.
-- `auto-reject`: exec refuses unconditionally (`error_type: approval_auto_rejected`). Grants cannot override.
+- `manual`: exec refuses (`code: approval_required`, `error_type: validation_error`) unless a matching, unconsumed, unrevoked, unexpired approval record exists. The grant binds the canonical manifest and complete effective execution configuration, including profiles, command inputs, identity, contract, verify, proof, evidence, and approval settings. Any bound drift invalidates prior grants. The approver must satisfy `approver_scope`, and grant lifetime cannot exceed `timeout_s`.
+- `auto-reject`: exec refuses unconditionally (`code: approval_auto_rejected`, `error_type: validation_error`). Grants cannot override.
 - `auto-approve` or absent: exec proceeds without an approval record.
 
-Approvals are single-use and consumed before `spawnSync` (fail-closed: a crashed execution still consumes the grant). `--dry-run` bypasses the gate without consuming anything. Successful gated executions include `approval_used` in both the result payload and the audit record. The local mechanism is single-machine; durable cron-triggered approvals remain owned by `openclaw-scheduler`.
+Approvals are single-use and consumed before `spawnSync` (fail-closed: a crashed execution still consumes the grant). Unexpected unsigned records fail verification; `--signer none` is the only explicit unsigned mode. `--dry-run` is a static preview and does not consume or enforce the gate. Successful gated executions include `approval_used` in both the result payload and the audit record. The local mechanism is single-machine; durable cron-triggered approvals remain owned by `openclaw-scheduler`.
 
 ### Identity and Authorization
 
@@ -453,7 +472,7 @@ Approvals are single-use and consumed before `spawnSync` (fail-closed: a crashed
 
 `agentcli serve` exposes the full command surface over stdio JSON-RPC 2.0. This is the preferred integration point for agent systems that need programmatic access without shell parsing.
 
-The server emits an `agentcli.ready` notification on startup. Use `agentcli describe rpc` to inspect the machine-readable method and notification surface.
+The server emits an `agentcli.ready` notification on startup. Use `agentcli describe rpc` to inspect the machine-readable method and notification surface. Read-only RPC methods include target and path discovery, sanitized audit reads, approval listing, and registry list/show. Successful replies use a JSON-RPC `result` envelope; failures use a JSON-RPC `error` envelope with machine-readable `data.code` and `data.error_type`.
 
 See [docs/protocol.md](docs/protocol.md) for the full protocol specification.
 
@@ -462,7 +481,7 @@ See [docs/protocol.md](docs/protocol.md) for the full protocol specification.
 | Target | Description |
 |---|---|
 | `standalone` | Portable plan for authoring, validation, explanation, and protocol use. No durable runtime required. |
-| `openclaw-scheduler` | Compiler target for the durable scheduler runtime. Supports runtime model policy, plan/read-only intent, output offload budgets, queue/approval/fan-out guardrails, and identity compilation. |
+| `openclaw-scheduler` | Compiler target for the durable scheduler runtime. Apply uses live runtime capabilities when reported and conservative static fallback values otherwise. Governed root approvals, approver scopes, structured output, and v3 handoff fields require explicit runtime support. |
 
 ```bash
 # Compile for standalone use
@@ -496,7 +515,7 @@ The converter applies safe defaults:
 - Trust level defaults to `supervised`
 - Delegation mode defaults to `none`
 - Cleanup policy defaults to `always`
-- Attestation strings are mapped to authorization proof profiles with method detection (OIDC to `jwt`, SSH to `detached-signature`, cert to `certificate`)
+- Legacy attestation strings are preserved as informational authorization proof profiles with `method: "none"`; conversion never invents missing cryptographic trust material
 
 For scheduler migration (adopting existing jobs), use `--adopt-by name` during the initial apply:
 

@@ -10,14 +10,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-test:
+  test-matrix:
+    name: test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.13.0', '24.x']
+    env:
+      OPENCLAW_SCHEDULER_REF: ac9ea643a8efc68e9f81c8d93125467ca62140b5
     steps:
       - uses: actions/checkout@v5
+      - name: Check out pinned openclaw-scheduler
+        uses: actions/checkout@v5
+        with:
+          repository: amittell/openclaw-scheduler
+          ref: ac9ea643a8efc68e9f81c8d93125467ca62140b5
+          path: openclaw-scheduler
+      - name: Configure scheduler fixture path
+        run: echo "SCHEDULER_PATH=$RUNNER_TEMP/openclaw-scheduler" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node-version }}
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            openclaw-scheduler/package-lock.json
+      - name: Move scheduler fixture outside the agentcli source tree
+        run: mv openclaw-scheduler "$SCHEDULER_PATH"
       - run: npm ci
+      - name: Install and verify pinned scheduler runtime
+        run: |
+          cd "$SCHEDULER_PATH"
+          test "$(git rev-parse HEAD)" = "$OPENCLAW_SCHEDULER_REF"
+          npm ci
+          node bin/openclaw-scheduler.js --json capabilities > /dev/null
       - run: npm run lint
       - run: npm test
+
+  lint-test:
+    name: lint-test
+    needs: test-matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Node matrix job to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: test "$MATRIX_RESULT" = success
