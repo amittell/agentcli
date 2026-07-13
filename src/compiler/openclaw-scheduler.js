@@ -65,7 +65,7 @@ function schedulerDeliveryOptOutReason(plan) {
 
 function schedulerVerificationShell(plan) {
   const verifyShell = plan.verify?.shell ?? null;
-  if (!verifyShell) return null;
+  if (verifyShell === null) return null;
 
   const taskCwd = plan.execution.payload_kind === 'shellCommand'
     ? plan.execution.payload?.cwd ?? null
