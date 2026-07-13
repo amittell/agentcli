@@ -259,7 +259,7 @@ if (!schedulerRuntime.ok) {
       );
     });
 
-    it('apply sends v0.2 fields when scheduler supports handoff v2', { skip: v02RuntimeSkipReason || false }, async () => {
+    it('apply sends v0.2 fields at the negotiated scheduler handoff version', { skip: v02RuntimeSkipReason || false }, async () => {
       const v02Manifest = {
         version: '0.2',
         identity_profiles: [{
@@ -294,7 +294,11 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.capabilities.negotiated, true, 'capabilities should be negotiated');
       assert.ok(result.handoff, 'result should include handoff metadata');
       assert.equal(result.handoff.v02_fields_included, true, 'v0.2 fields should be included');
-      assert.equal(result.handoff.field_version, '2', 'field_version should be 2');
+      const expectedVersion = String(Math.min(
+        Number.parseInt(schedulerRuntime.capabilities.handoff_version, 10),
+        3,
+      ));
+      assert.equal(result.handoff.field_version, expectedVersion, 'field_version should match the negotiated runtime version');
     });
 
     it('v0.2 identity fields are stored in scheduler', { skip: v02RuntimeSkipReason || false }, async () => {

@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import {
   applyManifestToScheduler,
@@ -110,6 +114,69 @@ test('scheduler compiler refuses inline shell environment and stdin persistence'
       return paths.some(path => path.endsWith('.shell.env'))
         && paths.some(path => path.endsWith('.shell.stdin'));
     }
+  );
+});
+
+test('scheduler verification runs in the shell task cwd with the runtime environment', {
+  skip: process.platform === 'win32' ? 'scheduler shell handoff uses POSIX command rendering' : false,
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'agentcli-scheduler-verify-'));
+  const taskCwd = join(root, "work dir's");
+  const dispatcherCwd = join(root, 'dispatcher');
+  mkdirSync(taskCwd);
+  mkdirSync(dispatcherCwd);
+
+  try {
+    const manifest = governedManifest();
+    const task = manifest.workflows[0].tasks[0];
+    task.approval = undefined;
+    task.shell = {
+      program: 'sh',
+      args: ['-c', 'printf ready > marker.txt'],
+      cwd: taskCwd,
+    };
+    task.verify = {
+      shell: 'test "$VERIFY_RUNTIME_VALUE" = runtime && test -f marker.txt',
+    };
+
+    const job = compileManifestToScheduler(manifest).jobs[0];
+    const env = { ...process.env, VERIFY_RUNTIME_VALUE: 'runtime' };
+    const primary = spawnSync('/bin/sh', ['-c', job.payload_message], {
+      cwd: dispatcherCwd,
+      env,
+      encoding: 'utf8',
+    });
+    const verify = spawnSync('/bin/sh', ['-c', job.verify_shell], {
+      cwd: dispatcherCwd,
+      env,
+      encoding: 'utf8',
+    });
+
+    assert.equal(primary.status, 0, primary.stderr);
+    assert.equal(verify.status, 0, verify.stderr);
+    assert.match(job.verify_shell, /^cd /);
+    assert.equal(job.verify_shell.includes('VERIFY_RUNTIME_VALUE=runtime'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('scheduler compiler rejects a verifier whose cwd wrapper exceeds the runtime limit', () => {
+  const manifest = governedManifest();
+  const task = manifest.workflows[0].tasks[0];
+  task.approval = undefined;
+  task.shell = {
+    program: 'true',
+    cwd: '/tmp/a scheduler verification working directory',
+  };
+  task.verify = { shell: 'x'.repeat(99_999) };
+
+  assert.throws(
+    () => compileManifestToScheduler(manifest),
+    error => error.validation?.errors?.some(item => (
+      item.path.endsWith('.verify_shell')
+      && item.message.includes('exceeds max length of 100000')
+    )),
   );
 });
 

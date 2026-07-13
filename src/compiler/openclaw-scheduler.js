@@ -10,6 +10,7 @@ import {
 } from './shared.js';
 import { expandManifestShorthands } from '../shorthand.js';
 import { canonicalDigest } from '../canonical.js';
+import { renderShellExecution } from '../shell.js';
 import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03 } from '../scheduler-fields.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
@@ -23,6 +24,7 @@ const DELIVERY_OPT_OUT_REASON =
 const SCHEDULER_STRING_LIMITS = {
   name: 200,
   payload_message: 100000,
+  verify_shell: 100000,
   agent_id: 128,
   schedule_cron: 128,
   schedule_tz: 128,
@@ -59,6 +61,22 @@ function schedulerDeliveryOptOutReason(plan) {
     return null;
   }
   return DELIVERY_OPT_OUT_REASON;
+}
+
+function schedulerVerificationShell(plan) {
+  const verifyShell = plan.verify?.shell ?? null;
+  if (!verifyShell) return null;
+
+  const taskCwd = plan.execution.payload_kind === 'shellCommand'
+    ? plan.execution.payload?.cwd ?? null
+    : null;
+  if (!taskCwd) return verifyShell;
+
+  return renderShellExecution({
+    program: 'sh',
+    args: ['-c', verifyShell],
+    cwd: taskCwd,
+  });
 }
 
 function isV2IdentityDeclaration(identity) {
@@ -380,7 +398,7 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
         child_credential_policy: plan.child_credential_policy ?? null,
 
         // verify fields
-        verify_shell: plan.verify?.shell ?? null,
+        verify_shell: schedulerVerificationShell(plan),
         verify_timeout_s: plan.verify?.timeout_seconds ?? null,
         verify_on_failure: plan.verify?.on_failure ?? null,
 
