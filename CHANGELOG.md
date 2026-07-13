@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 (2026-07-13)
+
+- scheduler: post-success verification for shell tasks now runs from the task working directory while retaining the runtime-provided execution environment, and expanded verifier commands are checked against the scheduler's storage limit before apply
+- tests: added quoted-path, runtime-environment, expanded-length, and cross-version integration regressions for scheduler handoff
+
 ## 0.4.0 (2026-07-11)
 
 - security: manual approvals now bind the canonical manifest and complete effective execution configuration, enforce `approver_scope` and `timeout_s`, reject unexpected unsigned records, and fail without writing a grant when signing fails

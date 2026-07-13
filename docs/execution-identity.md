@@ -1726,6 +1726,7 @@ This is a known limitation for local exec with long-running tasks. Mitigations:
 
 - only enter this phase when the main command exited successfully and a workflow/task `verify` block resolves
 - run the declared verify shell in the task's effective execution context
+- for `openclaw-scheduler` shell handoff, bind verification to the task's `shell.cwd` and let the runtime supply the same sanitized, materialized execution environment used by the primary command; inline `shell.env` values remain ineligible for persistent scheduler compilation
 - record the postcondition outcome for the subsequent evidence binding
 - when `verify.on_failure` is `error`, return a non-zero status after cleanup and audit
 - when `verify.on_failure` is `warn`, record the verify failure as a warning without changing the exit code
