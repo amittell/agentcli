@@ -859,9 +859,10 @@ v4 job, the control plane MUST retrieve that job's persisted artifact and
 validate its digest, compiled job ID, effective task hash, and current scheduler
 execution projection. Missing artifacts and projection drift fail closed,
 including during dry-run planning. The OpenClaw Scheduler CLI adapter requests
-this data with `jobs list --include-handoff-artifacts`; a v4-capable runtime MUST
-return the canonical `handoff_artifact_payload` for each v4 row or reject the
-request.
+this data with `jobs list --include-handoff-artifacts` only after the exact v4
+runtime contract is negotiated. Default and legacy-safe job listing MUST use
+`jobs list` without the v4-only flag. A v4-capable runtime MUST return the
+canonical `handoff_artifact_payload` for each v4 row or reject the request.
 
 ### Runtime gates
 

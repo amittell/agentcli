@@ -105,9 +105,11 @@ function runner({
   features = V4_FEATURES,
 } = {}) {
   const added = [];
+  const listOptions = [];
   return {
     invocation: { label: 'mock-scheduler' },
     added,
+    listOptions,
     queryCapabilities() {
       return {
         scheduler_version: 'test',
@@ -117,7 +119,10 @@ function runner({
         features,
       };
     },
-    listJobs() { return []; },
+    listJobs(options = {}) {
+      listOptions.push(structuredClone(options));
+      return [];
+    },
     addJob(job) {
       added.push(job);
       return { ok: true, job };
@@ -147,8 +152,14 @@ function statefulRunner(initialJobs = [], {
         features,
       };
     },
-    listJobs() {
-      return [...jobs.values()].map(job => structuredClone(job));
+    listJobs({ includeHandoffArtifacts = false } = {}) {
+      return [...jobs.values()].map(job => {
+        const listed = structuredClone(job);
+        if (includeHandoffArtifacts !== true) {
+          delete listed.handoff_artifact_payload;
+        }
+        return listed;
+      });
     },
     addJob(spec) {
       assert.equal(typeof spec.id, 'string');
@@ -781,6 +792,7 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
   });
   assert.equal(v4.handoff.field_version, '4');
   assert.equal(v4Runner.added[0].handoff_version, 4);
+  assert.deepEqual(v4Runner.listOptions, [{ includeHandoffArtifacts: true }]);
 
   const missingGateRunner = runner({
     features: { ...V4_FEATURES, immutable_runtime_events: false },
@@ -791,6 +803,7 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
   });
   assert.equal(fallback.handoff.field_version, '3');
   assert.equal('handoff_version' in missingGateRunner.added[0], false);
+  assert.deepEqual(missingGateRunner.listOptions, [{ includeHandoffArtifacts: false }]);
 
   const omittedGateFeatures = { ...V4_FEATURES };
   delete omittedGateFeatures.immutable_runtime_events;
@@ -818,6 +831,21 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
     env: { PATH: '/usr/bin' },
   });
   assert.equal(oldRuntime.handoff.field_version, '3');
+  assert.deepEqual(oldRunner.listOptions, [{ includeHandoffArtifacts: false }]);
+
+  const unavailableCapabilitiesRunner = runner({ handoffVersion: '3' });
+  unavailableCapabilitiesRunner.queryCapabilities = () => null;
+  const unavailableCapabilitiesManifest = manifest();
+  delete unavailableCapabilitiesManifest.workflows[0].tasks[0].output;
+  const unavailableCapabilities = await applyManifestToScheduler(unavailableCapabilitiesManifest, {
+    runner: unavailableCapabilitiesRunner,
+    env: { PATH: '/usr/bin' },
+  });
+  assert.equal(unavailableCapabilities.handoff.field_version, '1');
+  assert.deepEqual(
+    unavailableCapabilitiesRunner.listOptions,
+    [{ includeHandoffArtifacts: false }],
+  );
 
   for (const [name, options] of [
     ['missing contract', { handoffContract: null }],

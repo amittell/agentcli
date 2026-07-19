@@ -200,8 +200,12 @@ export function createSchedulerCliRunner(options = {}) {
       try { return invoke(['capabilities']); }
       catch { return null; }
     },
-    listJobs() {
-      const payload = invoke(['jobs', 'list', '--include-handoff-artifacts']);
+    listJobs({ includeHandoffArtifacts = false } = {}) {
+      const args = ['jobs', 'list'];
+      if (includeHandoffArtifacts === true) {
+        args.push('--include-handoff-artifacts');
+      }
+      const payload = invoke(args);
       return Array.isArray(payload) ? payload : [];
     },
     addJob(spec) {
@@ -379,7 +383,9 @@ export async function applyManifestToScheduler(
     }
   }
 
-  const existingJobs = schedulerRunner.listJobs();
+  const existingJobs = schedulerRunner.listJobs({
+    includeHandoffArtifacts: handoffVersion === '4',
+  });
   const existingById = new Map(existingJobs.map(job => [job.id, job]));
   const existingByName = new Map();
   for (const job of existingJobs) {
@@ -451,10 +457,6 @@ export async function applyManifestToScheduler(
 
   for (const { job, action, existingJob } of plannedActions) {
     if ((action === 'updated' || action === 'adopted')
-      && Number(existingJob?.handoff_version) === 4) {
-      assertValidSchedulerHandoffV4Job(existingJob);
-    }
-    if ((action === 'updated' || action === 'adopted')
       && Number(existingJob?.handoff_version) === 4
       && Number(job.handoff_version) !== 4) {
       throw Object.assign(
@@ -465,6 +467,10 @@ export async function applyManifestToScheduler(
         ),
         { code: 'unsupported_capability' }
       );
+    }
+    if ((action === 'updated' || action === 'adopted')
+      && Number(existingJob?.handoff_version) === 4) {
+      assertValidSchedulerHandoffV4Job(existingJob);
     }
     if (!dryRun && action === 'adopted' && typeof schedulerRunner.deleteJob !== 'function') {
       throw Object.assign(

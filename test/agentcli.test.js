@@ -977,7 +977,7 @@ test('resolveSchedulerInvocation prefers npm prefix when present', () => {
   assert.deepEqual(invocation.prefixArgs, ['exec', '--prefix', '/tmp/scheduler-prefix', 'openclaw-scheduler', '--']);
 });
 
-test('scheduler CLI runner requests persisted v4 artifacts when listing jobs', () => {
+test('scheduler CLI runner requests persisted v4 artifacts only when explicitly enabled', () => {
   const calls = [];
   const scheduler = createSchedulerCliRunner({
     schedulerBin: 'openclaw-scheduler',
@@ -987,10 +987,17 @@ test('scheduler CLI runner requests persisted v4 artifacts when listing jobs', (
     },
   });
   assert.deepEqual(scheduler.listJobs(), []);
-  assert.deepEqual(calls, [{
-    command: 'openclaw-scheduler',
-    args: ['--json', 'jobs', 'list', '--include-handoff-artifacts'],
-  }]);
+  assert.deepEqual(scheduler.listJobs({ includeHandoffArtifacts: true }), []);
+  assert.deepEqual(calls, [
+    {
+      command: 'openclaw-scheduler',
+      args: ['--json', 'jobs', 'list'],
+    },
+    {
+      command: 'openclaw-scheduler',
+      args: ['--json', 'jobs', 'list', '--include-handoff-artifacts'],
+    },
+  ]);
 });
 
 test('applyManifestToScheduler plans and executes scheduler upserts', async () => {

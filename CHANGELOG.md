@@ -21,7 +21,8 @@
   environment while host variables are merged only for scheduler process spawn
 - scheduler: update and adoption validate the persisted v4 artifact, compiled
   identity, and current execution projection before preserving runtime
-  overrides; the CLI adapter requests opt-in artifact hydration for this check
+  overrides; the CLI adapter requests opt-in artifact hydration only after
+  exact v4 negotiation, while legacy-safe listing remains flag-free
 - security: JWT, detached-signature, and certificate proofs bind the exact v4
   artifact, replay identifier, validity, key, and revocation result
 - security: v4 proofs reject inverted validity intervals, bind asserted key IDs
@@ -38,7 +39,8 @@
   nullable fields and are retained in the sanitized scheduler declaration for
   exact artifact parity while raw provider configuration remains absent
 - inspect: added immutable artifacts, runtime events, provider sessions, and
-  credential presentations to the scheduler inspection surface
+  credential presentations to the scheduler inspection surface, with every
+  entity enumerated in JSON help and structured command discovery
 - conformance: added shared positive and negative v4 fixtures and exact digest
   parity tests with OpenClaw Scheduler
 - examples: added a public scheduler manifest for exercising negotiated v4

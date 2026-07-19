@@ -58,7 +58,7 @@ Commands:
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
        [--instance-id id] [--require-evidence] [--require-authorization]
        [--identity-debug] [--presentation-debug]
-  inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
+  inspect <${listInspectableEntities().join('|')}> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text]
           [--ttl-s seconds] [--timeout ms] [--instance-id id]
