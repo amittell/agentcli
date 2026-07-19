@@ -17,7 +17,8 @@
 - scheduler: complete non-lossy create, replace-style update, null clear, and
   adopt projections now carry the immutable artifact payload and digest
 - scheduler: adoption rebinds the artifact after the final origin is selected,
-  and apply hashes the same merged operational environment passed to the runner
+  and apply preserves direct-compile hashes for the caller's explicit compile
+  environment while host variables are merged only for scheduler process spawn
 - security: JWT, detached-signature, and certificate proofs bind the exact v4
   artifact, replay identifier, validity, key, and revocation result
 - security: v4 proofs reject inverted validity intervals, bind asserted key IDs

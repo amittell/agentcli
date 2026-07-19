@@ -922,9 +922,10 @@ AgentCLI probes live scheduler capabilities for every apply, including a basic
 v0.1 manifest, so immutable artifacts cover all jobs when v4 is available. An
 unavailable capability command leaves security-relevant runtime features false.
 During adoption, any final persisted origin override is rebound into the
-scheduler job binding before create. The environment used to compile execution
-hashes is the same merged operational environment passed to the scheduler
-process.
+scheduler job binding before create. The caller's compile environment is used
+unchanged for execution hashes so direct compile and apply remain deterministic.
+Host process variables MAY be merged separately when spawning the scheduler CLI,
+but that transport environment MUST NOT alter the compiled artifact.
 
 ## Compiler Targets
 

@@ -278,7 +278,7 @@ export async function applyManifestToScheduler(
       includeExplain,
       schedulerHandoffVersion: '4',
       cwd,
-      env: schedulerEnv,
+      env,
     });
   }
 

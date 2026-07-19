@@ -527,7 +527,7 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
   }
 });
 
-test('v4 apply hashes the same merged operational environment given to the scheduler', async () => {
+test('v4 apply preserves direct-compile digests for an explicit environment', async () => {
   const scheduler = runner();
   const env = { PATH: '/v4-test/bin' };
   await applyManifestToScheduler(manifest(), {
@@ -538,7 +538,7 @@ test('v4 apply hashes the same merged operational environment given to the sched
   const expected = compileManifestToScheduler(manifest(), {
     schedulerHandoffVersion: '4',
     cwd: '/tmp',
-    env: { ...process.env, ...env },
+    env,
   }).jobs[0];
   assert.equal(scheduler.added[0].effective_task_hash, expected.effective_task_hash);
   assert.equal(scheduler.added[0].handoff_artifact_digest, expected.handoff_artifact_digest);
@@ -604,7 +604,7 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
     compileManifestToScheduler(manifest(), {
       schedulerHandoffVersion: '4',
       cwd: '/tmp',
-      env: { ...process.env, PATH: '/usr/bin' },
+      env: { PATH: '/usr/bin' },
     }).jobs[0],
     { origin: 'legacy-origin' },
   );
