@@ -846,6 +846,15 @@ presentation, and evidence record MUST carry the exact artifact digest. Chain
 and retry work MUST also carry the exact source run ID and source artifact
 digest.
 
+Before an update or adoption preserves runtime-owned overrides from an existing
+v4 job, the control plane MUST retrieve that job's persisted artifact and
+validate its digest, compiled job ID, effective task hash, and current scheduler
+execution projection. Missing artifacts and projection drift fail closed,
+including during dry-run planning. The OpenClaw Scheduler CLI adapter requests
+this data with `jobs list --include-handoff-artifacts`; a v4-capable runtime MUST
+return the canonical `handoff_artifact_payload` for each v4 row or reject the
+request.
+
 ### Runtime gates
 
 The runtime MUST report scheduler schema version 29 or newer and the following

@@ -206,6 +206,8 @@ export const HANDOFF_V4_JSON_SCHEMA = Object.freeze({
       'provider',
       'methods',
       'payload_bind',
+      'payload_hash',
+      'provider_config_hash',
       'verify_required',
       'retention',
       'signed_or_provider_verified_required',

@@ -23,6 +23,7 @@ import {
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
 import {
+  assertValidSchedulerHandoffV4Job,
   rebindSchedulerHandoffV4Job,
   schedulerHandoffV4RebindableOverrides,
 } from './handoff/v4.js';
@@ -200,7 +201,7 @@ export function createSchedulerCliRunner(options = {}) {
       catch { return null; }
     },
     listJobs() {
-      const payload = invoke(['jobs', 'list']);
+      const payload = invoke(['jobs', 'list', '--include-handoff-artifacts']);
       return Array.isArray(payload) ? payload : [];
     },
     addJob(spec) {
@@ -449,6 +450,10 @@ export async function applyManifestToScheduler(
   }
 
   for (const { job, action, existingJob } of plannedActions) {
+    if ((action === 'updated' || action === 'adopted')
+      && Number(existingJob?.handoff_version) === 4) {
+      assertValidSchedulerHandoffV4Job(existingJob);
+    }
     if ((action === 'updated' || action === 'adopted')
       && Number(existingJob?.handoff_version) === 4
       && Number(job.handoff_version) !== 4) {

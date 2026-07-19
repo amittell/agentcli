@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (2026-07-18)
+## 0.5.0 (2026-07-19)
 
 - scheduler: added handoff v4 canonical artifacts with explicit artifact,
   canonicalization, execution-binding, and scheduler-binding versions
@@ -19,16 +19,24 @@
 - scheduler: adoption rebinds the artifact after the final origin is selected,
   and apply preserves direct-compile hashes for the caller's explicit compile
   environment while host variables are merged only for scheduler process spawn
+- scheduler: update and adoption validate the persisted v4 artifact, compiled
+  identity, and current execution projection before preserving runtime
+  overrides; the CLI adapter requests opt-in artifact hydration for this check
 - security: JWT, detached-signature, and certificate proofs bind the exact v4
   artifact, replay identifier, validity, key, and revocation result
 - security: v4 proofs reject inverted validity intervals, bind asserted key IDs
   to the key or certificate that actually verified, and require an explicit
   not-revoked result from the runtime checker
+- security: JWKS-provided raw JWK objects are normalized before stable public
+  key identity derivation, while private JWK material remains forbidden
 - security: credential handoff compiles to exactly one runtime medium without
   persisting values, and delegation binds the exact source run and scope
 - evidence: the complete AgentCLI evidence payload and verification envelope
   are available to the scheduler runtime for signed or provider-verified
   terminal evidence
+- evidence: payload and provider-configuration hashes are explicit required
+  nullable fields, preventing structurally incomplete artifacts from becoming
+  valid after digest recalculation
 - inspect: added immutable artifacts, runtime events, provider sessions, and
   credential presentations to the scheduler inspection surface
 - conformance: added shared positive and negative v4 fixtures and exact digest

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, createSign } from 'node:crypto';
+import { createPublicKey, generateKeyPairSync, createSign } from 'node:crypto';
 import { closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,7 +21,7 @@ import {
 import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
-import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation, SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../src/apply.js';
+import { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation, shellCommandInvocation, SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../src/apply.js';
 import {
   HANDOFF_V4_REQUIRED_FEATURES,
   HANDOFF_V4_RUNTIME_CONTRACT,
@@ -91,8 +91,8 @@ const testKeyPair = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 });
 
-function signedJwt(payload) {
-  const header = encodeBase64UrlJson({ alg: 'RS256', typ: 'JWT' });
+function signedJwt(payload, headerFields = {}) {
+  const header = encodeBase64UrlJson({ alg: 'RS256', typ: 'JWT', ...headerFields });
   const body = encodeBase64UrlJson(payload);
   const signingInput = `${header}.${body}`;
   const signer = createSign('RSA-SHA256');
@@ -975,6 +975,22 @@ test('resolveSchedulerInvocation prefers npm prefix when present', () => {
   const invocation = resolveSchedulerInvocation({ schedulerPrefix: '/tmp/scheduler-prefix', platform: 'linux' });
   assert.equal(invocation.command, 'npm');
   assert.deepEqual(invocation.prefixArgs, ['exec', '--prefix', '/tmp/scheduler-prefix', 'openclaw-scheduler', '--']);
+});
+
+test('scheduler CLI runner requests persisted v4 artifacts when listing jobs', () => {
+  const calls = [];
+  const scheduler = createSchedulerCliRunner({
+    schedulerBin: 'openclaw-scheduler',
+    runner(command, args) {
+      calls.push({ command, args });
+      return { status: 0, stdout: '[]', stderr: '' };
+    },
+  });
+  assert.deepEqual(scheduler.listJobs(), []);
+  assert.deepEqual(calls, [{
+    command: 'openclaw-scheduler',
+    args: ['--json', 'jobs', 'list', '--include-handoff-artifacts'],
+  }]);
 });
 
 test('applyManifestToScheduler plans and executes scheduler upserts', async () => {
@@ -6711,6 +6727,48 @@ test('jwt verifier validateProfile rejects empty string jwks_uri', async () => {
   assert.strictEqual(result.valid, false);
   const fieldNames = result.errors.map(e => e.field);
   assert.ok(fieldNames.includes('jwks_uri'));
+});
+
+test('JWT verification resolves raw JWKS keys and derives their stable public key IDs', async (t) => {
+  const { getVerifier } = await import('../src/authorization-proof/index.js');
+  const { resolveJwtVerificationContext } = await import('../src/authorization-proof/jwt.js');
+  const verifier = getVerifier('jwt');
+  const publicJwk = {
+    ...createPublicKey(testKeyPair.publicKey).export({ format: 'jwk' }),
+    alg: 'RS256',
+    kid: 'agentcli-jwks-key',
+    use: 'sig',
+  };
+  const manifest = { version: '0.2', workflows: [] };
+  const token = signedJwt({
+    sub: 'jwks-subject',
+    exp: Math.floor(Date.now() / 1000) + 300,
+    manifest_digest: canonicalDigest(manifest),
+  }, { kid: publicJwk.kid });
+  const profile = {
+    jwks_uri: 'https://issuer.example.com/.well-known/agentcli-final-review-jwks.json',
+    verify: { required: true },
+  };
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    headers: { get: () => 'max-age=0' },
+    json: async () => ({ keys: [publicJwk] }),
+  });
+
+  const context = await resolveJwtVerificationContext(token, profile, { manifest });
+  assert.equal(context.trustedKeySource, 'jwks_uri');
+  assert.equal(context.trustedKeyError, null);
+  assert.match(context.trustedKeyId, /^spki-sha256:[0-9a-f]{64}$/);
+  const result = verifier.verifyProof(token, profile, context);
+  assert.equal(result.verified, true, result.reason);
+  assert.equal(result.signature_verified, true);
+  assert.equal(result.key_id, context.trustedKeyId);
 });
 
 // -- Signed JWT verification through the verifier --

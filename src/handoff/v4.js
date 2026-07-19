@@ -412,6 +412,8 @@ function evidenceBinding(binding) {
       provider: null,
       methods: [],
       payload_bind: [],
+      payload_hash: null,
+      provider_config_hash: null,
       verify_required: false,
       retention: null,
       signed_or_provider_verified_required: false,
@@ -615,6 +617,61 @@ export function buildSchedulerHandoffV4Artifact({
   return { payload, digest, effectiveTaskHash, canonical };
 }
 
+export function assertValidSchedulerHandoffV4Job(job) {
+  if (!job || Number(job.handoff_version) !== HANDOFF_V4_VERSION) {
+    throw new TypeError('assertValidSchedulerHandoffV4Job requires a handoff v4 job');
+  }
+  if (!SHA256_PATTERN.test(job.handoff_artifact_digest)) {
+    throw Object.assign(
+      new Error('Handoff v4 job does not have a valid original artifact digest'),
+      {
+        code: 'HANDOFF_ARTIFACT_INVALID',
+        errors: ['handoff_artifact_digest must be a sha256 digest'],
+      },
+    );
+  }
+  const originalValidation = validateSchedulerHandoffV4Artifact(
+    job.handoff_artifact_payload,
+    { expectedDigest: job.handoff_artifact_digest },
+  );
+  if (!originalValidation.ok) {
+    throw Object.assign(
+      new Error(
+        `Handoff v4 job has an invalid artifact: ${originalValidation.errors.join('; ')}`,
+      ),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: originalValidation.errors },
+    );
+  }
+  const compiledIdentityErrors = [];
+  if (job.id !== originalValidation.payload.compiled.job_id) {
+    compiledIdentityErrors.push('compiled.job_id does not match the current job id');
+  }
+  if (job.effective_task_hash !== originalValidation.payload.compiled.effective_task_hash) {
+    compiledIdentityErrors.push(
+      'compiled.effective_task_hash does not match the current job effective_task_hash',
+    );
+  }
+  if (compiledIdentityErrors.length > 0) {
+    throw Object.assign(
+      new Error(
+        `Handoff v4 job compiled identity no longer matches its artifact: ${compiledIdentityErrors.join('; ')}`,
+      ),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: compiledIdentityErrors },
+    );
+  }
+  const currentBindingDigest = canonicalDigest(schedulerJobExecutionProjection(job));
+  if (originalValidation.payload.scheduler_job_binding.digest !== currentBindingDigest) {
+    throw Object.assign(
+      new Error('Handoff v4 job execution projection no longer matches its artifact'),
+      {
+        code: 'HANDOFF_ARTIFACT_INVALID',
+        errors: ['scheduler_job_binding.digest does not match the current job projection'],
+      },
+    );
+  }
+  return originalValidation.payload;
+}
+
 export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
   if (!job || Number(job.handoff_version) !== HANDOFF_V4_VERSION) {
     throw new TypeError('rebindSchedulerHandoffV4Job requires a handoff v4 job');
@@ -632,56 +689,9 @@ export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
       { code: 'HANDOFF_REBIND_OVERRIDE_INVALID', fields: invalidFields },
     );
   }
-  if (!SHA256_PATTERN.test(job.handoff_artifact_digest)) {
-    throw Object.assign(
-      new Error('Cannot rebind handoff v4 job without a valid original artifact digest'),
-      {
-        code: 'HANDOFF_ARTIFACT_INVALID',
-        errors: ['handoff_artifact_digest must be a sha256 digest'],
-      },
-    );
-  }
-  const originalValidation = validateSchedulerHandoffV4Artifact(
-    job.handoff_artifact_payload,
-    { expectedDigest: job.handoff_artifact_digest },
-  );
-  if (!originalValidation.ok) {
-    throw Object.assign(
-      new Error(
-        `Cannot rebind invalid handoff v4 artifact: ${originalValidation.errors.join('; ')}`,
-      ),
-      { code: 'HANDOFF_ARTIFACT_INVALID', errors: originalValidation.errors },
-    );
-  }
-  const compiledIdentityErrors = [];
-  if (job.id !== originalValidation.payload.compiled.job_id) {
-    compiledIdentityErrors.push('compiled.job_id does not match the current job id');
-  }
-  if (job.effective_task_hash !== originalValidation.payload.compiled.effective_task_hash) {
-    compiledIdentityErrors.push(
-      'compiled.effective_task_hash does not match the current job effective_task_hash',
-    );
-  }
-  if (compiledIdentityErrors.length > 0) {
-    throw Object.assign(
-      new Error(
-        `Cannot rebind handoff v4 job whose compiled identity no longer matches its artifact: ${compiledIdentityErrors.join('; ')}`,
-      ),
-      { code: 'HANDOFF_ARTIFACT_INVALID', errors: compiledIdentityErrors },
-    );
-  }
-  const currentBindingDigest = canonicalDigest(schedulerJobExecutionProjection(job));
-  if (originalValidation.payload.scheduler_job_binding.digest !== currentBindingDigest) {
-    throw Object.assign(
-      new Error('Cannot rebind handoff v4 job whose execution projection no longer matches its artifact'),
-      {
-        code: 'HANDOFF_ARTIFACT_INVALID',
-        errors: ['scheduler_job_binding.digest does not match the current job projection'],
-      },
-    );
-  }
+  const originalPayload = assertValidSchedulerHandoffV4Job(job);
   const reboundJob = { ...job, ...overrides };
-  const payload = structuredClone(originalValidation.payload);
+  const payload = structuredClone(originalPayload);
   if (!payload?.scheduler_job_binding || typeof payload.scheduler_job_binding !== 'object') {
     throw Object.assign(new Error('handoff v4 artifact is missing scheduler_job_binding'), {
       code: 'HANDOFF_ARTIFACT_INVALID',

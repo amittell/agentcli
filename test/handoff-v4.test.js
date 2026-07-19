@@ -18,11 +18,12 @@ import {
   computeEffectiveTaskHash,
 } from '../src/compiler/shared.js';
 import {
+  assertValidSchedulerHandoffV4Job,
   HANDOFF_V4_EXECUTION_BINDING_VERSION,
   rebindSchedulerHandoffV4Job,
   validateSchedulerHandoffV4Artifact,
 } from '../src/handoff/v4.js';
-import { canonicalStringify } from '../src/canonical.js';
+import { canonicalDigest, canonicalStringify } from '../src/canonical.js';
 import { expandManifestShorthands } from '../src/shorthand.js';
 import { jwtVerifier } from '../src/authorization-proof/jwt.js';
 import {
@@ -315,6 +316,26 @@ test('handoff v4 schema accepts every valid cleanup policy and rejects unknown p
       missingContextValidation.errors.join('; '),
       /authorization_proof\.verification_context_hash.*required/,
     );
+  }
+});
+
+test('handoff v4 schema requires explicit nullable evidence hashes', () => {
+  const payload = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0].handoff_artifact_payload;
+
+  assert.equal(payload.evidence.payload_hash, null);
+  assert.equal(payload.evidence.provider_config_hash, null);
+  for (const field of ['payload_hash', 'provider_config_hash']) {
+    const missing = structuredClone(payload);
+    delete missing.evidence[field];
+    const validation = validateSchedulerHandoffV4Artifact(missing, {
+      expectedDigest: canonicalDigest(missing),
+    });
+    assert.equal(validation.ok, false, field);
+    assert.match(validation.errors.join('; '), new RegExp(`evidence\\.${field} is required`));
   }
 });
 
@@ -950,7 +971,10 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
   assert.notEqual(legacyV4.id, compiled.id);
   assert.equal(legacyV4.name, compiled.name);
   const downgradedAdopter = statefulRunner([
-    schedulerCreateSpec(legacyV4, { originOverride: 'legacy-origin', fieldVersion: '4' }),
+    schedulerCreateSpec(
+      rebindSchedulerHandoffV4Job(legacyV4, { origin: 'legacy-origin' }),
+      { fieldVersion: '4' },
+    ),
   ], {
     handoffVersion: '3',
     features: { ...V4_FEATURES, immutable_runtime_events: false },
@@ -1005,6 +1029,43 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
     [],
     'all downgrade conflicts must be detected before the first scheduler write',
   );
+});
+
+test('v4 apply rejects tampered stored jobs before preserving runtime overrides', async () => {
+  const compiled = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const validStored = schedulerCreateSpec(
+    rebindSchedulerHandoffV4Job(compiled, {
+      resource_pool: 'trusted-pool',
+      watchdog_check_cmd: '/usr/bin/trusted-health-check',
+    }),
+    { fieldVersion: '4' },
+  );
+  assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(validStored));
+
+  for (const { field, value, dryRun } of [
+    { field: 'resource_pool', value: 'tampered-pool', dryRun: false },
+    { field: 'watchdog_check_cmd', value: '/usr/bin/tampered-health-check', dryRun: true },
+  ]) {
+    const tampered = structuredClone(validStored);
+    tampered[field] = value;
+    const scheduler = statefulRunner([tampered]);
+    await assert.rejects(
+      applyManifestToScheduler(manifest(), {
+        runner: scheduler,
+        dryRun,
+        cwd: '/tmp',
+        env: { PATH: '/usr/bin' },
+      }),
+      error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+        && /execution projection no longer matches/.test(error.message),
+      `${field} must be checked before the scheduler row is rebound`,
+    );
+    assert.deepEqual(scheduler.history, []);
+  }
 });
 
 test('handoff v4 JWT requires artifact binding, replay claim, and revocation check', () => {
