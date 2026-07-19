@@ -32,6 +32,7 @@ const AUDIT_SAFE_CLAIMS = [
 ];
 const jwksCache = new Map();
 const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
+const CANONICAL_SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 // -- JWT Helpers --
 
@@ -84,10 +85,6 @@ function decodeJwtParts(token) {
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
-}
-
-function normalizeDigest(value) {
-  return typeof value === 'string' ? value.replace(/^sha256:/, '') : null;
 }
 
 function normalizeAudience(value) {
@@ -780,11 +777,17 @@ const jwtVerifier = {
     if (manifestBindingRequired) {
       if (typeof context.manifestDigest !== 'string' || context.manifestDigest.length === 0) {
         manifestBindingReason = 'trusted manifest digest is required for JWT authorization proof verification';
+      } else if (v4Required && !CANONICAL_SHA256_PATTERN.test(context.manifestDigest)) {
+        manifestBindingReason = 'trusted manifest digest must be a lowercase sha256 digest';
       } else if (typeof payload.manifest_digest !== 'string') {
         manifestBindingReason = 'JWT is missing required manifest_digest claim';
+      } else if (v4Required && !CANONICAL_SHA256_PATTERN.test(payload.manifest_digest)) {
+        manifestBindingReason = 'JWT manifest_digest claim must be a lowercase sha256 digest';
       } else if (
-        payload.manifest_digest.replace(/^sha256:/, '') !==
-        context.manifestDigest.replace(/^sha256:/, '')
+        v4Required
+          ? payload.manifest_digest !== context.manifestDigest
+          : payload.manifest_digest.replace(/^sha256:/, '') !==
+            context.manifestDigest.replace(/^sha256:/, '')
       ) {
         manifestBindingReason = 'JWT manifest_digest claim does not match the canonical manifest';
       } else {
@@ -798,9 +801,13 @@ const jwtVerifier = {
       const claimedArtifact = payload.handoff_artifact_digest ?? payload.artifact_digest;
       if (typeof artifactDigest !== 'string' || artifactDigest.length === 0) {
         artifactBindingReason = 'trusted handoff artifact digest is required';
+      } else if (!CANONICAL_SHA256_PATTERN.test(artifactDigest)) {
+        artifactBindingReason = 'trusted handoff artifact digest must be a lowercase sha256 digest';
       } else if (typeof claimedArtifact !== 'string') {
         artifactBindingReason = 'JWT is missing required handoff artifact digest claim';
-      } else if (normalizeDigest(claimedArtifact) !== normalizeDigest(artifactDigest)) {
+      } else if (!CANONICAL_SHA256_PATTERN.test(claimedArtifact)) {
+        artifactBindingReason = 'JWT handoff artifact digest claim must be a lowercase sha256 digest';
+      } else if (claimedArtifact !== artifactDigest) {
         artifactBindingReason = 'JWT handoff artifact digest does not match the compiled artifact';
       } else {
         artifactBound = true;

@@ -436,6 +436,59 @@ function evidenceBinding(binding) {
   };
 }
 
+function validatePersistedEvidenceBinding(job, artifactEvidence) {
+  const errors = [];
+  const declaration = normalizeJsonValue(job.evidence);
+  let expected;
+
+  if (declaration == null) {
+    if (job.evidence_ref != null) {
+      errors.push('evidence_ref is set but the persisted evidence declaration is missing');
+    }
+    expected = evidenceBinding({ evidence: null });
+  } else if (typeof declaration !== 'object' || Array.isArray(declaration)) {
+    errors.push('persisted evidence declaration must be an object or null');
+    return errors;
+  } else {
+    for (const field of ['payload_hash', 'provider_config_hash']) {
+      if (!Object.hasOwn(declaration, field)) {
+        errors.push(`persisted evidence declaration is missing ${field}`);
+      } else {
+        validateHash(declaration[field], `persisted evidence.${field}`, errors);
+      }
+    }
+    if (declaration.provider_config != null) {
+      errors.push('persisted evidence declaration must not contain raw provider_config');
+    }
+    const expectedPayloadHash = hashObject(declaration.payload);
+    if ((declaration.payload_hash ?? null) !== expectedPayloadHash) {
+      errors.push('persisted evidence payload_hash does not match its payload');
+    }
+    if ((declaration.ref ?? null) !== (job.evidence_ref ?? null)) {
+      errors.push('persisted evidence ref does not match evidence_ref');
+    }
+    expected = evidenceBinding({ evidence: declaration });
+  }
+
+  for (const field of [
+    'ref',
+    'provider',
+    'methods',
+    'payload_bind',
+    'payload_hash',
+    'provider_config_hash',
+    'verify_required',
+    'retention',
+    'signed_or_provider_verified_required',
+  ]) {
+    if (canonicalStringify(artifactEvidence?.[field] ?? null)
+      !== canonicalStringify(expected[field] ?? null)) {
+      errors.push(`artifact evidence.${field} does not match the persisted evidence declaration`);
+    }
+  }
+  return errors;
+}
+
 function commandBinding(binding, task, job) {
   const command = binding.command;
   const payloadKind = job.payload_kind ?? null;
@@ -669,6 +722,18 @@ export function assertValidSchedulerHandoffV4Job(job) {
       },
     );
   }
+  const evidenceErrors = validatePersistedEvidenceBinding(
+    job,
+    originalValidation.payload.evidence,
+  );
+  if (evidenceErrors.length > 0) {
+    throw Object.assign(
+      new Error(
+        `Handoff v4 job evidence no longer matches its artifact: ${evidenceErrors.join('; ')}`,
+      ),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: evidenceErrors },
+    );
+  }
   return originalValidation.payload;
 }
 
@@ -845,6 +910,21 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
   }
   if (payload.evidence?.provider && !payload.evidence.signed_or_provider_verified_required) {
     errors.push('declared evidence providers require signed or provider-verified evidence');
+  }
+  const artifactEvidence = payload.evidence ?? {};
+  const hasEvidenceDeclaration = artifactEvidence.ref != null
+    || artifactEvidence.provider != null
+    || (Array.isArray(artifactEvidence.methods) && artifactEvidence.methods.length > 0)
+    || (Array.isArray(artifactEvidence.payload_bind) && artifactEvidence.payload_bind.length > 0)
+    || artifactEvidence.verify_required === true
+    || artifactEvidence.retention != null;
+  if (!hasEvidenceDeclaration) {
+    if (artifactEvidence.payload_hash != null) {
+      errors.push('evidence.payload_hash must be null when evidence is not declared');
+    }
+    if (artifactEvidence.provider_config_hash != null) {
+      errors.push('evidence.provider_config_hash must be null when evidence is not declared');
+    }
   }
   if (payload.delegation?.mode && payload.delegation.mode !== 'none'
     && payload.delegation.source_binding !== 'source_run_id') {

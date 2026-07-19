@@ -278,6 +278,7 @@ export function compileManifestToScheduler(
     schedulerHandoffVersion = '3',
     cwd = process.cwd(),
     env = process.env,
+    oneOffSource = null,
   } = {},
 ) {
   if (!['1', '2', '3', '4'].includes(String(schedulerHandoffVersion))) {
@@ -343,6 +344,9 @@ export function compileManifestToScheduler(
         includeHashes: String(schedulerHandoffVersion) === '4',
       });
       const deliveryOptOutReason = schedulerDeliveryOptOutReason(plan);
+      const dispatchesOneOff = oneOffSource != null
+        && oneOffSource.workflow_id === workflow.id
+        && oneOffSource.task_id === task.id;
       const job = {
         id: plan.id,
         source: plan.source,
@@ -425,7 +429,7 @@ export function compileManifestToScheduler(
         verify_timeout_s: plan.verify?.timeout_seconds ?? null,
         verify_on_failure: plan.verify?.on_failure ?? null,
 
-        delete_after_run: plan.delete_after_run ? 1 : 0
+        delete_after_run: dispatchesOneOff || plan.delete_after_run ? 1 : 0
       };
 
       if (String(schedulerHandoffVersion) === '4') {

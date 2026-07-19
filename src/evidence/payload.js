@@ -15,6 +15,7 @@ import {
 export const EVIDENCE_PAYLOAD_SCHEMA = 'agentcli.evidence.payload';
 export const EVIDENCE_PAYLOAD_VERSION = 1;
 const SENSITIVE_FIELD = /(?:^|_)(?:access_token|refresh_token|id_token|token|secret|password|private_key|credentials?|cookie|client_assertion|api_key|authorization_header)(?:_|$)/i;
+const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 function redactSensitiveEvidence(value, key = '') {
   if (SENSITIVE_FIELD.test(key)) {
@@ -318,9 +319,46 @@ export function validateEvidenceRecordBinding(payload, record) {
   if (payload.bindings?.effective_task_hash !== record.effective_task_hash) {
     errors.push('effective task hash does not match the audit record');
   }
+  const payloadArtifactDigest = payload.bindings?.handoff_artifact_digest ?? null;
+  const recordArtifactDigest = record.handoff_artifact_digest ?? null;
+  const v4BindingRequired = Number(record.handoff_version ?? record.handoff?.version) === 4
+    || payloadArtifactDigest != null
+    || recordArtifactDigest != null;
+  if (v4BindingRequired) {
+    if (!SHA256_PATTERN.test(recordArtifactDigest)) {
+      errors.push('audit record handoff artifact digest must be a lowercase SHA-256 digest');
+    }
+    if (!SHA256_PATTERN.test(payloadArtifactDigest)) {
+      errors.push('signed evidence handoff artifact digest must be a lowercase SHA-256 digest');
+    }
+  }
   if ((payload.bindings?.handoff_artifact_digest ?? null)
     !== (record.handoff_artifact_digest ?? null)) {
     errors.push('handoff artifact digest does not match the audit record');
+  }
+  const sourceRunRequired = record.source_run_required === true
+    || record.child_run === true
+    || record.is_child_run === true
+    || record.parent_id != null
+    || record.parent_run_id != null
+    || payload.bindings?.source_run_id != null
+    || payload.bindings?.source_run_handoff_artifact_digest != null
+    || record.source_run_id != null
+    || record.source_run_handoff_artifact_digest != null;
+  if (sourceRunRequired) {
+    if (typeof record.source_run_id !== 'string' || record.source_run_id.length === 0) {
+      errors.push('audit record source run id must be a non-empty string');
+    }
+    if (typeof payload.bindings?.source_run_id !== 'string'
+      || payload.bindings.source_run_id.length === 0) {
+      errors.push('signed evidence source run id must be a non-empty string');
+    }
+    if (!SHA256_PATTERN.test(record.source_run_handoff_artifact_digest)) {
+      errors.push('audit record source run artifact digest must be a lowercase SHA-256 digest');
+    }
+    if (!SHA256_PATTERN.test(payload.bindings?.source_run_handoff_artifact_digest)) {
+      errors.push('signed evidence source run artifact digest must be a lowercase SHA-256 digest');
+    }
   }
   if ((payload.bindings?.source_run_id ?? null) !== (record.source_run_id ?? null)) {
     errors.push('source run id does not match the audit record');

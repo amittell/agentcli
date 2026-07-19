@@ -32,10 +32,14 @@ export const HANDOFF_V4_RUNTIME_CONTRACT = Object.freeze({
 });
 
 function supportsExactV4Contract(contract) {
-  return contract != null
-    && typeof contract === 'object'
-    && Object.entries(HANDOFF_V4_RUNTIME_CONTRACT)
-      .every(([key, expected]) => contract[key] === expected);
+  if (contract == null || typeof contract !== 'object' || Array.isArray(contract)) {
+    return false;
+  }
+  const expectedKeys = Object.keys(HANDOFF_V4_RUNTIME_CONTRACT).sort();
+  const actualKeys = Object.keys(contract).sort();
+  return actualKeys.length === expectedKeys.length
+    && actualKeys.every((key, index) => key === expectedKeys[index])
+    && expectedKeys.every(key => contract[key] === HANDOFF_V4_RUNTIME_CONTRACT[key]);
 }
 
 export function supportsSchedulerHandoffV4(effectiveCapabilities = {}) {

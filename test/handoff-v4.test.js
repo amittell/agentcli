@@ -348,6 +348,19 @@ test('handoff v4 schema requires explicit nullable evidence hashes', () => {
     assert.equal(validation.ok, false, field);
     assert.match(validation.errors.join('; '), new RegExp(`evidence\\.${field} is required`));
   }
+
+  for (const field of ['payload_hash', 'provider_config_hash']) {
+    const inconsistent = structuredClone(payload);
+    inconsistent.evidence[field] = `sha256:${'a'.repeat(64)}`;
+    const validation = validateSchedulerHandoffV4Artifact(inconsistent, {
+      expectedDigest: canonicalDigest(inconsistent),
+    });
+    assert.equal(validation.ok, false, field);
+    assert.match(
+      validation.errors.join('; '),
+      new RegExp(`evidence\\.${field} must be null when evidence is not declared`),
+    );
+  }
 });
 
 test('handoff v4 persists audit-safe evidence hashes with the scheduler declaration', () => {
@@ -362,7 +375,7 @@ test('handoff v4 persists audit-safe evidence hashes with the scheduler declarat
     },
     payload: {
       bind: ['execution_id', 'command', 'result'],
-      context: { policy_version: true },
+      context: { policy_version: undefined },
       format: 'canonical-json',
     },
     verify: { required: true },
@@ -394,6 +407,22 @@ test('handoff v4 persists audit-safe evidence hashes with the scheduler declarat
 
   assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(job));
 
+  const storedV4 = schedulerCreateSpec(job, { fieldVersion: '4' });
+  assert.equal(JSON.parse(storedV4.evidence).payload.context.policy_version, null);
+  assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(storedV4));
+
+  for (const field of ['payload_hash', 'provider_config_hash']) {
+    const tampered = structuredClone(job);
+    tampered.handoff_artifact_payload.evidence[field] = `sha256:${'f'.repeat(64)}`;
+    tampered.handoff_artifact_digest = canonicalDigest(tampered.handoff_artifact_payload);
+    assert.throws(
+      () => assertValidSchedulerHandoffV4Job(tampered),
+      error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+        && new RegExp(`evidence\\.${field} does not match`).test(error.message),
+      field,
+    );
+  }
+
   const legacyJob = compileManifestToScheduler(evidenceManifest, {
     schedulerHandoffVersion: '3',
     cwd: '/tmp',
@@ -401,6 +430,11 @@ test('handoff v4 persists audit-safe evidence hashes with the scheduler declarat
   }).jobs[0];
   assert.equal(Object.hasOwn(legacyJob.evidence, 'payload_hash'), false);
   assert.equal(Object.hasOwn(legacyJob.evidence, 'provider_config_hash'), false);
+  const storedV3 = schedulerCreateSpec(legacyJob, { fieldVersion: '3' });
+  assert.equal(
+    Object.hasOwn(JSON.parse(storedV3.evidence).payload.context, 'policy_version'),
+    false,
+  );
 });
 
 test('shared handoff v4 conformance fixtures have exact digest parity and fail closed', () => {
@@ -855,6 +889,9 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
     ['future canonicalization', {
       handoffContract: { ...HANDOFF_V4_RUNTIME_CONTRACT, canonicalization_version: 2 },
     }],
+    ['extended contract', {
+      handoffContract: { ...HANDOFF_V4_RUNTIME_CONTRACT, future_semantics: true },
+    }],
     ['old scheduler schema', { schemaVersion: 28 }],
   ]) {
     const incompatibleRunner = runner(options);
@@ -1205,6 +1242,92 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   const unbound = jwtVerifier.verifyProof(missingArtifact, profile, context);
   assert.equal(unbound.verified, false);
   assert.match(unbound.reason, /artifact digest claim/);
+
+  for (const { name, trustedDigest, claimedDigest, expected } of [
+    {
+      name: 'bare trusted digest',
+      trustedDigest: 'a'.repeat(64),
+      claimedDigest: 'a'.repeat(64),
+      expected: /trusted handoff artifact digest must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'uppercase trusted digest',
+      trustedDigest: `sha256:${'A'.repeat(64)}`,
+      claimedDigest: `sha256:${'A'.repeat(64)}`,
+      expected: /trusted handoff artifact digest must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'bare claimed digest',
+      trustedDigest: artifactDigest,
+      claimedDigest: 'a'.repeat(64),
+      expected: /artifact digest claim must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'uppercase claimed digest',
+      trustedDigest: artifactDigest,
+      claimedDigest: `sha256:${'A'.repeat(64)}`,
+      expected: /artifact digest claim must be a lowercase sha256 digest/,
+    },
+  ]) {
+    const malformed = jwtVerifier.verifyProof(
+      signJwt({
+        ...payload,
+        jti: `proof-${name.replaceAll(' ', '-')}`,
+        handoff_artifact_digest: claimedDigest,
+      }, privateKey),
+      profile,
+      {
+        ...context,
+        artifactDigest: trustedDigest,
+        claimProofReplay: () => ({ claimed: true }),
+      },
+    );
+    assert.equal(malformed.verified, false, name);
+    assert.match(malformed.reason, expected, name);
+  }
+
+  for (const { name, trustedDigest, claimedDigest, expected } of [
+    {
+      name: 'bare trusted manifest digest',
+      trustedDigest: 'b'.repeat(64),
+      claimedDigest: 'b'.repeat(64),
+      expected: /trusted manifest digest must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'uppercase trusted manifest digest',
+      trustedDigest: `sha256:${'B'.repeat(64)}`,
+      claimedDigest: `sha256:${'B'.repeat(64)}`,
+      expected: /trusted manifest digest must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'bare claimed manifest digest',
+      trustedDigest: payload.manifest_digest,
+      claimedDigest: 'b'.repeat(64),
+      expected: /manifest_digest claim must be a lowercase sha256 digest/,
+    },
+    {
+      name: 'uppercase claimed manifest digest',
+      trustedDigest: payload.manifest_digest,
+      claimedDigest: `sha256:${'B'.repeat(64)}`,
+      expected: /manifest_digest claim must be a lowercase sha256 digest/,
+    },
+  ]) {
+    const malformed = jwtVerifier.verifyProof(
+      signJwt({
+        ...payload,
+        jti: `proof-${name.replaceAll(' ', '-')}`,
+        manifest_digest: claimedDigest,
+      }, privateKey),
+      profile,
+      {
+        ...context,
+        manifestDigest: trustedDigest,
+        claimProofReplay: () => ({ claimed: true }),
+      },
+    );
+    assert.equal(malformed.verified, false, name);
+    assert.match(malformed.reason, expected, name);
+  }
 
   const stringVersionUnbound = jwtVerifier.verifyProof(
     signJwt({ ...payload, jti: 'proof-string-version' }, privateKey),

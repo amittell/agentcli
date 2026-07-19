@@ -883,8 +883,9 @@ exact `handoff_contract` before AgentCLI emits v4:
 ```
 
 Every field is required and an exact match. Missing, older, or newer contract
-metadata is incompatible with v4 and MUST fall back to handoff v3 or reject
-apply. A handoff version number alone is not sufficient negotiation.
+metadata, including any additional contract key, is incompatible with v4 and
+MUST fall back to handoff v3 or reject apply. A handoff version number alone is
+not sufficient negotiation.
 
 The runtime MUST also advertise all of these boolean features before AgentCLI
 emits v4: `authorization_proof_verification`, `handoff_v4_artifact`,
@@ -940,6 +941,10 @@ properties before digest or semantic verification.
 AgentCLI probes live scheduler capabilities for every apply, including a basic
 v0.1 manifest, so immutable artifacts cover all jobs when v4 is available. An
 unavailable capability command leaves security-relevant runtime features false.
+Direct `main` and `isolated` delegation also probes the live runtime before
+compilation, then includes its one-off `delete_after_run` lifecycle value before
+building a v4 artifact. A dry-run remains a static v3 preview and performs no
+scheduler capability query or write.
 During adoption, any final persisted origin override is rebound into the
 scheduler job binding before create. The caller's compile environment is used
 unchanged for execution hashes so direct compile and apply remain deterministic.

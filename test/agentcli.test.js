@@ -72,6 +72,7 @@ import {
 } from '../src/identity/index.js';
 import { buildActorContext, buildStepUpContext } from '../src/actor-context.js';
 import { canonicalDigest } from '../src/canonical.js';
+import { assertValidSchedulerHandoffV4Job } from '../src/handoff/v4.js';
 
 function readExample(name) {
   return JSON.parse(readFileSync(new URL(`../examples/${name}`, import.meta.url), 'utf8'));
@@ -987,8 +988,13 @@ test('scheduler CLI runner requests persisted v4 artifacts only when explicitly 
     },
   });
   assert.deepEqual(scheduler.listJobs(), []);
+  assert.deepEqual(scheduler.listJobs(null), []);
   assert.deepEqual(scheduler.listJobs({ includeHandoffArtifacts: true }), []);
   assert.deepEqual(calls, [
+    {
+      command: 'openclaw-scheduler',
+      args: ['--json', 'jobs', 'list'],
+    },
     {
       command: 'openclaw-scheduler',
       args: ['--json', 'jobs', 'list'],
@@ -9966,6 +9972,8 @@ test('exec delegates non-shell task with dry-run and returns delegation receipt'
   assert.strictEqual(result.session_target, 'isolated');
   assert.ok(result.job_spec, 'dry-run receipt should include the job spec');
   assert.ok(result.job_id, 'dry-run receipt should include a job_id');
+  assert.strictEqual(result.job_spec.delete_after_run, 1);
+  assert.strictEqual('handoff_version' in result.job_spec, false);
 });
 
 test('exec shell task still works unchanged after delegation plumbing', () => {
@@ -10038,6 +10046,64 @@ test('exec delegates prompt task to mock scheduler runner', () => {
     assert.strictEqual(result.status, 'dispatched');
     assert.ok(result.job_id);
     assert.ok(result.handoff_version);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('exec delegated task negotiates v4 before binding one-off lifecycle', () => {
+  const manifest = {
+    version: '0.1',
+    workflows: [{
+      id: 'v4-delegation',
+      name: 'V4 Delegation',
+      tasks: [{
+        id: 'prompt-task',
+        name: 'Prompt Task',
+        prompt: 'Summarize the logs',
+        target: { session_target: 'isolated', agent_id: 'main' },
+        schedule: { cron: '0 * * * *' },
+      }],
+    }],
+  };
+  const capabilities = JSON.stringify({
+    features: Object.fromEntries(HANDOFF_V4_REQUIRED_FEATURES.map(feature => [feature, true])),
+    scheduler_version: '0.5.0-test',
+    schema_version: 29,
+    handoff_version: '4',
+    handoff_contract: HANDOFF_V4_RUNTIME_CONTRACT,
+  });
+  const tmpDir = mkdtempSync(join(tmpdir(), 'agentcli-v4-delegation-'));
+  const fakeBin = join(tmpDir, 'fake-scheduler.sh');
+  const captureFile = join(tmpDir, 'job-spec.json');
+  writeFileSync(fakeBin, [
+    '#!/bin/sh',
+    'if [ "$2" = "capabilities" ]; then',
+    `  echo '${capabilities}'`,
+    'elif [ "$2" = "jobs" ] && [ "$3" = "add" ]; then',
+    `  printf '%s' "$4" > '${captureFile}'`,
+    '  echo \'{"ok":true}\'',
+    'else',
+    '  echo \'{}\'',
+    'fi',
+  ].join('\n'), { mode: 0o755 });
+
+  try {
+    const result = executeTask(manifest, {
+      taskId: 'prompt-task',
+      schedulerBin: fakeBin,
+      signer: 'none',
+      env: { PATH: process.env.PATH },
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.handoff_version, '4');
+
+    const captured = JSON.parse(readFileSync(captureFile, 'utf8'));
+    const artifact = JSON.parse(captured.handoff_artifact_payload);
+    assert.strictEqual(captured.handoff_version, 4);
+    assert.strictEqual(captured.delete_after_run, 1);
+    assert.strictEqual(artifact.lifecycle.delete_after_run, true);
+    assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(captured));
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
 import { resolveValueFrom } from './command.js';
-import { canonicalDigest } from './canonical.js';
+import { canonicalDigest, canonicalStringify } from './canonical.js';
 import {
   mergeAuthorizationProofProfile,
   normalizedTaskPlan,
@@ -114,7 +114,10 @@ const JSON_BLOB_FIELDS = new Set([
   'handoff_artifact_payload',
 ]);
 
-function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
+function projectSchedulerSpec(job, fields, {
+  includeNulls = false,
+  canonicalJsonBlobs = false,
+} = {}) {
   const spec = {};
   for (const field of fields) {
     if (!(field in job)) continue;
@@ -123,7 +126,7 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
     if (value === null && !includeNulls) continue;
     // Scheduler expects JSON blob fields as stringified JSON, not raw objects
     if (value !== null && typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
-      value = JSON.stringify(value);
+      value = canonicalJsonBlobs ? canonicalStringify(value) : JSON.stringify(value);
     }
     spec[field] = value;
   }
@@ -133,7 +136,10 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
 export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
   const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
   const { source, ...spec } = job;
-  const projected = projectSchedulerSpec(spec, fields, { includeNulls: false });
+  const projected = projectSchedulerSpec(spec, fields, {
+    includeNulls: false,
+    canonicalJsonBlobs: String(fieldVersion) === '4',
+  });
   if (originOverride != null) {
     projected.origin = originOverride;
   }
@@ -169,7 +175,10 @@ function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
   const fields = (SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1)
     .filter(f => f !== 'id' && f !== 'origin');
   const { source, ...spec } = job;
-  return projectSchedulerSpec(spec, fields, { includeNulls: true });
+  return projectSchedulerSpec(spec, fields, {
+    includeNulls: true,
+    canonicalJsonBlobs: String(fieldVersion) === '4',
+  });
 }
 
 function duplicateNames(items) {
@@ -200,7 +209,8 @@ export function createSchedulerCliRunner(options = {}) {
       try { return invoke(['capabilities']); }
       catch { return null; }
     },
-    listJobs({ includeHandoffArtifacts = false } = {}) {
+    listJobs(options = {}) {
+      const includeHandoffArtifacts = options?.includeHandoffArtifacts === true;
       const args = ['jobs', 'list'];
       if (includeHandoffArtifacts === true) {
         args.push('--include-handoff-artifacts');
