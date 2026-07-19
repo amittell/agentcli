@@ -831,6 +831,14 @@ Credential and proof sources are represented by declarative locations and
 hashes. A consumer MUST recompute and compare the artifact, scheduler binding,
 and effective task digests before execution.
 
+When evidence is declared, the persisted scheduler evidence declaration MUST
+retain canonical `payload_hash` and `provider_config_hash` values that exactly
+match the artifact evidence binding. Raw `provider_config` remains null. An
+absent evidence declaration requires both artifact hashes to be null, while a
+declared payload or provider configuration requires its corresponding hash to
+be non-null. A consumer MUST reject any semantic or hash mismatch between the
+persisted declaration and the artifact.
+
 ### Persistence and replacement
 
 Artifacts are immutable and content-addressed. Create, update, adoption,

@@ -199,10 +199,20 @@ function sanitizeAuthorizationProfile(profile) {
   };
 }
 
-function sanitizeEvidenceDeclaration(evidence) {
+function sanitizeEvidenceDeclaration(evidence, { includeHashes = false } = {}) {
   if (!evidence) return null;
   return {
     ...evidence,
+    ...(includeHashes
+      ? {
+          payload_hash: evidence.payload == null
+            ? null
+            : canonicalDigest(evidence.payload),
+          provider_config_hash: evidence.provider_config == null
+            ? null
+            : canonicalDigest(evidence.provider_config),
+        }
+      : {}),
     provider_config: null,
   };
 }
@@ -329,7 +339,9 @@ export function compileManifestToScheduler(
       const persistedIdentity = sanitizeIdentityDeclaration(resolvedIdentity);
       const persistedAuthorizationProof = sanitizeAuthorizationProofDeclaration(resolvedAuthorizationProof);
       const persistedAuthorization = sanitizeAuthorizationDeclaration(resolvedAuthorization);
-      const persistedEvidence = sanitizeEvidenceDeclaration(resolvedEvidence);
+      const persistedEvidence = sanitizeEvidenceDeclaration(resolvedEvidence, {
+        includeHashes: String(schedulerHandoffVersion) === '4',
+      });
       const deliveryOptOutReason = schedulerDeliveryOptOutReason(plan);
       const job = {
         id: plan.id,

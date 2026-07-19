@@ -339,6 +339,59 @@ test('handoff v4 schema requires explicit nullable evidence hashes', () => {
   }
 });
 
+test('handoff v4 persists audit-safe evidence hashes with the scheduler declaration', () => {
+  const evidenceManifest = manifest();
+  evidenceManifest.evidence_profiles = [{
+    id: 'signed-evidence',
+    provider: 'ssh',
+    provider_config: {
+      key_path: '/private/evidence-key',
+      principal: 'agentcli',
+      allowed_signers_path: '/private/allowed-signers',
+    },
+    payload: {
+      bind: ['execution_id', 'command', 'result'],
+      context: { policy_version: true },
+      format: 'canonical-json',
+    },
+    verify: { required: true },
+  }];
+  evidenceManifest.workflows[0].tasks[0].evidence = { ref: 'signed-evidence' };
+
+  const job = compileManifestToScheduler(evidenceManifest, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+
+  assert.equal(job.evidence.provider_config, null);
+  assert.equal(job.evidence.payload_hash, canonicalDigest(job.evidence.payload));
+  assert.equal(
+    job.evidence.provider_config_hash,
+    canonicalDigest(evidenceManifest.evidence_profiles[0].provider_config),
+  );
+  assert.equal(
+    job.evidence.payload_hash,
+    job.handoff_artifact_payload.evidence.payload_hash,
+  );
+  assert.equal(
+    job.evidence.provider_config_hash,
+    job.handoff_artifact_payload.evidence.provider_config_hash,
+  );
+  assert.equal(JSON.stringify(job.evidence).includes('/private/evidence-key'), false);
+  assert.equal(JSON.stringify(job.evidence).includes('/private/allowed-signers'), false);
+
+  assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(job));
+
+  const legacyJob = compileManifestToScheduler(evidenceManifest, {
+    schedulerHandoffVersion: '3',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  assert.equal(Object.hasOwn(legacyJob.evidence, 'payload_hash'), false);
+  assert.equal(Object.hasOwn(legacyJob.evidence, 'provider_config_hash'), false);
+});
+
 test('shared handoff v4 conformance fixtures have exact digest parity and fail closed', () => {
   const fixture = sharedConformanceFixture;
   const [job] = compileManifestToScheduler(fixture.manifest, {

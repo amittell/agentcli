@@ -35,8 +35,8 @@
   are available to the scheduler runtime for signed or provider-verified
   terminal evidence
 - evidence: payload and provider-configuration hashes are explicit required
-  nullable fields, preventing structurally incomplete artifacts from becoming
-  valid after digest recalculation
+  nullable fields and are retained in the sanitized scheduler declaration for
+  exact artifact parity while raw provider configuration remains absent
 - inspect: added immutable artifacts, runtime events, provider sessions, and
   credential presentations to the scheduler inspection surface
 - conformance: added shared positive and negative v4 fixtures and exact digest
