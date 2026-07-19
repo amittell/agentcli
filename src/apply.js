@@ -288,7 +288,7 @@ export async function applyManifestToScheduler(
     const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
 
-    if (supportsSchedulerHandoffV4(effectiveResult)) {
+    if (supportsSchedulerHandoffV4(runtimeCaps)) {
       compiled = compileManifestToScheduler(manifest, {
         includeExplain,
         schedulerHandoffVersion: '4',

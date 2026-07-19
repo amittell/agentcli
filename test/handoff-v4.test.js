@@ -391,6 +391,16 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
   assert.equal(fallback.handoff.field_version, '3');
   assert.equal('handoff_version' in missingGateRunner.added[0], false);
 
+  const omittedGateFeatures = { ...V4_FEATURES };
+  delete omittedGateFeatures.immutable_runtime_events;
+  const omittedGateRunner = runner({ features: omittedGateFeatures });
+  const omittedGate = await applyManifestToScheduler(manifest(), {
+    runner: omittedGateRunner,
+    env: { PATH: '/usr/bin' },
+  });
+  assert.equal(omittedGate.handoff.field_version, '3');
+  assert.equal('handoff_version' in omittedGateRunner.added[0], false);
+
   const oldRunner = runner({ handoffVersion: '3' });
   const oldRuntime = await applyManifestToScheduler(manifest(), {
     runner: oldRunner,
