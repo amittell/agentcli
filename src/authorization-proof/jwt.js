@@ -573,7 +573,7 @@ const jwtVerifier = {
     const signatureRequired = Boolean(context.requireSignature);
     const manifestBindingRequired = context.requireManifestBinding !== false;
     const artifactDigest = context.artifactDigest ?? context.handoffArtifactDigest ?? null;
-    const v4Required = context.handoffVersion === 4 || context.handoff_version === 4
+    const v4Required = Number(context.handoffVersion ?? context.handoff_version) === 4
       || artifactDigest != null;
     const clockSkewSeconds = v4Required
       ? (context.clockSkewSeconds ?? 60)

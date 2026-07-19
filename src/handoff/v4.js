@@ -49,6 +49,15 @@ const SCHEDULER_JOB_REBINDABLE_FIELDS = new Set([
   'job_type',
 ]);
 
+export function schedulerHandoffV4RebindableOverrides(job) {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return {};
+  return Object.fromEntries(
+    [...SCHEDULER_JOB_REBINDABLE_FIELDS]
+      .filter(field => Object.hasOwn(job, field))
+      .map(field => [field, job[field]]),
+  );
+}
+
 function hashObject(value) {
   return value == null ? null : canonicalDigest(value);
 }

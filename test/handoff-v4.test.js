@@ -765,10 +765,24 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
   }).ok, true);
 
   const legacyId = 'legacy-v3-row';
+  const legacyRuntimeOverrides = {
+    payload_scope: 'global',
+    resource_pool: 'legacy-pool',
+    job_class: 'pre_compaction_flush',
+    job_type: 'watchdog',
+    watchdog_target_label: 'legacy-target',
+    watchdog_check_cmd: '/usr/bin/legacy-health-check',
+    watchdog_timeout_min: 9,
+    watchdog_alert_channel: 'ops',
+    watchdog_alert_target: 'legacy-on-call',
+    watchdog_self_destruct: false,
+    watchdog_started_at: '2026-07-19T04:30:00.000Z',
+  };
   const adopter = statefulRunner([{
     id: legacyId,
     name: manifest().workflows[0].tasks[0].name,
     origin: 'legacy-origin',
+    ...legacyRuntimeOverrides,
   }]);
   const adopted = await applyManifestToScheduler(manifest(), {
     runner: adopter,
@@ -780,6 +794,9 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
   assert.equal(adopted.actions[0].adopted_from_job_id, legacyId);
   assert.deepEqual(adopter.history.map(entry => entry.action), ['add', 'delete']);
   assert.equal(adopter.history[0].spec.origin, 'legacy-origin');
+  for (const [field, value] of Object.entries(legacyRuntimeOverrides)) {
+    assert.equal(adopter.history[0].spec[field], value, `${field} must survive v4 adoption`);
+  }
   const adoptedPayload = JSON.parse(adopter.history[0].spec.handoff_artifact_payload);
   assert.equal(adoptedPayload.handoff_version, 4);
   const expectedAdopted = rebindSchedulerHandoffV4Job(
@@ -788,7 +805,7 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
       cwd: '/tmp',
       env: { PATH: '/usr/bin' },
     }).jobs[0],
-    { origin: 'legacy-origin' },
+    { origin: 'legacy-origin', ...legacyRuntimeOverrides },
   );
   assert.equal(
     adoptedPayload.scheduler_job_binding.digest,
@@ -803,7 +820,21 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
     cwd: '/tmp',
     env: { PATH: '/usr/bin' },
   }).jobs[0];
-  const existing = rebindSchedulerHandoffV4Job(compiled, { origin: 'legacy-origin' });
+  const preservedRuntimeOverrides = {
+    origin: 'legacy-origin',
+    payload_scope: 'global',
+    resource_pool: 'preserved-pool',
+    job_class: 'pre_compaction_flush',
+    job_type: 'watchdog',
+    watchdog_target_label: 'preserved-target',
+    watchdog_check_cmd: '/usr/bin/preserved-health-check --strict',
+    watchdog_timeout_min: 17,
+    watchdog_alert_channel: 'ops',
+    watchdog_alert_target: 'on-call',
+    watchdog_self_destruct: false,
+    watchdog_started_at: '2026-07-19T05:00:00.000Z',
+  };
+  const existing = rebindSchedulerHandoffV4Job(compiled, preservedRuntimeOverrides);
   const scheduler = statefulRunner([
     schedulerCreateSpec(existing, { originOverride: 'legacy-origin', fieldVersion: '4' }),
   ]);
@@ -816,7 +847,11 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
   assert.equal(result.actions[0].action, 'updated');
   const update = scheduler.history.at(-1);
   assert.equal(update.action, 'update');
-  const expected = rebindSchedulerHandoffV4Job(compiled, { origin: 'legacy-origin' });
+  const expected = rebindSchedulerHandoffV4Job(compiled, preservedRuntimeOverrides);
+  for (const [field, value] of Object.entries(preservedRuntimeOverrides)) {
+    if (field === 'origin') continue;
+    assert.equal(update.spec[field], value, `${field} must survive the v4 update`);
+  }
   assert.equal(update.spec.handoff_artifact_digest, expected.handoff_artifact_digest);
   assert.equal(
     JSON.parse(update.spec.handoff_artifact_payload).scheduler_job_binding.digest,
@@ -964,6 +999,20 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   const unbound = jwtVerifier.verifyProof(missingArtifact, profile, context);
   assert.equal(unbound.verified, false);
   assert.match(unbound.reason, /artifact digest claim/);
+
+  const stringVersionUnbound = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-string-version' }, privateKey),
+    profile,
+    {
+      ...context,
+      artifactDigest: undefined,
+      handoffVersion: undefined,
+      handoff_version: '4',
+      claimProofReplay: () => ({ claimed: true }),
+    },
+  );
+  assert.equal(stringVersionUnbound.verified, false);
+  assert.match(stringVersionUnbound.reason, /trusted handoff artifact digest/);
 
   const inverted = signJwt({
     ...payload,

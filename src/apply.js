@@ -22,7 +22,10 @@ import {
   SCHEDULER_FIELDS_V04,
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
-import { rebindSchedulerHandoffV4Job } from './handoff/v4.js';
+import {
+  rebindSchedulerHandoffV4Job,
+  schedulerHandoffV4RebindableOverrides,
+} from './handoff/v4.js';
 export { shellCommandInvocation } from './command.js';
 export {
   SCHEDULER_FIELDS_V1,
@@ -476,13 +479,19 @@ export async function applyManifestToScheduler(
       } else if (action === 'updated') {
         const existingOrigin = existingJob?.origin ?? job.origin ?? 'system';
         const updateJob = Number(job.handoff_version) === 4
-          ? rebindSchedulerHandoffV4Job(job, { origin: existingOrigin })
+          ? rebindSchedulerHandoffV4Job(job, {
+              ...schedulerHandoffV4RebindableOverrides(existingJob),
+              origin: existingOrigin,
+            })
           : job;
         schedulerRunner.updateJob(job.id, schedulerUpdateSpec(updateJob, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
         const adoptedOrigin = existingJob?.origin ?? 'system';
         const adoptedJob = Number(job.handoff_version) === 4
-          ? rebindSchedulerHandoffV4Job(job, { origin: adoptedOrigin })
+          ? rebindSchedulerHandoffV4Job(job, {
+              ...schedulerHandoffV4RebindableOverrides(existingJob),
+              origin: adoptedOrigin,
+            })
           : job;
         schedulerRunner.addJob(schedulerCreateSpec(adoptedJob, {
           originOverride: adoptedOrigin,

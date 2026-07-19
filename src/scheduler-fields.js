@@ -51,6 +51,17 @@ export const SCHEDULER_FIELDS_V04 = [
   'handoff_artifact_digest',
   'handoff_artifact_payload',
   'effective_task_hash',
+  'payload_scope',
+  'resource_pool',
+  'job_class',
+  'job_type',
+  'watchdog_target_label',
+  'watchdog_check_cmd',
+  'watchdog_timeout_min',
+  'watchdog_alert_channel',
+  'watchdog_alert_target',
+  'watchdog_self_destruct',
+  'watchdog_started_at',
 ];
 
 export const SCHEDULER_FIELD_VERSIONS = {
