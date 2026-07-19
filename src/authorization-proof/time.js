@@ -30,7 +30,8 @@ export function normalizeProofTimeContext(
       : nowInput instanceof Date
         ? nowInput.getTime()
         : Number.NaN;
-  if (!Number.isFinite(nowMs)) {
+  const normalizedNowMs = new Date(nowMs).getTime();
+  if (!Number.isFinite(nowMs) || !Number.isFinite(normalizedNowMs)) {
     return {
       ok: false,
       reason: 'now must be a valid Date or finite millisecond timestamp',
@@ -39,7 +40,7 @@ export function normalizeProofTimeContext(
 
   return {
     ok: true,
-    nowMs,
+    nowMs: normalizedNowMs,
     clockSkewSeconds,
     clockSkewMs,
   };

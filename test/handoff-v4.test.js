@@ -1091,6 +1091,14 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(invalidNow.verified, false);
   assert.match(invalidNow.reason, /valid Date/);
 
+  const outOfRangeNow = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-out-of-range-now' }, privateKey),
+    profile,
+    { ...context, now: Number.MAX_VALUE },
+  );
+  assert.equal(outOfRangeNow.verified, false);
+  assert.match(outOfRangeNow.reason, /valid Date/);
+
   const inverted = signJwt({
     ...payload,
     iat: now + 30,
