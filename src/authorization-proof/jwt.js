@@ -665,16 +665,29 @@ const jwtVerifier = {
         signature_verified: false,
       };
     }
+    let replayExpiresAt = null;
     if (payload.exp !== undefined) {
-      if (typeof payload.exp !== 'number') {
+      if (!Number.isFinite(payload.exp)) {
         return {
           verified: false,
           method: 'jwt',
-          reason: 'JWT "exp" claim is not a number',
+          reason: 'JWT "exp" claim must be a finite number',
           claims_validated: false,
           signature_verified: false,
         };
       }
+      const expirationMs = payload.exp * 1000;
+      const expirationDate = new Date(expirationMs);
+      if (!Number.isFinite(expirationMs) || !Number.isFinite(expirationDate.getTime())) {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: 'JWT "exp" claim is outside the supported Date range',
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
+      replayExpiresAt = expirationDate.toISOString();
       if (now >= payload.exp + clockSkewSeconds) {
         return {
           verified: false,
@@ -688,11 +701,11 @@ const jwtVerifier = {
 
     // Check not-before (nbf claim)
     if (payload.nbf !== undefined) {
-      if (typeof payload.nbf !== 'number') {
+      if (!Number.isFinite(payload.nbf)) {
         return {
           verified: false,
           method: 'jwt',
-          reason: 'JWT "nbf" claim is not a number',
+          reason: 'JWT "nbf" claim must be a finite number',
           claims_validated: false,
           signature_verified: false,
         };
@@ -709,11 +722,11 @@ const jwtVerifier = {
     }
 
     if (v4Required) {
-      if (typeof payload.iat !== 'number') {
+      if (!Number.isFinite(payload.iat)) {
         return {
           verified: false,
           method: 'jwt',
-          reason: 'handoff v4 JWT is missing a numeric iat claim',
+          reason: 'handoff v4 JWT is missing a finite numeric iat claim',
           claims_validated: false,
           signature_verified: false,
         };
@@ -863,7 +876,7 @@ const jwtVerifier = {
           subject: payload.sub ?? null,
           proofId: payload.jti,
           artifactDigest,
-          expiresAt: new Date(payload.exp * 1000).toISOString(),
+          expiresAt: replayExpiresAt,
           runId: context.runId ?? null,
         });
         if (replayResult && typeof replayResult.then === 'function') {

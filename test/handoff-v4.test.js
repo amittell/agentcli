@@ -176,13 +176,17 @@ function base64url(value) {
   return Buffer.from(value).toString('base64url');
 }
 
-function signJwt(payload, privateKey) {
+function signJwtJson(payloadJson, privateKey) {
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' }));
-  const body = base64url(JSON.stringify(payload));
+  const body = base64url(payloadJson);
   const signingInput = `${header}.${body}`;
   const signer = createSign('RSA-SHA256');
   signer.update(signingInput);
   return `${signingInput}.${signer.sign(privateKey).toString('base64url')}`;
+}
+
+function signJwt(payload, privateKey) {
+  return signJwtJson(JSON.stringify(payload), privateKey);
 }
 
 test('handoff v4 artifact is canonical, deterministic, and tamper evident', () => {
@@ -609,6 +613,22 @@ test('handoff v4 scheduler rebinding rejects a tampered original artifact', () =
     () => rebindSchedulerHandoffV4Job(changedJobProjection, { origin: 'legacy-origin' }),
     error => error.code === 'HANDOFF_ARTIFACT_INVALID'
       && /execution projection no longer matches/.test(error.message),
+  );
+
+  const changedJobId = structuredClone(job);
+  changedJobId.id = 'different-job-id';
+  assert.throws(
+    () => rebindSchedulerHandoffV4Job(changedJobId, { origin: 'legacy-origin' }),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && /compiled\.job_id does not match/.test(error.message),
+  );
+
+  const changedEffectiveTaskHash = structuredClone(job);
+  changedEffectiveTaskHash.effective_task_hash = `sha256:${'0'.repeat(64)}`;
+  assert.throws(
+    () => rebindSchedulerHandoffV4Job(changedEffectiveTaskHash, { origin: 'legacy-origin' }),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && /compiled\.effective_task_hash does not match/.test(error.message),
   );
 });
 
@@ -1098,6 +1118,38 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   );
   assert.equal(outOfRangeNow.verified, false);
   assert.match(outOfRangeNow.reason, /valid Date/);
+
+  const overflowingExpiry = jwtVerifier.verifyProof(
+    signJwt({ ...payload, exp: Number.MAX_VALUE, jti: 'proof-overflowing-expiry' }, privateKey),
+    profile,
+    context,
+  );
+  assert.equal(overflowingExpiry.verified, false);
+  assert.match(overflowingExpiry.reason, /supported Date range/);
+  assert.equal(claimed.has('proof-overflowing-expiry'), false);
+
+  const infiniteExpiryJson = JSON.stringify({
+    ...payload,
+    exp: '__INFINITE_EXPIRY__',
+    jti: 'proof-infinite-expiry',
+  }).replace('"__INFINITE_EXPIRY__"', '1e309');
+  const infiniteExpiry = jwtVerifier.verifyProof(
+    signJwtJson(infiniteExpiryJson, privateKey),
+    profile,
+    context,
+  );
+  assert.equal(infiniteExpiry.verified, false);
+  assert.match(infiniteExpiry.reason, /finite number/);
+  assert.equal(claimed.has('proof-infinite-expiry'), false);
+
+  const outOfRangeExpiry = jwtVerifier.verifyProof(
+    signJwt({ ...payload, exp: 8_640_000_000_001, jti: 'proof-out-of-range-expiry' }, privateKey),
+    profile,
+    context,
+  );
+  assert.equal(outOfRangeExpiry.verified, false);
+  assert.match(outOfRangeExpiry.reason, /supported Date range/);
+  assert.equal(claimed.has('proof-out-of-range-expiry'), false);
 
   const inverted = signJwt({
     ...payload,

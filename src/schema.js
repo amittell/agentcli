@@ -122,6 +122,13 @@ const childCredentialPolicyField = {
   nullable: true,
 };
 
+const uniqueNonEmptyStringArrayField = {
+  type: 'array',
+  nullable: true,
+  uniqueItems: true,
+  items: { type: 'string', minLength: 1 },
+};
+
 const identityField = {
   type: 'object',
   nullable: true,
@@ -648,7 +655,7 @@ export const evidenceRefField = {
       type: 'object',
       nullable: true,
       fields: {
-        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        bind: uniqueNonEmptyStringArrayField,
         context: { type: 'object', nullable: true },
         format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
       },
@@ -672,13 +679,13 @@ export const evidenceProfileField = {
   fields: {
     id: { type: 'string' },
     provider: { type: 'string' },
-    methods: { type: 'array', nullable: true, items: { type: 'string' } },
+    methods: uniqueNonEmptyStringArrayField,
     provider_config: { type: 'object', nullable: true },
     payload: {
       type: 'object',
       nullable: true,
       fields: {
-        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        bind: uniqueNonEmptyStringArrayField,
         context: { type: 'object', nullable: true },
         format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
       },
@@ -876,6 +883,11 @@ function nullableSchema(schema) {
 const nullableStringSchema = nullableSchema({ type: 'string' });
 const nullableTokenSchema = nullableSchema({ type: 'string', pattern: TOKEN_PATTERN });
 const nullableBooleanSchema = nullableSchema({ type: 'boolean' });
+const nullableUniqueNonEmptyStringArraySchema = nullableSchema({
+  type: 'array',
+  uniqueItems: true,
+  items: { type: 'string', minLength: 1 },
+});
 
 const jsonSchemaDefs = {
   valueFrom: objectSchema({
@@ -1084,7 +1096,7 @@ const jsonSchemaDefs = {
     decision: nullableSchema({ $ref: '#/$defs/authorizationDecision' }),
   }, { required: ['ref'] }),
   evidencePayload: objectSchema({
-    bind: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    bind: nullableUniqueNonEmptyStringArraySchema,
     context: nullableSchema({ type: 'object', additionalProperties: true }),
     format: nullableSchema({ type: 'string', enum: ['canonical-json', 'json'] }),
   }),
@@ -1136,7 +1148,7 @@ const jsonSchemaDefs = {
   evidenceProfile: objectSchema({
     id: { type: 'string', pattern: IDENTIFIER_PATTERN },
     provider: { type: 'string', minLength: 1 },
-    methods: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    methods: nullableUniqueNonEmptyStringArraySchema,
     provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
     payload: nullableSchema({ $ref: '#/$defs/evidencePayload' }),
     verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
@@ -1294,7 +1306,9 @@ function legacyDescriptorToJsonSchema(descriptor) {
   if (descriptor.enum) result.enum = [...descriptor.enum];
   if (descriptor.required) result.required = [...descriptor.required];
   if (descriptor.min !== undefined) result.minimum = descriptor.min;
+  if (descriptor.minLength !== undefined) result.minLength = descriptor.minLength;
   if (descriptor.minItems !== undefined) result.minItems = descriptor.minItems;
+  if (descriptor.uniqueItems !== undefined) result.uniqueItems = descriptor.uniqueItems;
   if (descriptor.note) result.description = descriptor.note;
   if (descriptor.format === 'token') result.pattern = TOKEN_PATTERN;
   if (descriptor.fields) {

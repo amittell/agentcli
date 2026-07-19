@@ -653,6 +653,23 @@ export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
       { code: 'HANDOFF_ARTIFACT_INVALID', errors: originalValidation.errors },
     );
   }
+  const compiledIdentityErrors = [];
+  if (job.id !== originalValidation.payload.compiled.job_id) {
+    compiledIdentityErrors.push('compiled.job_id does not match the current job id');
+  }
+  if (job.effective_task_hash !== originalValidation.payload.compiled.effective_task_hash) {
+    compiledIdentityErrors.push(
+      'compiled.effective_task_hash does not match the current job effective_task_hash',
+    );
+  }
+  if (compiledIdentityErrors.length > 0) {
+    throw Object.assign(
+      new Error(
+        `Cannot rebind handoff v4 job whose compiled identity no longer matches its artifact: ${compiledIdentityErrors.join('; ')}`,
+      ),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: compiledIdentityErrors },
+    );
+  }
   const currentBindingDigest = canonicalDigest(schedulerJobExecutionProjection(job));
   if (originalValidation.payload.scheduler_job_binding.digest !== currentBindingDigest) {
     throw Object.assign(

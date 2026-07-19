@@ -824,6 +824,24 @@ test('cli schema manifest reflects v0.2 identity surfaces', async () => {
   assert.ok(output.schema.fields.evidence_profiles);
 });
 
+test('cli schema manifest exposes unique non-empty evidence binding lists', async () => {
+  const legacy = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
+  const legacyProfile = legacy.schema.fields.evidence_profiles.items;
+  assert.equal(legacyProfile.fields.methods.uniqueItems, true);
+  assert.equal(legacyProfile.fields.methods.items.minLength, 1);
+  assert.equal(legacyProfile.fields.payload.fields.bind.uniqueItems, true);
+  assert.equal(legacyProfile.fields.payload.fields.bind.items.minLength, 1);
+
+  const jsonSchema = JSON.parse(await runCli(['schema', 'manifest']));
+  const profile = jsonSchema.schema.$defs.evidenceProfile.properties;
+  const methods = profile.methods.anyOf[0];
+  const payloadBind = jsonSchema.schema.$defs.evidencePayload.properties.bind.anyOf[0];
+  assert.equal(methods.uniqueItems, true);
+  assert.equal(methods.items.minLength, 1);
+  assert.equal(payloadBind.uniqueItems, true);
+  assert.equal(payloadBind.items.minLength, 1);
+});
+
 test('cli schema manifest exposes authorization proof value_from sources', async () => {
   const output = JSON.parse(await runCli(['schema', 'manifest', '--legacy']));
   const proofValueFrom = output.schema.fields.authorization_proof_profiles.items.fields.proof.fields.value_from.fields;
@@ -5814,6 +5832,61 @@ test('v0.2 manifest version is accepted', () => {
   };
   const result = validateManifest(manifest);
   assert.strictEqual(result.ok, true);
+});
+
+test('validation rejects duplicate or empty evidence methods and payload bindings', () => {
+  const manifest = {
+    version: '0.2',
+    evidence_profiles: [{
+      id: 'evidence',
+      provider: 'none',
+      methods: ['signed', '', 'signed'],
+      payload: { bind: ['command', 'command'] },
+    }],
+    workflows: [{
+      id: 'w',
+      name: 'W',
+      tasks: [{
+        id: 't',
+        name: 'T',
+        target: { session_target: 'shell' },
+        shell: { program: 'echo' },
+        schedule: { cron: '* * * * *' },
+        evidence: {
+          ref: 'evidence',
+          payload: { bind: ['', 'result', 'result'] },
+        },
+      }],
+    }],
+  };
+
+  const result = validateManifest(manifest);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => (
+    error.path === '$.evidence_profiles[0].methods[1]'
+      && /cannot be empty/.test(error.message)
+  )));
+  assert.ok(result.errors.some(error => (
+    error.path === '$.evidence_profiles[0].methods[2]'
+      && /unique/.test(error.message)
+  )));
+  assert.ok(result.errors.some(error => (
+    error.path === '$.evidence_profiles[0].payload.bind[1]'
+      && /unique/.test(error.message)
+  )));
+  assert.ok(result.errors.some(error => (
+    error.path === '$.workflows[0].tasks[0].evidence.payload.bind[0]'
+      && /cannot be empty/.test(error.message)
+  )));
+  assert.ok(result.errors.some(error => (
+    error.path === '$.workflows[0].tasks[0].evidence.payload.bind[2]'
+      && /unique/.test(error.message)
+  )));
+  assert.throws(
+    () => compileManifestToScheduler(manifest, { schedulerHandoffVersion: '4' }),
+    error => error.message === 'Manifest validation failed'
+      && error.validation?.errors.some(item => item.path.includes('evidence_profiles[0].methods')),
+  );
 });
 
 // -- Identity Provider Registry Tests --

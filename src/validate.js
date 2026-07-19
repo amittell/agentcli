@@ -165,6 +165,26 @@ function checkString(errors, path, value, { required = true } = {}) {
   }
 }
 
+function checkUniqueNonEmptyStringArray(errors, path, value) {
+  if (value == null) return;
+  if (!Array.isArray(value)) {
+    addError(errors, path, 'must be an array');
+    return;
+  }
+
+  const seen = new Set();
+  for (const [index, item] of value.entries()) {
+    const itemPath = `${path}[${index}]`;
+    checkString(errors, itemPath, item);
+    if (typeof item !== 'string' || item.trim() === '') continue;
+    if (seen.has(item)) {
+      addError(errors, itemPath, 'must be unique within the array');
+    } else {
+      seen.add(item);
+    }
+  }
+}
+
 function checkIdentifier(errors, path, value, { required = true } = {}) {
   checkString(errors, path, value, { required });
   if (value == null || typeof value !== 'string' || value.trim() === '') return;
@@ -539,9 +559,7 @@ function validateEvidenceRef(errors, path, value) {
   if (!isObject(value)) { addError(errors, path, 'must be an object'); return; }
   checkString(errors, `${path}.ref`, value.ref, { required: false });
   if (checkOptionalObject(errors, `${path}.payload`, value.payload)) {
-    if (value.payload.bind != null && !Array.isArray(value.payload.bind)) {
-      addError(errors, `${path}.payload.bind`, 'must be an array');
-    }
+    checkUniqueNonEmptyStringArray(errors, `${path}.payload.bind`, value.payload.bind);
     if (value.payload.context != null && !isObject(value.payload.context)) {
       addError(errors, `${path}.payload.context`, 'must be an object');
     }
@@ -1181,13 +1199,12 @@ export function validateManifest(manifest) {
           if (evidIds.has(profile.id)) addError(errors, `${pp}.id`, 'must be unique');
           evidIds.add(profile.id);
         }
+        checkUniqueNonEmptyStringArray(errors, `${pp}.methods`, profile.methods);
         if (profile.provider_config != null && !isObject(profile.provider_config)) {
           addError(errors, `${pp}.provider_config`, 'must be an object');
         }
         if (checkOptionalObject(errors, `${pp}.payload`, profile.payload)) {
-          if (profile.payload.bind != null && !Array.isArray(profile.payload.bind)) {
-            addError(errors, `${pp}.payload.bind`, 'must be an array');
-          }
+          checkUniqueNonEmptyStringArray(errors, `${pp}.payload.bind`, profile.payload.bind);
           if (profile.payload.context != null && !isObject(profile.payload.context)) {
             addError(errors, `${pp}.payload.context`, 'must be an object');
           }
