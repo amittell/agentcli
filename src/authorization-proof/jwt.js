@@ -831,7 +831,7 @@ const jwtVerifier = {
     if (signatureVerified) {
       try {
         verifiedKeyId = publicKeyId(context.trustedKey);
-        if (context.trustedKeyId && context.trustedKeyId !== verifiedKeyId) {
+        if (v4Required && context.trustedKeyId && context.trustedKeyId !== verifiedKeyId) {
           signatureVerified = false;
           signatureReason = 'trusted JWT key ID does not match the verified signing key';
         }
@@ -919,6 +919,7 @@ const jwtVerifier = {
       && artifactBound
       && replayProtected
       && revocationChecked;
+    const trustedKeyId = context.trustedKeyId || null;
 
     const result = {
       verified,
@@ -936,7 +937,11 @@ const jwtVerifier = {
       replay_protected: replayProtected,
       revocation_checked: revocationChecked,
       decoded_claims: decodedClaims,
-      key_id: verifiedKeyId,
+      key_id: v4Required
+        ? verifiedKeyId
+        : (trustedKeyId || verifiedKeyId),
+      trusted_key_id: trustedKeyId,
+      verified_key_id: signatureVerified ? verifiedKeyId : null,
       key_source: context.trustedKeySource || null,
       manifest_digest: context.manifestDigest || null,
       verified_at: new Date(verificationNowMs).toISOString(),
@@ -987,6 +992,8 @@ const jwtVerifier = {
       revocation_checked: result.revocation_checked === true,
       decoded_claims: result.decoded_claims || null,
       key_id: result.key_id || null,
+      trusted_key_id: result.trusted_key_id || null,
+      verified_key_id: result.verified_key_id || null,
       key_source: result.key_source || null,
       reason: result.reason || result.signature_verification_reason || null,
     };

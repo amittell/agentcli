@@ -302,11 +302,12 @@ test('handoff v4 artifact is canonical, deterministic, and tamper evident', () =
 });
 
 test('handoff v4 validation rejects missing identity fields and unknown properties', () => {
-  const payload = compileManifestToScheduler(manifest(), {
+  const compiled = compileManifestToScheduler(manifest(), {
     schedulerHandoffVersion: '4',
     cwd: '/tmp',
     env: { PATH: '/usr/bin' },
-  }).jobs[0].handoff_artifact_payload;
+  }).jobs[0];
+  const payload = compiled.handoff_artifact_payload;
 
   for (const path of [
     ['manifest', 'workflow_id'],
@@ -345,6 +346,33 @@ test('handoff v4 validation rejects missing identity fields and unknown properti
     assert.equal(credentialValidation.ok, false, field);
     assert.match(credentialValidation.errors.join('; '), new RegExp(`${field} is not allowed`));
   }
+
+  for (const malformedBindings of [
+    {},
+    null,
+    'not-an-array',
+    { entries: [] },
+  ]) {
+    const malformed = structuredClone(payload);
+    malformed.identity.presentation.bindings = malformedBindings;
+    const malformedValidation = validateSchedulerHandoffV4Artifact(malformed, {
+      expectedDigest: canonicalDigest(malformed),
+    });
+    assert.equal(malformedValidation.ok, false);
+    assert.match(
+      malformedValidation.errors.join('; '),
+      /artifact\.identity\.presentation\.bindings must be array/,
+    );
+  }
+
+  const malformedJob = structuredClone(compiled);
+  malformedJob.handoff_artifact_payload.identity.presentation.bindings = {};
+  malformedJob.handoff_artifact_digest = canonicalDigest(malformedJob.handoff_artifact_payload);
+  assert.throws(
+    () => assertValidSchedulerHandoffV4Job(malformedJob),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && error.errors.some(message => /identity\.presentation\.bindings must be array/.test(message)),
+  );
 });
 
 test('handoff v4 schema accepts every valid cleanup policy and rejects unknown proof methods', () => {
@@ -1336,7 +1364,23 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(verified.artifact_bound, true);
   assert.equal(verified.replay_protected, true);
   assert.equal(verified.revocation_checked, true);
+  assert.equal(verified.trusted_key_id, null);
+  assert.equal(verified.verified_key_id, verified.key_id);
   assert.equal(verified.verified_at, new Date(now * 1000).toISOString());
+
+  const matchingKeyId = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-matching-key-id' }, privateKey),
+    profile,
+    {
+      ...context,
+      trustedKeyId: verified.key_id,
+      claimProofReplay: () => ({ claimed: true }),
+    },
+  );
+  assert.equal(matchingKeyId.verified, true, matchingKeyId.reason);
+  assert.equal(matchingKeyId.key_id, verified.key_id);
+  assert.equal(matchingKeyId.trusted_key_id, verified.key_id);
+  assert.equal(matchingKeyId.verified_key_id, verified.key_id);
 
   const replay = jwtVerifier.verifyProof(token, profile, context);
   assert.equal(replay.verified, false);
@@ -1544,6 +1588,46 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   );
   assert.equal(mismatchedKeyId.verified, false);
   assert.match(mismatchedKeyId.reason, /key ID does not match/);
+
+  const legacyLogicalKeyId = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'legacy-logical-key-id' }, privateKey),
+    profile,
+    {
+      requireSignature: true,
+      requireManifestBinding: true,
+      trustedKey: profile.public_key,
+      trustedKeyId: 'provider-jwks-key-id',
+      manifestDigest: payload.manifest_digest,
+      now: new Date(now * 1000),
+    },
+  );
+  assert.equal(legacyLogicalKeyId.verified, true, legacyLogicalKeyId.reason);
+  assert.equal(legacyLogicalKeyId.signature_verified, true);
+  assert.equal(legacyLogicalKeyId.key_id, 'provider-jwks-key-id');
+  assert.equal(legacyLogicalKeyId.trusted_key_id, 'provider-jwks-key-id');
+  assert.match(legacyLogicalKeyId.verified_key_id, /^spki-sha256:[a-f0-9]{64}$/);
+  assert.notEqual(legacyLogicalKeyId.verified_key_id, legacyLogicalKeyId.key_id);
+  const legacyDescription = jwtVerifier.describeVerification(legacyLogicalKeyId);
+  assert.equal(legacyDescription.key_id, 'provider-jwks-key-id');
+  assert.equal(legacyDescription.trusted_key_id, 'provider-jwks-key-id');
+  assert.equal(legacyDescription.verified_key_id, legacyLogicalKeyId.verified_key_id);
+
+  const legacyDerivedKeyId = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'legacy-derived-key-id' }, privateKey),
+    profile,
+    {
+      requireSignature: true,
+      requireManifestBinding: true,
+      trustedKey: profile.public_key,
+      manifestDigest: payload.manifest_digest,
+      now: new Date(now * 1000),
+    },
+  );
+  assert.equal(legacyDerivedKeyId.verified, true, legacyDerivedKeyId.reason);
+  assert.match(legacyDerivedKeyId.key_id, /^spki-sha256:[a-f0-9]{64}$/);
+  assert.equal(legacyDerivedKeyId.trusted_key_id, null);
+  assert.equal(legacyDerivedKeyId.verified_key_id, legacyDerivedKeyId.key_id);
+  assert.notEqual(legacyDerivedKeyId.key_id, 'test-key');
 
   const indeterminateRevocation = signJwt({ ...payload, jti: 'proof-indeterminate' }, privateKey);
   let indeterminateReplayClaims = 0;

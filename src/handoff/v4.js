@@ -896,22 +896,25 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
   if (!PRESENTATION_MEDIA.has(medium)) {
     errors.push('identity.presentation.handoff is unsupported');
   }
-  for (const [index, binding] of (payload.identity?.presentation?.bindings ?? []).entries()) {
-    if (!binding || typeof binding !== 'object') {
-      errors.push(`identity.presentation.bindings[${index}] must be an object`);
-      continue;
+  const presentationBindings = payload.identity?.presentation?.bindings;
+  if (Array.isArray(presentationBindings)) {
+    for (const [index, binding] of presentationBindings.entries()) {
+      if (!binding || typeof binding !== 'object') {
+        errors.push(`identity.presentation.bindings[${index}] must be an object`);
+        continue;
+      }
+      if ('value' in binding || 'credential' in binding || 'secret' in binding || 'token' in binding) {
+        errors.push(`identity.presentation.bindings[${index}] contains raw credential material`);
+      }
+      if (!PRESENTATION_MEDIA.has(binding.medium)) {
+        errors.push(`identity.presentation.bindings[${index}].medium is unsupported`);
+      } else if (binding.medium !== 'none' && binding.medium !== medium) {
+        errors.push(`identity.presentation.bindings[${index}].medium does not match presentation handoff`);
+      }
+      validateHash(binding.source_hash, `identity.presentation.bindings[${index}].source_hash`, errors);
+      requiredBoolean(binding.required, `identity.presentation.bindings[${index}].required`, errors);
+      requiredBoolean(binding.redact, `identity.presentation.bindings[${index}].redact`, errors);
     }
-    if ('value' in binding || 'credential' in binding || 'secret' in binding || 'token' in binding) {
-      errors.push(`identity.presentation.bindings[${index}] contains raw credential material`);
-    }
-    if (!PRESENTATION_MEDIA.has(binding.medium)) {
-      errors.push(`identity.presentation.bindings[${index}].medium is unsupported`);
-    } else if (binding.medium !== 'none' && binding.medium !== medium) {
-      errors.push(`identity.presentation.bindings[${index}].medium does not match presentation handoff`);
-    }
-    validateHash(binding.source_hash, `identity.presentation.bindings[${index}].source_hash`, errors);
-    requiredBoolean(binding.required, `identity.presentation.bindings[${index}].required`, errors);
-    requiredBoolean(binding.redact, `identity.presentation.bindings[${index}].redact`, errors);
   }
 
   const proof = payload.authorization_proof ?? {};
