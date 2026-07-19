@@ -1,6 +1,6 @@
 {
   "name": "@amittell/agentcli",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Control plane for governed agent and CLI workflows with portable manifests, identity, approvals, and evidence.",
   "type": "module",
   "main": "./src/index.js",
@@ -18,6 +18,14 @@
     "./capabilities": "./src/capabilities.js",
     "./shorthand": "./src/shorthand.js",
     "./inspect": "./src/inspect.js",
+    "./handoff": "./src/handoff/index.js",
+    "./authorization-proof": "./src/authorization-proof/index.js",
+    "./authorization-proof/jwt": "./src/authorization-proof/jwt.js",
+    "./authorization-proof/detached-signature": "./src/authorization-proof/detached-signature.js",
+    "./authorization-proof/certificate": "./src/authorization-proof/certificate.js",
+    "./evidence": "./src/evidence/index.js",
+    "./evidence/payload": "./src/evidence/payload.js",
+    "./evidence/ssh": "./src/evidence/ssh.js",
     "./home": "./src/home.js",
     "./describe": "./src/describe.js",
     "./sanitize": "./src/sanitize.js",
@@ -32,14 +40,17 @@
   },
   "scripts": {
     "test": "node --test",
-    "lint": "eslint . --max-warnings=0"
+    "lint": "eslint . --max-warnings=0",
+    "verify:package": "node scripts/verify-package.mjs"
   },
   "files": [
     "bin",
     "docs",
     "!docs/superpowers",
     "examples",
+    "fixtures",
     "skills",
+    "scripts/verify-package.mjs",
     "src",
     "AGENTS.md",
     "CONTEXT.md",

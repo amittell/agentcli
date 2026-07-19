@@ -14,13 +14,14 @@ import {
 import {
   querySchedulerCapabilities,
   resolveEffectiveFeatures,
+  supportsSchedulerHandoffV4,
   validateManifestCapabilities,
 } from '../capabilities.js';
 
-export function compileManifestForDispatch(manifest) {
+export function compileManifestForDispatch(manifest, options = {}) {
   // Manifests are ordinary mutable JavaScript objects. Recompile on every
   // dispatch so a caller cannot receive a stale job after an in-place edit.
-  return compileManifestToScheduler(manifest);
+  return compileManifestToScheduler(manifest, options);
 }
 
 export const schedulerAdapter = {
@@ -60,11 +61,35 @@ export const schedulerAdapter = {
    */
   dispatch(manifest, task, workflow, options) {
     const { schedulerPrefix, schedulerBin, dbPath, dryRun, cwd, env } = options;
-
-    // Compile the full manifest to get job specs for every task
-    const compiled = compileManifestForDispatch(manifest);
     const taskId = task.id || task.name;
     const workflowId = workflow.id;
+    let runner = null;
+    let effectiveResult = null;
+    let schedulerHandoffVersion = '3';
+
+    if (!dryRun) {
+      runner = createSchedulerCliRunner({
+        schedulerPrefix,
+        schedulerBin,
+        dbPath,
+        cwd,
+        env,
+      });
+      const runtimeCaps = querySchedulerCapabilities(runner);
+      effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+      if (supportsSchedulerHandoffV4(runtimeCaps)) {
+        schedulerHandoffVersion = '4';
+      }
+    }
+
+    // The one-off lifecycle value is set before v4 artifact construction so
+    // the artifact and persisted scheduler projection bind the same job.
+    const compiled = compileManifestForDispatch(manifest, {
+      schedulerHandoffVersion,
+      cwd,
+      env,
+      oneOffSource: { workflow_id: workflowId, task_id: taskId },
+    });
 
     // Match the compiled job to the requested workflow/task pair.
     const job = compiled.jobs.find(
@@ -78,9 +103,7 @@ export const schedulerAdapter = {
       );
     }
 
-    // Mark as one-off so the scheduler deletes the job after a single run.
-    // Spread to avoid mutating the compiler output returned to other callers.
-    const jobSpec = { ...job, delete_after_run: 1 };
+    const jobSpec = job;
 
     if (dryRun) {
       return {
@@ -95,17 +118,6 @@ export const schedulerAdapter = {
       };
     }
 
-    // Build a runner and negotiate capabilities
-    const runner = createSchedulerCliRunner({
-      schedulerPrefix,
-      schedulerBin,
-      dbPath,
-      cwd,
-      env,
-    });
-
-    const runtimeCaps = querySchedulerCapabilities(runner);
-    const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
     const {
       errors: capabilityErrors,
       warnings: capabilityWarnings,

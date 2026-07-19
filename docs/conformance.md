@@ -55,6 +55,8 @@ Must:
 - document backend-specific constraints
 - preserve task ordering and trigger semantics
 - expose or document an explicit capability map for security-relevant runtime behavior
+- advertise the exact artifact, canonicalization, digest, and binding contract
+  before accepting handoff v4
 
 Should:
 
@@ -62,6 +64,7 @@ Should:
 - expose runtime inspection
 - document delivery, retry, and approval behavior separately from the core manifest
 - fail closed when a compiled contract requires an enforcement capability the runtime does not advertise
+- reject missing required fields and unknown properties in handoff v4 artifacts
 
 ## Reference Implementation
 

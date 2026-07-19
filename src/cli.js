@@ -42,7 +42,7 @@ agentcli <command> [args]
 Commands:
   version
   init [--tool program] [--output path] [--workflow-id id] [--task-id id]
-  schema [manifest|workflow|task|schedulerJob|standalonePlan|rpcRequest|rpcResponse|scheduler-job|standalone-plan|rpc-request|rpc-response] [--legacy]
+  schema [manifest|workflow|task|schedulerJob|standalonePlan|handoffV4|rpcRequest|rpcResponse|scheduler-job|standalone-plan|handoff-v4|rpc-request|rpc-response] [--legacy]
   describe [manifest|workflow|task|targets|commands|rpc]
   targets
   paths
@@ -58,7 +58,7 @@ Commands:
        [--signer ssh|none] [--signing-key path] [--evidence-provider name]
        [--instance-id id] [--require-evidence] [--require-authorization]
        [--identity-debug] [--presentation-debug]
-  inspect <jobs|runs|queue|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
+  inspect <${listInspectableEntities().join('|')}> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]
   audit [--limit n]
   approve <manifest> <task-id> [--workflow id] [--by principal] [--reason text]
           [--ttl-s seconds] [--timeout ms] [--instance-id id]
@@ -350,6 +350,7 @@ function pickSchema(name, { legacy = false } = {}) {
   const aliases = {
     'scheduler-job': 'schedulerJob',
     'standalone-plan': 'standalonePlan',
+    'handoff-v4': 'handoffV4',
     'rpc-request': 'rpcRequest',
     'rpc-response': 'rpcResponse'
   };

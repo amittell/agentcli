@@ -1,0 +1,47 @@
+{
+  "version": "0.2",
+  "workflows": [
+    {
+      "id": "handoff-v4-example",
+      "name": "Handoff v4 example",
+      "tasks": [
+        {
+          "id": "emit-contract-status",
+          "name": "Emit contract status",
+          "target": {
+            "session_target": "shell"
+          },
+          "shell": {
+            "program": "/usr/bin/printf",
+            "args": [
+              "%s\\n",
+              "handoff-v4-ready"
+            ]
+          },
+          "schedule": {
+            "cron": "17 3 * * *",
+            "tz": "UTC"
+          },
+          "intent": {
+            "mode": "execute",
+            "read_only": true
+          },
+          "runtime": {
+            "timeout_ms": 30000
+          },
+          "output": {
+            "format": "text"
+          },
+          "delivery": {
+            "mode": "none"
+          },
+          "contract": {
+            "sandbox": "none",
+            "network": "none",
+            "audit": "always"
+          }
+        }
+      ]
+    }
+  ]
+}

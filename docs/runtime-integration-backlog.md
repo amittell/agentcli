@@ -124,13 +124,13 @@ Acceptance criteria:
 
 Owner: `agentcli` + `openclaw-scheduler`
 
-Status: versioned field projection through handoff v3 and negative capability tests are implemented in `agentcli`; runtime releases must opt into each version and feature.
+Status: shipped in AgentCLI 0.5.0 and OpenClaw Scheduler 0.5.0 as handoff v4. The canonical artifact, complete scheduler binding, shared fixtures, non-lossy apply/update/adopt path, final-origin rebinding, environment parity, immutable runtime bindings, strict public artifact schema, exact live contract negotiation, verified-key revocation identity, and negative capability gates are executable release requirements.
 
 Problem:
 
 - The control plane and runtime need a cleaner contract than “flatten some fields and hope the semantics line up.”
 
-Backlog:
+Delivered:
 
 1. Define a versioned compiled handoff artifact for `openclaw-scheduler`.
 2. Preserve resolved per-task semantics needed by the runtime instead of requiring re-derivation from lossy fields.
@@ -227,9 +227,9 @@ Acceptance criteria:
 
 Owner: `agentcli` + `openclaw-scheduler` + OpenClaw (where available)
 
-Status: CI checks out an exact scheduler commit, verifies its capability command, and runs the agentcli scheduler integration tests. Broader gateway-backed end-to-end scenarios remain future cross-repository work.
+Status: shipped for the AgentCLI to scheduler boundary. CI uses exact cross-repository revisions and published-package black-box gates. The scheduler package includes a public fresh-database, restart-backed v4 E2E for identity, credentials, proof, authorization, approvals, structured output, postconditions, signed evidence, delivery, and all five durable dispatch kinds. Broader tests against upstream OpenClaw Gateway releases remain future cross-project work.
 
-Backlog:
+Delivered for the scheduler boundary:
 
 1. Add an integration fixture that exercises `agentcli apply` against a real scheduler instance.
 2. Add at least one end-to-end `v0.2` manifest for:
@@ -277,10 +277,10 @@ Acceptance criteria:
 ### `agentcli`
 
 - Add runtime capability discovery client and fallback logic.
-- Define a versioned scheduler handoff artifact.
+- Maintain the versioned scheduler handoff artifact and conformance fixtures.
 - Improve `apply` error reporting around capability mismatches.
 - Add stateless prompt-task runtime delegation path.
-- Add cross-repo integration tests.
+- Maintain exact-revision and published-package cross-repo integration tests.
 
 ### `openclaw-scheduler`
 

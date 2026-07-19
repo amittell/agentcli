@@ -15,6 +15,7 @@ import {
 export const EVIDENCE_PAYLOAD_SCHEMA = 'agentcli.evidence.payload';
 export const EVIDENCE_PAYLOAD_VERSION = 1;
 const SENSITIVE_FIELD = /(?:^|_)(?:access_token|refresh_token|id_token|token|secret|password|private_key|credentials?|cookie|client_assertion|api_key|authorization_header)(?:_|$)/i;
+const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 function redactSensitiveEvidence(value, key = '') {
   if (SENSITIVE_FIELD.test(key)) {
@@ -101,6 +102,9 @@ export function buildCompleteEvidencePayload({
   manifestDigest,
   effectiveTask,
   effectiveTaskHash,
+  handoffArtifactDigest = null,
+  sourceRunId = null,
+  sourceRunHandoffArtifactDigest = null,
   declaredIdentity = null,
   resolvedIdentity = null,
   authorizationProof = null,
@@ -150,6 +154,13 @@ export function buildCompleteEvidencePayload({
     bindings: {
       manifest_digest: resolvedManifestDigest,
       effective_task_hash: resolvedTaskHash,
+      ...(handoffArtifactDigest != null
+        ? {
+            handoff_artifact_digest: handoffArtifactDigest,
+            source_run_id: sourceRunId,
+            source_run_handoff_artifact_digest: sourceRunHandoffArtifactDigest,
+          }
+        : {}),
     },
     declared_identity: redactSensitiveEvidence(declaredIdentity),
     resolved_identity: redactSensitiveEvidence(resolvedIdentity),
@@ -202,6 +213,21 @@ export function validateCompleteEvidencePayload(payload) {
       if (!/^sha256:[a-f0-9]{64}$/.test(payload.bindings[field])) {
         errors.push(`bindings.${field} must be a SHA-256 digest`);
       }
+    }
+    for (const field of ['handoff_artifact_digest', 'source_run_handoff_artifact_digest']) {
+      const value = payload.bindings[field];
+      if (value != null && !/^sha256:[a-f0-9]{64}$/.test(value)) {
+        errors.push(`bindings.${field} must be null or a SHA-256 digest`);
+      }
+    }
+    if (payload.bindings.source_run_id != null
+      && (typeof payload.bindings.source_run_id !== 'string'
+        || payload.bindings.source_run_id.length === 0)) {
+      errors.push('bindings.source_run_id must be null or a non-empty string');
+    }
+    if ((payload.bindings.source_run_id == null)
+      !== (payload.bindings.source_run_handoff_artifact_digest == null)) {
+      errors.push('source run id and source run artifact digest must be declared together');
     }
   }
   if (!payload.command || typeof payload.command !== 'object' || Array.isArray(payload.command)) {
@@ -293,9 +319,98 @@ export function validateEvidenceRecordBinding(payload, record) {
   if (payload.bindings?.effective_task_hash !== record.effective_task_hash) {
     errors.push('effective task hash does not match the audit record');
   }
+  const payloadArtifactDigest = payload.bindings?.handoff_artifact_digest ?? null;
+  const recordArtifactDigest = record.handoff_artifact_digest ?? null;
+  const v4BindingRequired = [
+    record.handoff_version,
+    record.handoff?.version,
+    record.handoff?.handoff_version,
+  ].some(value => Number(value) === 4)
+    || payloadArtifactDigest != null
+    || recordArtifactDigest != null;
+  if (v4BindingRequired) {
+    if (!SHA256_PATTERN.test(recordArtifactDigest)) {
+      errors.push('audit record handoff artifact digest must be a lowercase SHA-256 digest');
+    }
+    if (!SHA256_PATTERN.test(payloadArtifactDigest)) {
+      errors.push('signed evidence handoff artifact digest must be a lowercase SHA-256 digest');
+    }
+  }
+  if ((payload.bindings?.handoff_artifact_digest ?? null)
+    !== (record.handoff_artifact_digest ?? null)) {
+    errors.push('handoff artifact digest does not match the audit record');
+  }
+  const sourceRunMarker = record.source_run_required === true
+    || record.child_run === true
+    || record.is_child_run === true
+    || record.parent_id != null
+    || record.parent_run_id != null;
+  const sourceRunFieldsPresent = payload.bindings?.source_run_id != null
+    || payload.bindings?.source_run_handoff_artifact_digest != null
+    || record.source_run_id != null
+    || record.source_run_handoff_artifact_digest != null;
+  const sourceRunRequired = sourceRunFieldsPresent || (v4BindingRequired && sourceRunMarker);
+  if (sourceRunRequired) {
+    if (typeof record.source_run_id !== 'string' || record.source_run_id.length === 0) {
+      errors.push('audit record source run id must be a non-empty string');
+    }
+    if (typeof payload.bindings?.source_run_id !== 'string'
+      || payload.bindings.source_run_id.length === 0) {
+      errors.push('signed evidence source run id must be a non-empty string');
+    }
+    if (!SHA256_PATTERN.test(record.source_run_handoff_artifact_digest)) {
+      errors.push('audit record source run artifact digest must be a lowercase SHA-256 digest');
+    }
+    if (!SHA256_PATTERN.test(payload.bindings?.source_run_handoff_artifact_digest)) {
+      errors.push('signed evidence source run artifact digest must be a lowercase SHA-256 digest');
+    }
+  }
+  if ((payload.bindings?.source_run_id ?? null) !== (record.source_run_id ?? null)) {
+    errors.push('source run id does not match the audit record');
+  }
+  if ((payload.bindings?.source_run_handoff_artifact_digest ?? null)
+    !== (record.source_run_handoff_artifact_digest ?? null)) {
+    errors.push('source run artifact digest does not match the audit record');
+  }
   const recordOutputHash = record.result?.output_hash ?? record.hashes?.result ?? null;
   if (payload.result?.output_hash !== recordOutputHash) {
     errors.push('result output hash does not match the audit record');
+  }
+  if (v4BindingRequired) {
+    const payloadResult = payload.result;
+    const recordResult = record.result;
+    if (!payloadResult || typeof payloadResult !== 'object' || Array.isArray(payloadResult)) {
+      errors.push('signed evidence result must be an object');
+    }
+    if (!recordResult || typeof recordResult !== 'object' || Array.isArray(recordResult)) {
+      errors.push('audit record result must be an object');
+    }
+    if (!Object.hasOwn(payloadResult ?? {}, 'status')
+      || typeof payloadResult?.status !== 'string'
+      || payloadResult.status.length === 0) {
+      errors.push('signed evidence result.status must be a non-empty string');
+    }
+    if (!Object.hasOwn(recordResult ?? {}, 'status')
+      || typeof recordResult?.status !== 'string'
+      || recordResult.status.length === 0) {
+      errors.push('audit record result.status must be a non-empty string');
+    }
+    if ((payloadResult?.status ?? null) !== (recordResult?.status ?? null)) {
+      errors.push('result.status does not match the signed evidence');
+    }
+    for (const [label, result] of [
+      ['signed evidence', payloadResult],
+      ['audit record', recordResult],
+    ]) {
+      if (!Object.hasOwn(result ?? {}, 'structured_hash')) {
+        errors.push(`${label} result.structured_hash is required`);
+      } else if (result.structured_hash !== null && !SHA256_PATTERN.test(result.structured_hash)) {
+        errors.push(`${label} result.structured_hash must be null or a lowercase SHA-256 digest`);
+      }
+    }
+    if ((payloadResult?.structured_hash ?? null) !== (recordResult?.structured_hash ?? null)) {
+      errors.push('result.structured_hash does not match the signed evidence');
+    }
   }
 
   const signedFieldMappings = [

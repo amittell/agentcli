@@ -60,6 +60,7 @@ function schemaByName(name = 'manifest', { legacy = false } = {}) {
   const aliases = {
     'scheduler-job': 'schedulerJob',
     'standalone-plan': 'standalonePlan',
+    'handoff-v4': 'handoffV4',
     'rpc-request': 'rpcRequest',
     'rpc-response': 'rpcResponse'
   };

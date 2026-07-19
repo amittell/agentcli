@@ -16,33 +16,84 @@ import {
 import { canonicalStringify, hashString } from '../canonical.js';
 import { resolveValueFrom } from '../command.js';
 import { registerVerifier } from './index.js';
+import { replayClaimAccepted } from './replay.js';
+import { normalizeProofTimeContext } from './time.js';
+
+const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
+const CANONICAL_SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+export function certificateProofKeyId(certificate) {
+  const parsed = certificate instanceof X509Certificate
+    ? certificate
+    : new X509Certificate(certificate);
+  return `x509-sha256:${parsed.fingerprint256.replaceAll(':', '').toLowerCase()}`;
+}
+
+export function buildCertificateV4SigningContent({
+  artifactDigest,
+  nonce,
+  issuedAt,
+  expiresAt,
+  keyId,
+} = {}) {
+  return canonicalStringify({
+    schema: V4_PROOF_SCHEMA,
+    version: 4,
+    method: 'certificate',
+    artifact_digest: artifactDigest,
+    nonce,
+    issued_at: issuedAt,
+    expires_at: expiresAt,
+    key_id: keyId,
+  });
+}
 
 function normalizeDigest(value) {
   return typeof value === 'string' ? value.replace(/^sha256:/, '') : null;
 }
 
 function resolveCanonicalManifest(ctx = {}) {
-  const source = ctx.manifest ?? ctx.manifestContent;
+  const artifactMode = ctx.artifactDigest != null || ctx.handoffArtifactDigest != null;
+  const source = artifactMode
+    ? ctx.artifactPayload
+    : (ctx.manifest ?? ctx.manifestContent);
   if (source === undefined || source === null) {
-    return { error: 'canonical manifest content is required for certificate proof of possession' };
+    return {
+      error: artifactMode
+        ? 'canonical handoff artifact payload is required for certificate proof of possession'
+        : 'canonical manifest content is required for certificate proof of possession',
+    };
   }
 
-  let manifest;
+  let signedObject;
   try {
-    if (Buffer.isBuffer(source)) manifest = JSON.parse(source.toString('utf8'));
-    else if (typeof source === 'string') manifest = JSON.parse(source);
-    else if (typeof source === 'object' && !Array.isArray(source)) manifest = source;
-    else return { error: 'manifest content must be a JSON object' };
+    if (Buffer.isBuffer(source)) signedObject = JSON.parse(source.toString('utf8'));
+    else if (typeof source === 'string') signedObject = JSON.parse(source);
+    else if (typeof source === 'object' && !Array.isArray(source)) signedObject = source;
+    else return { error: 'signed content must be a JSON object' };
   } catch (error) {
-    return { error: `manifest content must be valid JSON: ${error.message}` };
+    return { error: `signed content must be valid JSON: ${error.message}` };
   }
 
-  const content = canonicalStringify(manifest);
+  const content = canonicalStringify(signedObject);
   const digest = hashString(content);
-  if (ctx.manifestDigest && normalizeDigest(ctx.manifestDigest) !== normalizeDigest(digest)) {
-    return { error: 'provided manifest digest does not match canonical manifest content' };
+  const expectedDigest = artifactMode
+    ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
+    : ctx.manifestDigest;
+  if (artifactMode && !CANONICAL_SHA256_PATTERN.test(expectedDigest)) {
+    return { error: 'provided artifact digest must be a canonical lowercase SHA-256 digest' };
   }
-  return { content, digest };
+  const digestMatches = artifactMode
+    ? expectedDigest === digest
+    : normalizeDigest(expectedDigest) === normalizeDigest(digest);
+  if (expectedDigest && !digestMatches) {
+    return {
+      error: artifactMode
+        ? 'provided artifact digest does not match canonical artifact payload'
+        : 'provided manifest digest does not match canonical manifest content',
+    };
+  }
+  return { content, digest, artifactMode };
 }
 
 function parseCertificateProof(proof) {
@@ -50,6 +101,11 @@ function parseCertificateProof(proof) {
     return {
       certificate: proof.certificate,
       signature: proof.signature,
+      artifact_digest: proof.artifact_digest,
+      nonce: proof.nonce,
+      issued_at: proof.issued_at,
+      expires_at: proof.expires_at,
+      key_id: proof.key_id,
     };
   }
   if (typeof proof !== 'string' && !Buffer.isBuffer(proof)) {
@@ -61,17 +117,133 @@ function parseCertificateProof(proof) {
     return {
       certificate: parsed.certificate,
       signature: parsed.signature,
+      artifact_digest: parsed.artifact_digest,
+      nonce: parsed.nonce,
+      issued_at: parsed.issued_at,
+      expires_at: parsed.expires_at,
+      key_id: parsed.key_id,
     };
   }
   return { certificate: text, signature: null };
 }
 
-function verifyProofOfPossession(cert, signature, manifestContent) {
+function validateV4CertificateEnvelope(parsed, context) {
+  const v4 = Number(context.handoffVersion ?? context.handoff_version) === 4
+    || context.artifactDigest != null;
+  if (!v4) return { ok: true, v4: false };
+  for (const field of [
+    'certificate',
+    'signature',
+    'artifact_digest',
+    'nonce',
+    'issued_at',
+    'expires_at',
+    'key_id',
+  ]) {
+    if (typeof parsed[field] !== 'string' || parsed[field].length === 0) {
+      return { ok: false, v4: true, reason: `handoff v4 certificate proof is missing ${field}` };
+    }
+  }
+  if (!CANONICAL_SHA256_PATTERN.test(context.trustedArtifactDigest)) {
+    return { ok: false, v4: true, reason: 'trusted handoff artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  if (!CANONICAL_SHA256_PATTERN.test(parsed.artifact_digest)) {
+    return { ok: false, v4: true, reason: 'certificate proof artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  if (parsed.artifact_digest !== context.trustedArtifactDigest) {
+    return { ok: false, v4: true, reason: 'certificate proof artifact digest does not match' };
+  }
+  const proofTime = normalizeProofTimeContext(context);
+  if (!proofTime.ok) {
+    return { ok: false, v4: true, reason: proofTime.reason };
+  }
+  const now = proofTime.nowMs;
+  const issuedAt = Date.parse(parsed.issued_at);
+  const expiresAt = Date.parse(parsed.expires_at);
+  const skewMs = proofTime.clockSkewMs;
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
+    return { ok: false, v4: true, reason: 'certificate proof has invalid issued_at or expires_at' };
+  }
+  if (issuedAt > now + skewMs) {
+    return { ok: false, v4: true, reason: 'certificate proof issued_at is in the future' };
+  }
+  if (expiresAt + skewMs <= now) {
+    return { ok: false, v4: true, reason: 'certificate proof has expired' };
+  }
+  return { ok: true, v4: true };
+}
+
+function enforceV4CertificateGuards(parsed, context, profile, cert) {
+  const envelope = validateV4CertificateEnvelope(parsed, context);
+  if (!envelope.ok || !envelope.v4) {
+    return envelope.v4
+      ? { ok: false, reason: envelope.reason }
+      : { ok: true, replayProtected: true, revocationChecked: true };
+  }
+  const verifiedKeyId = certificateProofKeyId(cert);
+  if (parsed.key_id !== verifiedKeyId) {
+    return { ok: false, reason: 'certificate proof key_id does not match the verified certificate' };
+  }
+
+  const checkRevocation = context.checkProofRevocation
+    ?? context.revocationChecker?.check?.bind(context.revocationChecker);
+  if (typeof checkRevocation !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof revocation checker is required' };
+  }
+  const revocation = checkRevocation({
+    method: 'certificate',
+    issuer: cert.issuer ?? profile.issuer ?? null,
+    subject: cert.subject ?? null,
+    proofId: parsed.nonce,
+    artifactDigest: context.artifactDigest,
+    keyId: verifiedKeyId,
+    serialNumber: cert.serialNumber,
+    fingerprint: cert.fingerprint256,
+  });
+  if (revocation && typeof revocation.then === 'function') {
+    return { ok: false, reason: 'handoff v4 revocation checker must complete synchronously' };
+  }
+  if (revocation === true || revocation?.revoked === true) {
+    return { ok: false, reason: revocation?.reason || 'certificate proof is revoked' };
+  }
+  if (revocation?.revoked !== false) {
+    return {
+      ok: false,
+      reason: revocation?.reason
+        || 'handoff v4 revocation checker did not explicitly confirm the certificate is not revoked',
+    };
+  }
+
+  const claimReplay = context.claimProofReplay
+    ?? context.replayStore?.claim?.bind(context.replayStore);
+  if (typeof claimReplay !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof replay store is required' };
+  }
+  const replay = claimReplay({
+    method: 'certificate',
+    issuer: profile.issuer ?? cert.issuer ?? null,
+    subject: cert.subject ?? null,
+    proofId: parsed.nonce,
+    artifactDigest: context.artifactDigest,
+    expiresAt: parsed.expires_at,
+    runId: context.runId ?? null,
+  });
+  if (replay && typeof replay.then === 'function') {
+    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
+  }
+  const replayProtected = replayClaimAccepted(replay);
+  if (!replayProtected) {
+    return { ok: false, reason: replay?.reason || 'certificate proof nonce was already used' };
+  }
+  return { ok: true, replayProtected: true, revocationChecked: true };
+}
+
+function verifyProofOfPossession(cert, signature, signedContent) {
   if (typeof signature !== 'string' || signature.trim() === '') {
     return { verified: false, reason: 'certificate proof is missing a manifest signature' };
   }
-  if (!manifestContent) {
-    return { verified: false, reason: 'canonical manifest content is required' };
+  if (!signedContent) {
+    return { verified: false, reason: 'canonical proof signing content is required' };
   }
 
   let signatureBytes;
@@ -91,13 +263,13 @@ function verifyProofOfPossession(cert, signature, manifestContent) {
     if (keyType === 'ed25519' || keyType === 'ed448') {
       verified = verifySignature(
         null,
-        Buffer.from(manifestContent, 'utf8'),
+        Buffer.from(signedContent, 'utf8'),
         cert.publicKey,
         signatureBytes
       );
     } else if (keyType === 'rsa' || keyType === 'rsa-pss' || keyType === 'ec') {
       const verifier = createVerify('SHA256');
-      verifier.update(manifestContent);
+      verifier.update(signedContent);
       verified = verifier.verify(cert.publicKey, signatureBytes);
     } else {
       return { verified: false, reason: `unsupported certificate key type: ${keyType}` };
@@ -132,7 +304,18 @@ export function resolveCertificateVerificationContext(profile = {}, ctx = {}) {
     caCert,
     caCertError,
     manifestContent: manifest.content || null,
-    manifestDigest: manifest.digest || null,
+    manifestDigest: manifest.artifactMode
+      ? (ctx.manifestDigest ?? null)
+      : (manifest.digest || null),
+    artifactDigest: manifest.artifactMode
+      ? manifest.digest
+      : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
+    trustedArtifactDigest: manifest.artifactMode
+      ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
+      : null,
+    handoffVersion: manifest.artifactMode
+      ? 4
+      : (ctx.handoffVersion ?? ctx.handoff_version ?? null),
     manifestContextError: manifest.error || null,
     requireProofOfPossession: ctx.requireProofOfPossession ?? true,
   };
@@ -321,7 +504,27 @@ const certificateVerifier = {
    * @returns {object} Verification result.
    */
   verifyProof(proof, profile, ctx) {
-    const context = resolveCertificateVerificationContext(profile, ctx || {});
+    let context = resolveCertificateVerificationContext(profile, ctx || {});
+    const proofTime = normalizeProofTimeContext(context);
+    if (!proofTime.ok) {
+      return {
+        verified: false,
+        method: 'certificate',
+        reason: proofTime.reason,
+        claims_validated: false,
+        signature_verified: false,
+        proof_of_possession_verified: false,
+        manifest_digest: context.manifestDigest || null,
+        verified_at: null,
+      };
+    }
+    context = {
+      ...context,
+      now: proofTime.nowMs,
+      clockSkewSeconds: proofTime.clockSkewSeconds,
+    };
+    const verificationNowMs = proofTime.nowMs;
+    const verifiedAt = new Date(verificationNowMs).toISOString();
     const claims = (profile && profile.claims) || {};
 
     let parsedProof;
@@ -336,7 +539,25 @@ const certificateVerifier = {
         signature_verified: false,
         proof_of_possession_verified: false,
         manifest_digest: context.manifestDigest || null,
-        verified_at: new Date().toISOString(),
+        verified_at: verifiedAt,
+      };
+    }
+
+    const envelope = validateV4CertificateEnvelope(parsedProof, context);
+    if (!envelope.ok) {
+      return {
+        verified: false,
+        method: 'certificate',
+        reason: envelope.reason,
+        claims_validated: false,
+        signature_verified: false,
+        proof_of_possession_verified: false,
+        artifact_digest: context.artifactDigest ?? null,
+        artifact_bound: false,
+        replay_protected: false,
+        revocation_checked: false,
+        manifest_digest: context.manifestDigest || null,
+        verified_at: verifiedAt,
       };
     }
 
@@ -360,12 +581,12 @@ const certificateVerifier = {
         serial_number: null,
         fingerprint: null,
         manifest_digest: context.manifestDigest || null,
-        verified_at: new Date().toISOString(),
+        verified_at: verifiedAt,
       };
     }
 
     // Check certificate validity period
-    const now = new Date();
+    const now = new Date(verificationNowMs);
     const validFrom = new Date(cert.validFrom);
     const validTo = new Date(cert.validTo);
     let expired = false;
@@ -451,16 +672,33 @@ const certificateVerifier = {
       signatureReason = `CA certificate resolution failed: ${context.caCertError}`;
     }
 
+    const possessionContent = envelope.v4
+      ? buildCertificateV4SigningContent({
+          artifactDigest: parsedProof.artifact_digest,
+          nonce: parsedProof.nonce,
+          issuedAt: parsedProof.issued_at,
+          expiresAt: parsedProof.expires_at,
+          keyId: parsedProof.key_id,
+        })
+      : context.manifestContent;
     const possession = context.manifestContextError
       ? { verified: false, reason: context.manifestContextError }
-      : context.requireProofOfPossession
-        ? verifyProofOfPossession(cert, parsedProof.signature, context.manifestContent)
+      : envelope.v4 || context.requireProofOfPossession
+        ? verifyProofOfPossession(cert, parsedProof.signature, possessionContent)
         : { verified: true };
 
     // Overall verification requires a trusted chain and proof that the holder
     // of the certificate private key signed the canonical manifest.
     const timeValid = !expired && !notYetValid;
-    const verified = claimsValid && timeValid && certificateUsageValid && signatureValid && possession.verified;
+    const cryptographicallyVerified = claimsValid
+      && timeValid
+      && certificateUsageValid
+      && signatureValid
+      && possession.verified;
+    const guards = cryptographicallyVerified
+      ? enforceV4CertificateGuards(parsedProof, context, profile || {}, cert)
+      : { ok: false };
+    const verified = cryptographicallyVerified && guards.ok;
 
     // Build composite reason if not verified
     let reason = null;
@@ -470,6 +708,7 @@ const certificateVerifier = {
       if (!timeValid || !certificateUsageValid) reasons.push(...validityErrors);
       if (!signatureValid && signatureReason) reasons.push(signatureReason);
       if (!possession.verified && possession.reason) reasons.push(possession.reason);
+      if (cryptographicallyVerified && !guards.ok && guards.reason) reasons.push(guards.reason);
       reason = reasons.join('; ');
     }
 
@@ -488,7 +727,12 @@ const certificateVerifier = {
       serial_number: cert.serialNumber,
       fingerprint: cert.fingerprint256,
       manifest_digest: context.manifestDigest || null,
-      verified_at: new Date().toISOString(),
+      artifact_digest: context.artifactDigest ?? null,
+      artifact_bound: !envelope.v4
+        || parsedProof.artifact_digest === context.trustedArtifactDigest,
+      replay_protected: guards.replayProtected === true,
+      revocation_checked: guards.revocationChecked === true,
+      verified_at: verifiedAt,
     };
 
     return result;
@@ -516,6 +760,10 @@ const certificateVerifier = {
       proof_of_possession_verified: result.proof_of_possession_verified,
       fingerprint: result.fingerprint,
       serial_number: result.serial_number,
+      artifact_digest: result.artifact_digest || null,
+      artifact_bound: result.artifact_bound === true,
+      replay_protected: result.replay_protected === true,
+      revocation_checked: result.revocation_checked === true,
       reason: result.signature_verification_reason || result.reason || null,
     };
   },

@@ -2,7 +2,7 @@
 
 ## Current Versions
 
-- package version: `0.4.0`
+- package version: `0.5.0`
 - manifest spec version: `0.2`
 - protocol status: draft, aligned to manifest spec `0.2`
 
@@ -20,6 +20,8 @@ Backward compatibility for `0.1` remains part of the current release surface:
 - validators accept both `0.1` and `0.2`
 - `0.2` is the canonical discovery and schema version reported by `agentcli version`, `agentcli schema manifest`, and JSON-RPC `agentcli.version`
 - schema discovery emits JSON Schema Draft 2020-12 by default; the legacy descriptor requires an explicit `--legacy` flag or RPC `legacy: true`
+- handoff v4 artifact schema version 1 is independently discoverable through
+  `schema handoff-v4` and requires exact runtime contract negotiation
 - existing `0.1` manifests remain executable through the preserved legacy execution path
 
 ## Breaking Changes

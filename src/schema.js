@@ -1,3 +1,5 @@
+import { HANDOFF_V4_JSON_SCHEMA } from './handoff/schema-v4.js';
+
 export const MANIFEST_VERSION = '0.2';
 
 const nullableString = { type: 'string', nullable: true };
@@ -118,6 +120,13 @@ const childCredentialPolicyField = {
   type: 'string',
   enum: ['none', 'inherit', 'downscope', 'independent'],
   nullable: true,
+};
+
+const uniqueNonEmptyStringArrayField = {
+  type: 'array',
+  nullable: true,
+  uniqueItems: true,
+  items: { type: 'string', minLength: 1 },
 };
 
 const identityField = {
@@ -646,7 +655,7 @@ export const evidenceRefField = {
       type: 'object',
       nullable: true,
       fields: {
-        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        bind: uniqueNonEmptyStringArrayField,
         context: { type: 'object', nullable: true },
         format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
       },
@@ -670,13 +679,13 @@ export const evidenceProfileField = {
   fields: {
     id: { type: 'string' },
     provider: { type: 'string' },
-    methods: { type: 'array', nullable: true, items: { type: 'string' } },
+    methods: uniqueNonEmptyStringArrayField,
     provider_config: { type: 'object', nullable: true },
     payload: {
       type: 'object',
       nullable: true,
       fields: {
-        bind: { type: 'array', nullable: true, items: { type: 'string' } },
+        bind: uniqueNonEmptyStringArrayField,
         context: { type: 'object', nullable: true },
         format: { type: 'string', enum: ['canonical-json', 'json'], nullable: true },
       },
@@ -804,6 +813,9 @@ Object.assign(MANIFEST_SCHEMA.standalonePlan.fields.capabilities.fields, {
 });
 
 Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
+  approval_risk_level: nullableString,
+  approval_approver_scope: nullableString,
+  output_format: nullableString,
   identity_ref: nullableString,
   identity_subject_kind: nullableString,
   identity_subject_principal: nullableString,
@@ -824,6 +836,29 @@ Object.assign(MANIFEST_SCHEMA.schedulerJob.fields, {
   verify_timeout_s: { type: 'integer', nullable: true, min: 1 },
   verify_on_failure: nullableString,
   auth_profile: { type: 'string', nullable: true, note: 'Auth profile ID for scheduler dispatch (e.g. \'anthropic:me.com\'). Scheduler-target only — ignored by other backends.' },
+  handoff_version: { type: 'integer', nullable: true },
+  handoff_artifact_digest: nullableString,
+  handoff_artifact_payload: { type: 'object', nullable: true },
+  effective_task_hash: nullableString,
+  payload_scope: nullableString,
+  resource_pool: nullableString,
+  job_class: nullableString,
+  payload_timeout_seconds: { type: 'integer', nullable: true, min: 1 },
+  payload_model_fallback: nullableString,
+  auth_profile_fallback: nullableString,
+  shell_env_policy: nullableString,
+  job_type: nullableString,
+  watchdog_target_label: nullableString,
+  watchdog_check_cmd: nullableString,
+  watchdog_timeout_min: { type: 'integer', nullable: true, min: 1 },
+  watchdog_alert_channel: nullableString,
+  watchdog_alert_target: nullableString,
+  watchdog_self_destruct: {
+    type: ['integer', 'boolean'],
+    nullable: true,
+    note: '1, 0, true, or false',
+  },
+  watchdog_started_at: nullableString,
 });
 
 const JSON_SCHEMA_DIALECT = 'https://json-schema.org/draft/2020-12/schema';
@@ -848,6 +883,11 @@ function nullableSchema(schema) {
 const nullableStringSchema = nullableSchema({ type: 'string' });
 const nullableTokenSchema = nullableSchema({ type: 'string', pattern: TOKEN_PATTERN });
 const nullableBooleanSchema = nullableSchema({ type: 'boolean' });
+const nullableUniqueNonEmptyStringArraySchema = nullableSchema({
+  type: 'array',
+  uniqueItems: true,
+  items: { type: 'string', minLength: 1 },
+});
 
 const jsonSchemaDefs = {
   valueFrom: objectSchema({
@@ -1056,7 +1096,7 @@ const jsonSchemaDefs = {
     decision: nullableSchema({ $ref: '#/$defs/authorizationDecision' }),
   }, { required: ['ref'] }),
   evidencePayload: objectSchema({
-    bind: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    bind: nullableUniqueNonEmptyStringArraySchema,
     context: nullableSchema({ type: 'object', additionalProperties: true }),
     format: nullableSchema({ type: 'string', enum: ['canonical-json', 'json'] }),
   }),
@@ -1108,7 +1148,7 @@ const jsonSchemaDefs = {
   evidenceProfile: objectSchema({
     id: { type: 'string', pattern: IDENTIFIER_PATTERN },
     provider: { type: 'string', minLength: 1 },
-    methods: nullableSchema({ type: 'array', items: { type: 'string' } }),
+    methods: nullableUniqueNonEmptyStringArraySchema,
     provider_config: nullableSchema({ type: 'object', additionalProperties: true }),
     payload: nullableSchema({ $ref: '#/$defs/evidencePayload' }),
     verify: nullableSchema(objectSchema({ required: nullableBooleanSchema })),
@@ -1266,7 +1306,9 @@ function legacyDescriptorToJsonSchema(descriptor) {
   if (descriptor.enum) result.enum = [...descriptor.enum];
   if (descriptor.required) result.required = [...descriptor.required];
   if (descriptor.min !== undefined) result.minimum = descriptor.min;
+  if (descriptor.minLength !== undefined) result.minLength = descriptor.minLength;
   if (descriptor.minItems !== undefined) result.minItems = descriptor.minItems;
+  if (descriptor.uniqueItems !== undefined) result.uniqueItems = descriptor.uniqueItems;
   if (descriptor.note) result.description = descriptor.note;
   if (descriptor.format === 'token') result.pattern = TOKEN_PATTERN;
   if (descriptor.fields) {
@@ -1303,6 +1345,7 @@ export const JSON_SCHEMAS = Object.freeze({
     title: 'agentcli standalone compiled plan',
     ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.standalonePlan),
   },
+  handoffV4: HANDOFF_V4_JSON_SCHEMA,
   rpcRequest: {
     $schema: JSON_SCHEMA_DIALECT,
     title: 'agentcli JSON-RPC request',

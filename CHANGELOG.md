@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.5.0 (2026-07-19)
+
+- scheduler: added handoff v4 canonical artifacts with explicit artifact,
+  canonicalization, execution-binding, and scheduler-binding versions
+- discovery: added Draft 2020-12 schema access for the complete handoff v4
+  artifact through CLI, JSON-RPC, and the public handoff module
+- validation: handoff v4 artifacts now reject missing required identity fields,
+  invalid nested types, and unknown properties before semantic verification
+- negotiation: v4 now requires scheduler schema 29 or newer plus an exact live
+  artifact, canonicalization, digest, and binding contract; partial or
+  mismatched runtimes, including contracts with extra keys, fall back to v3
+- negotiation: every apply, including basic v0.1 manifests, probes the live
+  runtime so v4 coverage is complete; static fallback enforcement features are
+  disabled until explicitly advertised
+- scheduler: complete non-lossy create, replace-style update, null clear, and
+  adopt projections now carry the immutable artifact payload and digest
+- scheduler: adoption rebinds the artifact after the final origin is selected,
+  and apply preserves direct-compile hashes for the caller's explicit compile
+  environment while host variables are merged only for scheduler process spawn
+- scheduler: direct main and isolated delegation negotiates v4 before compiling
+  and binds its one-off lifecycle before artifact construction; v4 JSON columns
+  use the same undefined-to-null canonicalization as their artifact binding
+- scheduler: update and adoption validate the persisted v4 artifact, compiled
+  identity, and current execution projection before preserving runtime
+  overrides; the CLI adapter requests opt-in artifact hydration only after
+  exact v4 negotiation, while legacy-safe listing remains flag-free
+- security: JWT, detached-signature, and certificate proofs bind the exact v4
+  artifact, replay identifier, validity, key, and revocation result
+- security: v4 proofs reject inverted validity intervals, bind asserted key IDs
+  to the key or certificate that actually verified, and require an explicit
+  not-revoked result from the runtime checker
+- security: JWT artifact claims and trusted context now require the exact
+  lowercase `sha256:<64 hex>` representation before v4 binding can succeed
+- security: detached-signature and certificate artifact bindings now require
+  the same canonical digest representation, and every v4 proof method accepts
+  replay claims only from an explicit, non-conflicting claimed result
+- security: JWKS-provided raw JWK objects are normalized before stable public
+  key identity derivation, while private JWK material remains forbidden
+- security: credential handoff compiles to exactly one runtime medium without
+  persisting values, and delegation binds the exact source run and scope
+- evidence: the complete AgentCLI evidence payload and verification envelope
+  are available to the scheduler runtime for signed or provider-verified
+  terminal evidence
+- evidence: payload and provider-configuration hashes are explicit required
+  nullable fields and are retained in the sanitized scheduler declaration for
+  exact artifact parity while raw provider configuration remains absent
+- evidence: persisted declarations must match artifact evidence semantics and
+  hashes; explicitly v4 evidence records require a canonical artifact digest,
+  child records require complete source-run lineage, and terminal status and
+  structured-output hashes must exactly match the surrounding audit record
+- validation: v4 command argument counts and aggregate argument digests are
+  recomputed, and every declared evidence block requires a canonical payload
+  hash even when the authored profile omits an explicit payload object
+- inspect: added immutable artifacts, runtime events, provider sessions, and
+  credential presentations to the scheduler inspection surface, with every
+  entity enumerated in JSON help and structured command discovery
+- conformance: added shared positive and negative v4 fixtures and exact digest
+  parity tests with OpenClaw Scheduler
+- examples: added a public scheduler manifest for exercising negotiated v4
+  apply and schema discovery
+- compatibility: handoff versions 1 through 3 and manifest versions 0.1 and 0.2
+  retain their existing behavior
+
 ## 0.4.1 (2026-07-13)
 
 - scheduler: post-success verification for shell tasks now runs from the task working directory while retaining the runtime-provided execution environment, and expanded verifier commands are checked against the scheduler's storage limit before apply

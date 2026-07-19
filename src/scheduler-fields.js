@@ -46,8 +46,36 @@ export const SCHEDULER_FIELDS_V03 = [
   'output_format',
 ];
 
+export const SCHEDULER_FIELDS_V04 = [
+  'handoff_version',
+  'handoff_artifact_digest',
+  'handoff_artifact_payload',
+  'effective_task_hash',
+  'payload_scope',
+  'resource_pool',
+  'job_class',
+  'payload_timeout_seconds',
+  'payload_model_fallback',
+  'auth_profile_fallback',
+  'shell_env_policy',
+  'job_type',
+  'watchdog_target_label',
+  'watchdog_check_cmd',
+  'watchdog_timeout_min',
+  'watchdog_alert_channel',
+  'watchdog_alert_target',
+  'watchdog_self_destruct',
+  'watchdog_started_at',
+];
+
 export const SCHEDULER_FIELD_VERSIONS = {
   '1': SCHEDULER_FIELDS_V1,
   '2': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02],
   '3': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02, ...SCHEDULER_FIELDS_V03],
+  '4': [
+    ...SCHEDULER_FIELDS_V1,
+    ...SCHEDULER_FIELDS_V02,
+    ...SCHEDULER_FIELDS_V03,
+    ...SCHEDULER_FIELDS_V04,
+  ],
 };

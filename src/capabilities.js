@@ -1,4 +1,58 @@
 import { TARGETS } from './targets.js';
+import {
+  HANDOFF_V4_SCHEMA,
+  HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  HANDOFF_V4_SCHEDULER_SCHEMA_MIN,
+  HANDOFF_V4_CANONICALIZATION,
+  HANDOFF_V4_CANONICALIZATION_VERSION,
+  HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+} from './handoff/schema-v4.js';
+
+export const HANDOFF_V4_REQUIRED_FEATURES = Object.freeze([
+  'handoff_v4_artifact',
+  'authorization_proof_verification',
+  'artifact_bound_proofs',
+  'signed_or_provider_verified_evidence',
+  'provider_session_cache',
+  'credential_presentation',
+  'source_run_bound_delegation',
+  'immutable_runtime_events',
+]);
+
+export const HANDOFF_V4_RUNTIME_CONTRACT = Object.freeze({
+  artifact_schema: HANDOFF_V4_SCHEMA,
+  artifact_schema_version: HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  canonicalization: HANDOFF_V4_CANONICALIZATION,
+  canonicalization_version: HANDOFF_V4_CANONICALIZATION_VERSION,
+  digest: 'sha256',
+  undefined: 'null',
+  execution_binding_version: HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  scheduler_job_binding_version: HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+});
+
+function supportsExactV4Contract(contract) {
+  if (contract == null || typeof contract !== 'object' || Array.isArray(contract)) {
+    return false;
+  }
+  const expectedKeys = Object.keys(HANDOFF_V4_RUNTIME_CONTRACT).sort();
+  const actualKeys = Object.keys(contract).sort();
+  return actualKeys.length === expectedKeys.length
+    && actualKeys.every((key, index) => key === expectedKeys[index])
+    && expectedKeys.every(key => contract[key] === HANDOFF_V4_RUNTIME_CONTRACT[key]);
+}
+
+export function supportsSchedulerHandoffV4(effectiveCapabilities = {}) {
+  const version = Number(effectiveCapabilities.handoff_version);
+  const schemaVersion = Number(effectiveCapabilities.schema_version);
+  const features = effectiveCapabilities.features ?? {};
+  return Number.isInteger(version)
+    && version >= 4
+    && Number.isInteger(schemaVersion)
+    && schemaVersion >= HANDOFF_V4_SCHEDULER_SCHEMA_MIN
+    && supportsExactV4Contract(effectiveCapabilities.handoff_contract)
+    && HANDOFF_V4_REQUIRED_FEATURES.every(feature => features[feature] === true);
+}
 
 /**
  * Query the scheduler for its runtime capabilities.
@@ -20,6 +74,7 @@ export function querySchedulerCapabilities(runner) {
       version: result.scheduler_version || null,
       handoff_version: result.handoff_version || null,
       schema_version: result.schema_version || null,
+      handoff_contract: result.handoff_contract || null,
       source: 'runtime',
     };
   } catch (err) {
@@ -57,6 +112,8 @@ export function resolveEffectiveFeatures(targetName, runtimeCapabilities) {
     source: 'runtime',
     negotiated: true,
     handoff_version: runtimeCapabilities.handoff_version || null,
+    schema_version: runtimeCapabilities.schema_version || null,
+    handoff_contract: runtimeCapabilities.handoff_contract || null,
   };
 }
 
@@ -84,6 +141,19 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
   // validation remains execution-time only (chains are only known after a
   // concrete session is resolved).
   for (const job of compiledOutput.jobs) {
+    if (Number(job.handoff_version) === 4) {
+      for (const feature of HANDOFF_V4_REQUIRED_FEATURES) {
+        if (features[feature] !== true) {
+          errors.push({
+            code: 'capability_mismatch',
+            feature,
+            required_by: `handoff v4 job "${job.name || job.id}"`,
+            message: `Job "${job.name || job.id}" uses handoff v4 but the runtime does not advertise ${feature}`,
+          });
+        }
+      }
+    }
+
     if (job.approval_required && !job.parent_id && !features.root_approval_gate) {
       errors.push({
         code: 'capability_mismatch',

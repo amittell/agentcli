@@ -18,6 +18,26 @@ const INSPECT_ENTITIES = {
   approvals: {
     table: 'approvals',
     orderBy: 'requested_at DESC'
+  },
+  evidence: {
+    table: 'evidence_records',
+    orderBy: 'created_at DESC'
+  },
+  artifacts: {
+    table: 'handoff_artifacts',
+    orderBy: 'created_at DESC'
+  },
+  events: {
+    table: 'runtime_events',
+    orderBy: 'id DESC'
+  },
+  provider_sessions: {
+    table: 'provider_sessions',
+    orderBy: 'updated_at DESC'
+  },
+  credential_presentations: {
+    table: 'credential_presentations',
+    orderBy: 'created_at DESC'
   }
 };
 

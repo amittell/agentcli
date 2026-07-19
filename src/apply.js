@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { compileManifestToScheduler } from './compiler/openclaw-scheduler.js';
 import { resolveValueFrom } from './command.js';
-import { canonicalDigest } from './canonical.js';
+import { canonicalDigest, canonicalStringify } from './canonical.js';
 import {
   mergeAuthorizationProofProfile,
   normalizedTaskPlan,
@@ -12,16 +12,29 @@ import { expandManifestShorthands } from './shorthand.js';
 import {
   querySchedulerCapabilities,
   resolveEffectiveFeatures,
+  supportsSchedulerHandoffV4,
   validateManifestCapabilities,
 } from './capabilities.js';
 import {
   SCHEDULER_FIELDS_V1,
   SCHEDULER_FIELDS_V02,
   SCHEDULER_FIELDS_V03,
+  SCHEDULER_FIELDS_V04,
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
+import {
+  assertValidSchedulerHandoffV4Job,
+  rebindSchedulerHandoffV4Job,
+  schedulerHandoffV4RebindableOverrides,
+} from './handoff/v4.js';
 export { shellCommandInvocation } from './command.js';
-export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03, SCHEDULER_FIELD_VERSIONS };
+export {
+  SCHEDULER_FIELDS_V1,
+  SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELDS_V03,
+  SCHEDULER_FIELDS_V04,
+  SCHEDULER_FIELD_VERSIONS,
+};
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -98,9 +111,13 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
 // Fields that the scheduler stores as JSON text blobs rather than scalar columns.
 const JSON_BLOB_FIELDS = new Set([
   'identity', 'authorization_proof', 'authorization', 'evidence',
+  'handoff_artifact_payload',
 ]);
 
-function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
+function projectSchedulerSpec(job, fields, {
+  includeNulls = false,
+  canonicalJsonBlobs = false,
+} = {}) {
   const spec = {};
   for (const field of fields) {
     if (!(field in job)) continue;
@@ -109,7 +126,7 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
     if (value === null && !includeNulls) continue;
     // Scheduler expects JSON blob fields as stringified JSON, not raw objects
     if (value !== null && typeof value === 'object' && JSON_BLOB_FIELDS.has(field)) {
-      value = JSON.stringify(value);
+      value = canonicalJsonBlobs ? canonicalStringify(value) : JSON.stringify(value);
     }
     spec[field] = value;
   }
@@ -119,7 +136,10 @@ function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
 export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } = {}) {
   const fields = SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1;
   const { source, ...spec } = job;
-  const projected = projectSchedulerSpec(spec, fields, { includeNulls: false });
+  const projected = projectSchedulerSpec(spec, fields, {
+    includeNulls: false,
+    canonicalJsonBlobs: String(fieldVersion) === '4',
+  });
   if (originOverride != null) {
     projected.origin = originOverride;
   }
@@ -127,6 +147,7 @@ export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } 
 }
 
 export function requiredSchedulerFieldVersion(jobs = []) {
+  if (jobs.some(job => SCHEDULER_FIELDS_V04.some(field => job[field] != null))) return 4;
   if (jobs.some(job => SCHEDULER_FIELDS_V03.some(field => job[field] != null))) return 3;
   if (jobs.some(job => SCHEDULER_FIELDS_V02.some(field => job[field] != null))) return 2;
   return 1;
@@ -147,14 +168,17 @@ export function negotiateSchedulerFieldVersion(jobs, advertisedVersion = '1') {
       }
     );
   }
-  return String(Math.min(parsedVersion, 3));
+  return String(Math.min(parsedVersion, requiredVersion >= 4 ? 4 : 3));
 }
 
 function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
   const fields = (SCHEDULER_FIELD_VERSIONS[fieldVersion] || SCHEDULER_FIELDS_V1)
     .filter(f => f !== 'id' && f !== 'origin');
   const { source, ...spec } = job;
-  return projectSchedulerSpec(spec, fields, { includeNulls: true });
+  return projectSchedulerSpec(spec, fields, {
+    includeNulls: true,
+    canonicalJsonBlobs: String(fieldVersion) === '4',
+  });
 }
 
 function duplicateNames(items) {
@@ -166,16 +190,6 @@ function duplicateNames(items) {
   return [...counts.entries()]
     .filter(([, count]) => count > 1)
     .map(([name]) => name);
-}
-
-function jobRequiresCapabilityNegotiation(job) {
-  return Boolean(
-    job.identity || job.identity_ref || job.authorization || job.authorization_ref
-    || job.evidence || job.evidence_ref || job.child_credential_policy
-    || job.contract_required_trust_level || job.authorization_proof || job.authorization_proof_ref
-    || (job.approval_required && !job.parent_id) || job.approval_approver_scope
-    || job.output_format
-  );
 }
 
 export function createSchedulerCliRunner(options = {}) {
@@ -195,8 +209,13 @@ export function createSchedulerCliRunner(options = {}) {
       try { return invoke(['capabilities']); }
       catch { return null; }
     },
-    listJobs() {
-      const payload = invoke(['jobs', 'list']);
+    listJobs(options = {}) {
+      const includeHandoffArtifacts = options?.includeHandoffArtifacts === true;
+      const args = ['jobs', 'list'];
+      if (includeHandoffArtifacts === true) {
+        args.push('--include-handoff-artifacts');
+      }
+      const payload = invoke(args);
       return Array.isArray(payload) ? payload : [];
     },
     addJob(spec) {
@@ -252,46 +271,52 @@ export async function applyManifestToScheduler(
     allowValueFromCommand = false
   } = {}
 ) {
-  const compiled = compileManifestToScheduler(manifest, { includeExplain });
+  let compiled = compileManifestToScheduler(manifest, { includeExplain });
+  const schedulerEnv = { ...process.env, ...(env || {}) };
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
-  const requiredHandoffVersion = requiredSchedulerFieldVersion(compiled.jobs);
-  const requiresCapabilityNegotiation =
-    requiredHandoffVersion > 1 || compiled.jobs.some(jobRequiresCapabilityNegotiation);
 
-  // Construct the scheduler runner once; runtime capability negotiation is only
-  // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
+  // Construct the scheduler runner once. Every apply probes capabilities so a
+  // basic v0.1 job receives a v4 artifact when the runtime supports the exact
+  // contract, while an unavailable capability command still falls back safely.
   const schedulerRunner = runner || createSchedulerCliRunner({
     schedulerPrefix,
     schedulerBin,
     dbPath,
     cwd,
-    env
+    env: schedulerEnv,
   });
 
-  let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
-  let handoffVersion = '1';
-  let capabilityWarnings = [];
-  if (requiresCapabilityNegotiation) {
-    const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
-    effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+  const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
+  const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+  let handoffVersion;
 
-    const { errors: capabilityErrors, warnings } = validateManifestCapabilities(compiled, effectiveResult);
-    capabilityWarnings = warnings;
-    if (capabilityErrors.length > 0) {
-      throw Object.assign(
-        new Error(capabilityErrors.map(error => error.message).join('; ')),
-        { code: 'unsupported_capability', capability_errors: capabilityErrors }
-      );
-    }
-    handoffVersion = negotiateSchedulerFieldVersion(
-      compiled.jobs,
-      effectiveResult.handoff_version || '1'
+  if (supportsSchedulerHandoffV4(runtimeCaps)) {
+    compiled = compileManifestToScheduler(manifest, {
+      includeExplain,
+      schedulerHandoffVersion: '4',
+      cwd,
+      env,
+    });
+  }
+
+  const {
+    errors: capabilityErrors,
+    warnings: capabilityWarnings,
+  } = validateManifestCapabilities(compiled, effectiveResult);
+  if (capabilityErrors.length > 0) {
+    throw Object.assign(
+      new Error(capabilityErrors.map(error => error.message).join('; ')),
+      { code: 'unsupported_capability', capability_errors: capabilityErrors }
     );
-    if (capabilityWarnings.length > 0) {
-      for (const warning of capabilityWarnings) {
-        process.stderr.write(`warning: ${warning.message}\n`);
-      }
+  }
+  handoffVersion = negotiateSchedulerFieldVersion(
+    compiled.jobs,
+    effectiveResult.handoff_version || '1'
+  );
+  if (capabilityWarnings.length > 0) {
+    for (const warning of capabilityWarnings) {
+      process.stderr.write(`warning: ${warning.message}\n`);
     }
   }
   const effectiveFeatures = effectiveResult.features;
@@ -368,7 +393,9 @@ export async function applyManifestToScheduler(
     }
   }
 
-  const existingJobs = schedulerRunner.listJobs();
+  const existingJobs = schedulerRunner.listJobs({
+    includeHandoffArtifacts: handoffVersion === '4',
+  });
   const existingById = new Map(existingJobs.map(job => [job.id, job]));
   const existingByName = new Map();
   for (const job of existingJobs) {
@@ -390,10 +417,8 @@ export async function applyManifestToScheduler(
     }
   }
 
-  const actions = [];
+  const plannedActions = [];
   for (const job of compiled.jobs) {
-    const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
-
     let action;
     let existingId;
     let existingJob;
@@ -405,6 +430,7 @@ export async function applyManifestToScheduler(
 
       if (exactMatch) {
         action = 'updated';
+        existingJob = exactMatch;
       } else {
         duplicateLegacyJobs = sameNameJobs;
       }
@@ -428,28 +454,70 @@ export async function applyManifestToScheduler(
         }
       }
     } else {
-      if (existingById.has(job.id)) {
+      existingJob = existingById.get(job.id) || null;
+      if (existingJob) {
         action = 'updated';
       } else {
         action = 'created';
       }
     }
 
+    plannedActions.push({ job, action, existingId, existingJob });
+  }
+
+  for (const { job, action, existingJob } of plannedActions) {
+    if ((action === 'updated' || action === 'adopted')
+      && Number(existingJob?.handoff_version) === 4
+      && Number(job.handoff_version) !== 4) {
+      throw Object.assign(
+        new Error(
+          `Cannot ${action === 'adopted' ? 'adopt' : 'update'} handoff v4 scheduler job ` +
+          `"${existingJob?.id ?? job.id}" after runtime capability downgrade; ` +
+          'restore the exact v4 runtime contract before applying changes'
+        ),
+        { code: 'unsupported_capability' }
+      );
+    }
+    if ((action === 'updated' || action === 'adopted')
+      && Number(existingJob?.handoff_version) === 4) {
+      assertValidSchedulerHandoffV4Job(existingJob);
+    }
+    if (!dryRun && action === 'adopted' && typeof schedulerRunner.deleteJob !== 'function') {
+      throw Object.assign(
+        new Error('Scheduler runner does not support deleteJob(); cannot adopt legacy rows by name'),
+        { code: 'scheduler_error' }
+      );
+    }
+  }
+
+  const actions = [];
+  for (const { job, action, existingId, existingJob } of plannedActions) {
+    const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
+
     if (!dryRun) {
       if (action === 'created') {
         schedulerRunner.addJob(schedulerCreateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'updated') {
-        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job, { fieldVersion: handoffVersion }));
+        const existingOrigin = existingJob?.origin ?? job.origin ?? 'system';
+        const updateJob = Number(job.handoff_version) === 4
+          ? rebindSchedulerHandoffV4Job(job, {
+              ...schedulerHandoffV4RebindableOverrides(existingJob),
+              origin: existingOrigin,
+            })
+          : job;
+        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(updateJob, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
-        if (typeof schedulerRunner.deleteJob !== 'function') {
-          throw Object.assign(
-            new Error('Scheduler runner does not support deleteJob(); cannot adopt legacy rows by name'),
-            { code: 'scheduler_error' }
-          );
-        }
-        schedulerRunner.addJob(
-          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system', fieldVersion: handoffVersion })
-        );
+        const adoptedOrigin = existingJob?.origin ?? 'system';
+        const adoptedJob = Number(job.handoff_version) === 4
+          ? rebindSchedulerHandoffV4Job(job, {
+              ...schedulerHandoffV4RebindableOverrides(existingJob),
+              origin: adoptedOrigin,
+            })
+          : job;
+        schedulerRunner.addJob(schedulerCreateSpec(adoptedJob, {
+          originOverride: adoptedOrigin,
+          fieldVersion: handoffVersion,
+        }));
         try {
           schedulerRunner.deleteJob(existingId);
         } catch (err) {
@@ -497,6 +565,8 @@ export async function applyManifestToScheduler(
       source: effectiveResult.source,
       negotiated: effectiveResult.negotiated,
       handoff_version: effectiveResult.handoff_version || null,
+      schema_version: effectiveResult.schema_version || null,
+      handoff_contract: effectiveResult.handoff_contract || null,
       ...(capabilityWarnings?.length > 0 ? { warnings: capabilityWarnings } : {}),
     },
     handoff: {

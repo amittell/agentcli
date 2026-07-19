@@ -95,6 +95,7 @@ function evidencePayload(overrides = {}) {
       stdin: 'secret-stdin',
     },
     result: {
+      status: 'succeeded',
       exit_code: 0,
       timed_out: false,
       duration_ms: 10,
@@ -111,6 +112,48 @@ function evidencePayload(overrides = {}) {
     complianceContext: { policy_version: 'policy-1' },
     ...overrides,
   });
+}
+
+function evidenceRecordForPayload(payload, overrides = {}) {
+  return {
+    execution_id: payload.execution_id,
+    timestamp: payload.timestamp,
+    source: payload.source,
+    manifest_digest: payload.bindings.manifest_digest,
+    effective_task_hash: payload.bindings.effective_task_hash,
+    handoff_artifact_digest: payload.bindings.handoff_artifact_digest ?? null,
+    source_run_id: payload.bindings.source_run_id ?? null,
+    source_run_handoff_artifact_digest:
+      payload.bindings.source_run_handoff_artifact_digest ?? null,
+    declared_identity: { provider: 'none' },
+    resolved_identity: {
+      principal: 'agent://test',
+      credentials: { access_token: 'secret-identity-token' },
+    },
+    authorization_proof: { method: 'jwt', verified: true },
+    authorization: { decision: 'permit', provider_data: { api_key: 'secret-auth-key' } },
+    actor_context: { principal: 'agent://test' },
+    contract: { audit: 'always' },
+    command: Object.fromEntries([
+      'program', 'cwd', 'args_count', 'args_hashes', 'env_keys', 'env_hashes',
+      'stdin_present', 'stdin_hash',
+    ].map(field => [
+      field,
+      field === 'stdin_present'
+        ? payload.command.stdin_hash != null
+        : payload.command[field] ?? null,
+    ])),
+    result: Object.fromEntries([
+      'status', 'exit_code', 'signal', 'timed_out', 'duration_ms', 'stdout_bytes',
+      'stderr_bytes', 'output_hash', 'structured_hash',
+    ].map(field => [field, payload.result[field] ?? null])),
+    verify: {
+      passed: true,
+      stdout: 'verify-output',
+      stderr: '',
+    },
+    ...overrides,
+  };
 }
 
 test('resolveValueFrom disables command execution until explicitly allowed', () => {
@@ -457,40 +500,7 @@ test('complete evidence rejects caller-supplied binding digest mismatches', () =
 
 test('verified evidence cannot be transplanted onto another audit record', () => {
   const payload = evidencePayload();
-  const record = {
-    execution_id: payload.execution_id,
-    timestamp: payload.timestamp,
-    source: payload.source,
-    manifest_digest: payload.bindings.manifest_digest,
-    effective_task_hash: payload.bindings.effective_task_hash,
-    declared_identity: { provider: 'none' },
-    resolved_identity: {
-      principal: 'agent://test',
-      credentials: { access_token: 'secret-identity-token' },
-    },
-    authorization_proof: { method: 'jwt', verified: true },
-    authorization: { decision: 'permit', provider_data: { api_key: 'secret-auth-key' } },
-    actor_context: { principal: 'agent://test' },
-    contract: { audit: 'always' },
-    command: Object.fromEntries([
-      'program', 'cwd', 'args_count', 'args_hashes', 'env_keys', 'env_hashes',
-      'stdin_present', 'stdin_hash',
-    ].map(field => [
-      field,
-      field === 'stdin_present'
-        ? payload.command.stdin_hash != null
-        : payload.command[field] ?? null,
-    ])),
-    result: Object.fromEntries([
-      'exit_code', 'signal', 'timed_out', 'duration_ms', 'stdout_bytes',
-      'stderr_bytes', 'output_hash',
-    ].map(field => [field, payload.result[field] ?? null])),
-    verify: {
-      passed: true,
-      stdout: 'verify-output',
-      stderr: '',
-    },
-  };
+  const record = evidenceRecordForPayload(payload);
   assert.deepEqual(
     validateEvidenceRecordBinding(payload, record),
     { valid: true, errors: [] }
@@ -508,6 +518,119 @@ test('verified evidence cannot be transplanted onto another audit record', () =>
   });
   assert.equal(rewrittenIdentity.valid, false);
   assert.ok(rewrittenIdentity.errors.some(error => /resolved_identity/.test(error)));
+});
+
+test('v4 evidence records require canonical artifact and child lineage bindings', () => {
+  const artifactDigest = `sha256:${'c'.repeat(64)}`;
+  const sourceArtifactDigest = `sha256:${'d'.repeat(64)}`;
+  const rootPayload = evidencePayload({ handoffArtifactDigest: artifactDigest });
+  const rootRecord = evidenceRecordForPayload(rootPayload, { handoff_version: 4 });
+  assert.deepEqual(
+    validateEvidenceRecordBinding(rootPayload, rootRecord),
+    { valid: true, errors: [] },
+  );
+
+  for (const [field, value, expected] of [
+    ['status', 'cancelled', /result\.status does not match/],
+    ['structured_hash', `sha256:${'e'.repeat(64)}`, /result\.structured_hash does not match/],
+  ]) {
+    const changedResult = validateEvidenceRecordBinding(rootPayload, {
+      ...rootRecord,
+      result: { ...rootRecord.result, [field]: value },
+    });
+    assert.equal(changedResult.valid, false, field);
+    assert.ok(changedResult.errors.some(error => expected.test(error)), field);
+  }
+
+  for (const field of ['status', 'structured_hash']) {
+    const missingPayloadField = structuredClone(rootPayload);
+    delete missingPayloadField.result[field];
+    const missingPayloadResult = validateEvidenceRecordBinding(missingPayloadField, rootRecord);
+    assert.equal(missingPayloadResult.valid, false, `payload ${field}`);
+    assert.ok(missingPayloadResult.errors.some(error => error.includes(`result.${field}`)));
+
+    const missingRecordField = structuredClone(rootRecord);
+    delete missingRecordField.result[field];
+    const missingRecordResult = validateEvidenceRecordBinding(rootPayload, missingRecordField);
+    assert.equal(missingRecordResult.valid, false, `record ${field}`);
+    assert.ok(missingRecordResult.errors.some(error => error.includes(`result.${field}`)));
+  }
+
+  const nonCanonicalStructuredHashPayload = structuredClone(rootPayload);
+  const nonCanonicalStructuredHashRecord = structuredClone(rootRecord);
+  const uppercaseStructuredHash = `sha256:${'E'.repeat(64)}`;
+  nonCanonicalStructuredHashPayload.result.structured_hash = uppercaseStructuredHash;
+  nonCanonicalStructuredHashRecord.result.structured_hash = uppercaseStructuredHash;
+  const nonCanonicalStructuredHash = validateEvidenceRecordBinding(
+    nonCanonicalStructuredHashPayload,
+    nonCanonicalStructuredHashRecord,
+  );
+  assert.equal(nonCanonicalStructuredHash.valid, false);
+  assert.ok(nonCanonicalStructuredHash.errors.some(error => /lowercase SHA-256 digest/.test(error)));
+
+  const legacyPayload = evidencePayload();
+  const legacyRecord = evidenceRecordForPayload(legacyPayload);
+  delete legacyPayload.result.status;
+  delete legacyPayload.result.structured_hash;
+  delete legacyRecord.result.status;
+  delete legacyRecord.result.structured_hash;
+  assert.deepEqual(
+    validateEvidenceRecordBinding(legacyPayload, legacyRecord),
+    { valid: true, errors: [] },
+  );
+  assert.deepEqual(
+    validateEvidenceRecordBinding(legacyPayload, {
+      ...legacyRecord,
+      parent_id: 'legacy-parent',
+    }),
+    { valid: true, errors: [] },
+  );
+
+  const missingPayload = evidencePayload();
+  const missingRecord = evidenceRecordForPayload(missingPayload, { handoff_version: 4 });
+  const missingArtifact = validateEvidenceRecordBinding(missingPayload, missingRecord);
+  assert.equal(missingArtifact.valid, false);
+  assert.ok(missingArtifact.errors.some(error => /handoff artifact digest/.test(error)));
+
+  const nestedV4Marker = validateEvidenceRecordBinding(missingPayload, {
+    ...missingRecord,
+    handoff_version: undefined,
+    handoff: { handoff_version: 4 },
+  });
+  assert.equal(nestedV4Marker.valid, false);
+  assert.ok(nestedV4Marker.errors.some(error => /handoff artifact digest/.test(error)));
+
+  const malformedPayload = structuredClone(rootPayload);
+  malformedPayload.bindings.handoff_artifact_digest = 'not-a-digest';
+  const malformedRecord = evidenceRecordForPayload(malformedPayload, {
+    handoff_version: 4,
+    handoff_artifact_digest: 'not-a-digest',
+  });
+  const malformedArtifact = validateEvidenceRecordBinding(malformedPayload, malformedRecord);
+  assert.equal(malformedArtifact.valid, false);
+  assert.ok(malformedArtifact.errors.some(error => /lowercase SHA-256 digest/.test(error)));
+
+  const childPayload = evidencePayload({
+    handoffArtifactDigest: artifactDigest,
+    sourceRunId: 'source-run-1',
+    sourceRunHandoffArtifactDigest: sourceArtifactDigest,
+  });
+  const childRecord = evidenceRecordForPayload(childPayload, {
+    handoff_version: 4,
+    source_run_required: true,
+  });
+  assert.deepEqual(
+    validateEvidenceRecordBinding(childPayload, childRecord),
+    { valid: true, errors: [] },
+  );
+
+  const missingLineage = validateEvidenceRecordBinding(rootPayload, {
+    ...rootRecord,
+    source_run_required: true,
+  });
+  assert.equal(missingLineage.valid, false);
+  assert.ok(missingLineage.errors.some(error => /source run id/.test(error)));
+  assert.ok(missingLineage.errors.some(error => /source run artifact digest/.test(error)));
 });
 
 test('SSH evidence profiles reject non-canonical payload serialization', () => {

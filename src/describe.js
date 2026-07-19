@@ -1,5 +1,8 @@
 import { listTargets } from './targets.js';
 import { MANIFEST_VERSION } from './schema.js';
+import { listInspectableEntities } from './inspect.js';
+
+const INSPECTABLE_ENTITIES = Object.freeze(listInspectableEntities());
 
 export const COMMAND_DESCRIPTIONS = [
   {
@@ -8,7 +11,7 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'schema',
-    summary: 'Emit machine-readable schema fragments for manifests, tasks, targets, and RPC payloads.'
+    summary: 'Emit machine-readable schema fragments for manifests, compiled artifacts, and RPC payloads.'
   },
   {
     command: 'describe',
@@ -32,7 +35,9 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'inspect',
-    summary: 'Read scheduler runtime state with field masks, sanitization, and NDJSON output.'
+    summary: 'Read scheduler runtime state with field masks, sanitization, and NDJSON output.',
+    usage: `inspect <${INSPECTABLE_ENTITIES.join('|')}> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]`,
+    entities: INSPECTABLE_ENTITIES,
   },
   {
     command: 'targets',

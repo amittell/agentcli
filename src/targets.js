@@ -13,9 +13,9 @@ export const TARGETS = {
     name: 'openclaw-scheduler',
     description: 'Compile manifest tasks into OpenClaw Scheduler job specs for the durable runtime.',
     capabilities: ['compile', 'apply', 'inspect', 'field-mask', 'sanitize-basic', 'ndjson'],
-    // Static baseline features -- superseded by runtime capability negotiation when available.
-    // These serve as the fallback when the scheduler is unreachable or does not support
-    // the 'capabilities' command.
+    // Compile-shape declarations are available statically. Runtime enforcement
+    // capabilities remain false until a live scheduler explicitly advertises
+    // them, so an unavailable capabilities command cannot authorize execution.
     features: {
       approvals: 'runtime',
       model_policy: 'model+thinking',
@@ -23,11 +23,11 @@ export const TARGETS = {
       output_hints: 'runtime',
       timeout_support: 'runtime',
       context_retrieval: 'runtime',
-      runtime_execution: true,
-      identity_declaration: true,
+      runtime_execution: false,
+      identity_declaration: false,
       runtime_identity_resolution: false,
       evidence_generation: false,
-      audit_export: true,
+      audit_export: false,
       trust_evaluation: false,
       delegation_validation: false,
       credential_handoff: false,
@@ -36,6 +36,13 @@ export const TARGETS = {
       root_approval_gate: false,
       approval_scope_enforcement: false,
       structured_output_format: false,
+      handoff_v4_artifact: false,
+      artifact_bound_proofs: false,
+      signed_or_provider_verified_evidence: false,
+      provider_session_cache: false,
+      credential_presentation: false,
+      source_run_bound_delegation: false,
+      immutable_runtime_events: false,
     },
     compile: compileManifestToScheduler,
   },
