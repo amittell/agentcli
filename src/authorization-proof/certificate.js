@@ -137,7 +137,11 @@ function validateV4CertificateEnvelope(parsed, context) {
   if (normalizeDigest(parsed.artifact_digest) !== normalizeDigest(context.artifactDigest)) {
     return { ok: false, v4: true, reason: 'certificate proof artifact digest does not match' };
   }
-  const now = typeof context.now === 'number' ? context.now : Date.now();
+  const now = typeof context.now === 'number'
+    ? context.now
+    : context.now instanceof Date
+      ? context.now.getTime()
+      : Date.now();
   const issuedAt = Date.parse(parsed.issued_at);
   const expiresAt = Date.parse(parsed.expires_at);
   const skewMs = (context.clockSkewSeconds ?? 60) * 1000;
@@ -163,28 +167,6 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
   const verifiedKeyId = certificateProofKeyId(cert);
   if (parsed.key_id !== verifiedKeyId) {
     return { ok: false, reason: 'certificate proof key_id does not match the verified certificate' };
-  }
-
-  const claimReplay = context.claimProofReplay
-    ?? context.replayStore?.claim?.bind(context.replayStore);
-  if (typeof claimReplay !== 'function') {
-    return { ok: false, reason: 'handoff v4 proof replay store is required' };
-  }
-  const replay = claimReplay({
-    method: 'certificate',
-    issuer: profile.issuer ?? cert.issuer ?? null,
-    subject: cert.subject ?? null,
-    proofId: parsed.nonce,
-    artifactDigest: context.artifactDigest,
-    expiresAt: parsed.expires_at,
-    runId: context.runId ?? null,
-  });
-  if (replay && typeof replay.then === 'function') {
-    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
-  }
-  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
-  if (!replayProtected) {
-    return { ok: false, reason: replay?.reason || 'certificate proof nonce was already used' };
   }
 
   const checkRevocation = context.checkProofRevocation
@@ -214,6 +196,28 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
       reason: revocation?.reason
         || 'handoff v4 revocation checker did not explicitly confirm the certificate is not revoked',
     };
+  }
+
+  const claimReplay = context.claimProofReplay
+    ?? context.replayStore?.claim?.bind(context.replayStore);
+  if (typeof claimReplay !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof replay store is required' };
+  }
+  const replay = claimReplay({
+    method: 'certificate',
+    issuer: profile.issuer ?? cert.issuer ?? null,
+    subject: cert.subject ?? null,
+    proofId: parsed.nonce,
+    artifactDigest: context.artifactDigest,
+    expiresAt: parsed.expires_at,
+    runId: context.runId ?? null,
+  });
+  if (replay && typeof replay.then === 'function') {
+    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
+  }
+  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
+  if (!replayProtected) {
+    return { ok: false, reason: replay?.reason || 'certificate proof nonce was already used' };
   }
   return { ok: true, replayProtected: true, revocationChecked: true };
 }

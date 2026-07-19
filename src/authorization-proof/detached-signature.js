@@ -185,7 +185,11 @@ function parseV4Envelope(proof, context) {
     return { error: 'detached proof artifact digest does not match', v4: true };
   }
 
-  const now = typeof context.now === 'number' ? context.now : Date.now();
+  const now = typeof context.now === 'number'
+    ? context.now
+    : context.now instanceof Date
+      ? context.now.getTime()
+      : Date.now();
   const issuedAt = Date.parse(envelope.issued_at);
   const expiresAt = Date.parse(envelope.expires_at);
   const skewMs = (context.clockSkewSeconds ?? 60) * 1000;
@@ -212,27 +216,6 @@ function enforceV4RuntimeGuards(parsed, context, profile, verifiedKeyId) {
     return { ok: false, reason: 'detached proof key_id does not match the verified signing key' };
   }
 
-  const claimReplay = context.claimProofReplay
-    ?? context.replayStore?.claim?.bind(context.replayStore);
-  if (typeof claimReplay !== 'function') {
-    return { ok: false, reason: 'handoff v4 proof replay store is required' };
-  }
-  const replay = claimReplay({
-    method: 'detached-signature',
-    issuer: profile.issuer ?? null,
-    proofId: parsed.envelope.nonce,
-    artifactDigest: context.artifactDigest,
-    expiresAt: parsed.envelope.expires_at,
-    runId: context.runId ?? null,
-  });
-  if (replay && typeof replay.then === 'function') {
-    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
-  }
-  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
-  if (!replayProtected) {
-    return { ok: false, reason: replay?.reason || 'detached proof nonce was already used' };
-  }
-
   const checkRevocation = context.checkProofRevocation
     ?? context.revocationChecker?.check?.bind(context.revocationChecker);
   if (typeof checkRevocation !== 'function') {
@@ -257,6 +240,27 @@ function enforceV4RuntimeGuards(parsed, context, profile, verifiedKeyId) {
       reason: revocation?.reason
         || 'handoff v4 revocation checker did not explicitly confirm the detached proof key is not revoked',
     };
+  }
+
+  const claimReplay = context.claimProofReplay
+    ?? context.replayStore?.claim?.bind(context.replayStore);
+  if (typeof claimReplay !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof replay store is required' };
+  }
+  const replay = claimReplay({
+    method: 'detached-signature',
+    issuer: profile.issuer ?? null,
+    proofId: parsed.envelope.nonce,
+    artifactDigest: context.artifactDigest,
+    expiresAt: parsed.envelope.expires_at,
+    runId: context.runId ?? null,
+  });
+  if (replay && typeof replay.then === 'function') {
+    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
+  }
+  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
+  if (!replayProtected) {
+    return { ok: false, reason: replay?.reason || 'detached proof nonce was already used' };
   }
   return { ok: true, replayProtected: true, revocationChecked: true };
 }
@@ -523,10 +527,14 @@ const detachedSignatureVerifier = {
         verificationReason = `signature verification error: ${err.message}`;
       }
 
-      let verifiedKeyId = context.trustedKeyId ?? null;
-      if (signatureValid && !verifiedKeyId) {
+      let verifiedKeyId = null;
+      if (signatureValid) {
         try {
           verifiedKeyId = detachedSignatureKeyId(context.trustedKey);
+          if (context.trustedKeyId && context.trustedKeyId !== verifiedKeyId) {
+            signatureValid = false;
+            verificationReason = 'trusted detached-signature key ID does not match the verified signing key';
+          }
         } catch (error) {
           signatureValid = false;
           verificationReason = `could not derive verified detached-signature key identity: ${error.message}`;

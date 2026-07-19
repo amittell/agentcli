@@ -11,6 +11,7 @@ import {
 
 export const HANDOFF_V4_REQUIRED_FEATURES = Object.freeze([
   'handoff_v4_artifact',
+  'authorization_proof_verification',
   'artifact_bound_proofs',
   'signed_or_provider_verified_evidence',
   'provider_session_cache',

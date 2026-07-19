@@ -34,6 +34,86 @@ export {
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const CRYPTOGRAPHIC_PROOF_METHODS = new Set(['jwt', 'detached-signature', 'certificate']);
 const PRESENTATION_MEDIA = new Set(['none', 'env', 'temp-file', 'stdin', 'gateway-env-header']);
+const SCHEDULER_JOB_REBINDABLE_FIELDS = new Set([
+  'agent_id',
+  'approval_approver_scope',
+  'approval_auto',
+  'approval_required',
+  'approval_risk_level',
+  'approval_timeout_s',
+  'auth_profile',
+  'auth_profile_fallback',
+  'authorization',
+  'authorization_proof',
+  'authorization_proof_ref',
+  'authorization_ref',
+  'child_credential_policy',
+  'context_retrieval',
+  'context_retrieval_limit',
+  'contract_allowed_paths',
+  'contract_audit',
+  'contract_max_cost_usd',
+  'contract_network',
+  'contract_required_trust_level',
+  'contract_sandbox',
+  'contract_trust_enforcement',
+  'delete_after_run',
+  'delivery_channel',
+  'delivery_guarantee',
+  'delivery_mode',
+  'delivery_opt_out_reason',
+  'delivery_to',
+  'enabled',
+  'evidence',
+  'evidence_ref',
+  'execution_intent',
+  'execution_read_only',
+  'identity',
+  'identity_attestation',
+  'identity_delegation_mode',
+  'identity_principal',
+  'identity_ref',
+  'identity_run_as',
+  'identity_subject_kind',
+  'identity_subject_principal',
+  'identity_trust_level',
+  'job_class',
+  'max_pending_approvals',
+  'max_queued_dispatches',
+  'max_retries',
+  'max_trigger_fanout',
+  'name',
+  'origin',
+  'output_excerpt_limit_bytes',
+  'output_format',
+  'output_offload_threshold_bytes',
+  'output_store_limit_bytes',
+  'output_summary_limit_bytes',
+  'overlap_policy',
+  'parent_id',
+  'payload_kind',
+  'payload_message',
+  'payload_model',
+  'payload_model_fallback',
+  'payload_scope',
+  'payload_thinking',
+  'payload_timeout_seconds',
+  'preferred_session_key',
+  'resource_pool',
+  'run_timeout_ms',
+  'schedule_at',
+  'schedule_cron',
+  'schedule_kind',
+  'schedule_tz',
+  'session_target',
+  'shell_env_policy',
+  'trigger_condition',
+  'trigger_delay_s',
+  'trigger_on',
+  'verify_on_failure',
+  'verify_shell',
+  'verify_timeout_s',
+]);
 
 function hashObject(value) {
   return value == null ? null : canonicalDigest(value);
@@ -443,6 +523,7 @@ export function buildSchedulerHandoffV4Artifact({
     env,
     timeoutMs: job.run_timeout_ms,
     instanceId: null,
+    bindingVersion: HANDOFF_V4_EXECUTION_BINDING_VERSION,
   });
   const effectiveTaskHash = computeEffectiveTaskHash(executionBinding);
   const identity = identityBinding(executionBinding);
@@ -575,6 +656,19 @@ export function buildSchedulerHandoffV4Artifact({
 export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
   if (!job || Number(job.handoff_version) !== HANDOFF_V4_VERSION) {
     throw new TypeError('rebindSchedulerHandoffV4Job requires a handoff v4 job');
+  }
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    throw new TypeError('rebindSchedulerHandoffV4Job overrides must be an object');
+  }
+  const invalidFields = Object.keys(overrides)
+    .filter(field => !SCHEDULER_JOB_REBINDABLE_FIELDS.has(field));
+  if (invalidFields.length > 0) {
+    throw Object.assign(
+      new TypeError(
+        `rebindSchedulerHandoffV4Job cannot override artifact-bound field(s): ${invalidFields.join(', ')}`,
+      ),
+      { code: 'HANDOFF_REBIND_OVERRIDE_INVALID', fields: invalidFields },
+    );
   }
   const reboundJob = { ...job, ...overrides };
   const payload = structuredClone(normalizePayload(job.handoff_artifact_payload));

@@ -14,10 +14,16 @@ import {
 import { HANDOFF_V4_RUNTIME_CONTRACT } from '../src/capabilities.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import {
+  buildEffectiveExecutionBinding,
+  computeEffectiveTaskHash,
+} from '../src/compiler/shared.js';
+import {
+  HANDOFF_V4_EXECUTION_BINDING_VERSION,
   rebindSchedulerHandoffV4Job,
   validateSchedulerHandoffV4Artifact,
 } from '../src/handoff/v4.js';
 import { canonicalStringify } from '../src/canonical.js';
+import { expandManifestShorthands } from '../src/shorthand.js';
 import { jwtVerifier } from '../src/authorization-proof/jwt.js';
 import {
   buildDetachedSignatureV4SigningContent,
@@ -423,6 +429,38 @@ test('scheduler execution binding changes when execution controls change', () =>
   assert.notEqual(compile(first), compile(formattedDifferently));
 });
 
+test('handoff v4 effective task hashes use execution binding version 2', () => {
+  const input = manifest();
+  const expanded = expandManifestShorthands(input);
+  const workflow = expanded.workflows[0];
+  const task = workflow.tasks[0];
+  const job = compileManifestToScheduler(input, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const bindingOptions = {
+    manifest: input,
+    expanded,
+    workflow,
+    task,
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+    timeoutMs: job.run_timeout_ms,
+    instanceId: null,
+  };
+  const v2Binding = buildEffectiveExecutionBinding({
+    ...bindingOptions,
+    bindingVersion: HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  });
+  const v1Binding = buildEffectiveExecutionBinding({ ...bindingOptions, bindingVersion: 1 });
+
+  assert.equal(v2Binding.binding_version, 2);
+  assert.equal(job.handoff_artifact_payload.execution_binding_version, 2);
+  assert.equal(job.effective_task_hash, computeEffectiveTaskHash(v2Binding));
+  assert.notEqual(job.effective_task_hash, computeEffectiveTaskHash(v1Binding));
+});
+
 test('scheduler execution binding covers routing and resource controls', () => {
   const job = compileManifestToScheduler(manifest(), {
     schedulerHandoffVersion: '4',
@@ -463,6 +501,29 @@ test('handoff v4 scheduler rebinding replaces adoption metadata atomically', () 
   assert.equal(validateSchedulerHandoffV4Artifact(rebound.handoff_artifact_payload, {
     expectedDigest: rebound.handoff_artifact_digest,
   }).ok, true);
+});
+
+test('handoff v4 scheduler rebinding rejects artifact-bound overrides', () => {
+  const job = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+
+  for (const [field, value] of [
+    ['id', 'different-id'],
+    ['handoff_version', 3],
+    ['effective_task_hash', `sha256:${'0'.repeat(64)}`],
+    ['handoff_artifact_payload', {}],
+    ['handoff_artifact_digest', `sha256:${'1'.repeat(64)}`],
+  ]) {
+    assert.throws(
+      () => rebindSchedulerHandoffV4Job(job, { [field]: value }),
+      error => error.code === 'HANDOFF_REBIND_OVERRIDE_INVALID'
+        && error.fields.includes(field),
+      field,
+    );
+  }
 });
 
 test('v4 builder rejects raw credential bindings', () => {
@@ -523,6 +584,16 @@ test('apply uses v4 only after every runtime gate is advertised', async () => {
   });
   assert.equal(omittedGate.handoff.field_version, '3');
   assert.equal('handoff_version' in omittedGateRunner.added[0], false);
+
+  const missingProofVerificationRunner = runner({
+    features: { ...V4_FEATURES, authorization_proof_verification: false },
+  });
+  const missingProofVerification = await applyManifestToScheduler(manifest(), {
+    runner: missingProofVerificationRunner,
+    env: { PATH: '/usr/bin' },
+  });
+  assert.equal(missingProofVerification.handoff.field_version, '3');
+  assert.equal('handoff_version' in missingProofVerificationRunner.added[0], false);
 
   const oldRunner = runner({ handoffVersion: '3' });
   const oldRuntime = await applyManifestToScheduler(manifest(), {
@@ -681,6 +752,34 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
       && /runtime capability downgrade/.test(error.message),
   );
   assert.deepEqual(downgraded.history, []);
+
+  const legacyManifest = manifest();
+  legacyManifest.workflows[0].id = 'legacy-v4-workflow';
+  legacyManifest.workflows[0].tasks[0].id = 'legacy-v4-root';
+  const legacyV4 = compileManifestToScheduler(legacyManifest, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  assert.notEqual(legacyV4.id, compiled.id);
+  assert.equal(legacyV4.name, compiled.name);
+  const downgradedAdopter = statefulRunner([
+    schedulerCreateSpec(legacyV4, { originOverride: 'legacy-origin', fieldVersion: '4' }),
+  ], {
+    handoffVersion: '3',
+    features: { ...V4_FEATURES, immutable_runtime_events: false },
+  });
+  await assert.rejects(
+    applyManifestToScheduler(manifest(), {
+      runner: downgradedAdopter,
+      adoptBy: 'name',
+      cwd: '/tmp',
+      env: { PATH: '/usr/bin' },
+    }),
+    error => error.code === 'unsupported_capability'
+      && /runtime capability downgrade/.test(error.message),
+  );
+  assert.deepEqual(downgradedAdopter.history, []);
 });
 
 test('handoff v4 JWT requires artifact binding, replay claim, and revocation check', () => {
@@ -712,6 +811,7 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
     manifestDigest: payload.manifest_digest,
     artifactDigest,
     handoffVersion: 4,
+    now: new Date(now * 1000),
     runId: 'run-1',
     claimProofReplay({ proofId }) {
       if (claimed.has(proofId)) return { claimed: false, reason: 'replay' };
@@ -728,6 +828,7 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(verified.artifact_bound, true);
   assert.equal(verified.replay_protected, true);
   assert.equal(verified.revocation_checked, true);
+  assert.equal(verified.verified_at, new Date(now * 1000).toISOString());
 
   const replay = jwtVerifier.verifyProof(token, profile, context);
   assert.equal(replay.verified, false);
@@ -751,14 +852,31 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(invertedResult.verified, false);
   assert.match(invertedResult.reason, /exp claim must be greater than iat/);
 
+  const mismatchedKeyId = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-mismatched-key-id' }, privateKey),
+    profile,
+    {
+      ...context,
+      trustedKeyId: 'spki-sha256:unrelated',
+      claimProofReplay: () => ({ claimed: true }),
+    },
+  );
+  assert.equal(mismatchedKeyId.verified, false);
+  assert.match(mismatchedKeyId.reason, /key ID does not match/);
+
   const indeterminateRevocation = signJwt({ ...payload, jti: 'proof-indeterminate' }, privateKey);
+  let indeterminateReplayClaims = 0;
   const indeterminateResult = jwtVerifier.verifyProof(indeterminateRevocation, profile, {
     ...context,
-    claimProofReplay: () => ({ claimed: true }),
+    claimProofReplay: () => {
+      indeterminateReplayClaims += 1;
+      return { claimed: true };
+    },
     checkProofRevocation: () => undefined,
   });
   assert.equal(indeterminateResult.verified, false);
   assert.match(indeterminateResult.reason, /did not explicitly confirm/);
+  assert.equal(indeterminateReplayClaims, 0);
 });
 
 test('handoff v4 detached signatures cover nonce, validity, key, and artifact metadata', () => {
@@ -790,7 +908,7 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
     artifactPayload: compiled.handoff_artifact_payload,
     artifactDigest: compiled.handoff_artifact_digest,
     handoffVersion: 4,
-    now,
+    now: new Date(now),
     runId: 'run-detached',
     claimProofReplay({ proofId }) {
       if (claimed.has(proofId)) return { claimed: false, reason: 'replay refused' };
@@ -847,9 +965,28 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
   assert.equal(wrongKey.verified, false);
   assert.match(wrongKey.signature_verification_reason, /key_id does not match/);
 
+  const mismatchedTrustedKeyFields = { ...fields, nonce: 'detached-proof-context-key-id' };
+  const mismatchedTrustedKeySigner = createSign('RSA-SHA256');
+  mismatchedTrustedKeySigner.update(buildDetachedSignatureV4SigningContent(mismatchedTrustedKeyFields));
+  const mismatchedTrustedKey = detachedSignatureVerifier.verifyProof({
+    signature: mismatchedTrustedKeySigner.sign(privateKey).toString('base64'),
+    artifact_digest: mismatchedTrustedKeyFields.artifactDigest,
+    nonce: mismatchedTrustedKeyFields.nonce,
+    issued_at: mismatchedTrustedKeyFields.issuedAt,
+    expires_at: mismatchedTrustedKeyFields.expiresAt,
+    key_id: mismatchedTrustedKeyFields.keyId,
+  }, profile, {
+    ...context,
+    trustedKeyId: 'spki-sha256:unrelated',
+    claimProofReplay: () => ({ claimed: true }),
+  });
+  assert.equal(mismatchedTrustedKey.verified, false);
+  assert.match(mismatchedTrustedKey.signature_verification_reason, /key ID does not match/);
+
   const uncheckedFields = { ...fields, nonce: 'detached-proof-unchecked' };
   const uncheckedSigner = createSign('RSA-SHA256');
   uncheckedSigner.update(buildDetachedSignatureV4SigningContent(uncheckedFields));
+  let uncheckedReplayClaims = 0;
   const unchecked = detachedSignatureVerifier.verifyProof({
     signature: uncheckedSigner.sign(privateKey).toString('base64'),
     artifact_digest: uncheckedFields.artifactDigest,
@@ -859,11 +996,15 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
     key_id: uncheckedFields.keyId,
   }, profile, {
     ...context,
-    claimProofReplay: () => ({ claimed: true }),
+    claimProofReplay: () => {
+      uncheckedReplayClaims += 1;
+      return { claimed: true };
+    },
     checkProofRevocation: () => null,
   });
   assert.equal(unchecked.verified, false);
   assert.match(unchecked.signature_verification_reason, /did not explicitly confirm/);
+  assert.equal(uncheckedReplayClaims, 0);
 });
 
 test('handoff v4 certificate proof signs its replay and validity controls', t => {
@@ -933,7 +1074,7 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
     artifactPayload: compiled.handoff_artifact_payload,
     artifactDigest: compiled.handoff_artifact_digest,
     handoffVersion: 4,
-    now,
+    now: new Date(now),
     runId: 'run-certificate',
     claimProofReplay: () => ({ claimed: true }),
     checkProofRevocation: () => ({ revoked: false }),
@@ -1004,6 +1145,7 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   const uncheckedFields = { ...fields, nonce: 'certificate-proof-unchecked' };
   const uncheckedSigner = createSign('SHA256');
   uncheckedSigner.update(buildCertificateV4SigningContent(uncheckedFields));
+  let uncheckedReplayClaims = 0;
   const unchecked = certificateVerifier.verifyProof({
     certificate: certificatePem,
     signature: uncheckedSigner.sign(readFileSync(keyPath, 'utf8')).toString('base64'),
@@ -1014,11 +1156,15 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
     key_id: uncheckedFields.keyId,
   }, profile, {
     ...context,
-    claimProofReplay: () => ({ claimed: true }),
+    claimProofReplay: () => {
+      uncheckedReplayClaims += 1;
+      return { claimed: true };
+    },
     checkProofRevocation: () => ({ ok: false, reason: 'revocation backend unavailable' }),
   });
   assert.equal(unchecked.verified, false);
   assert.match(unchecked.signature_verification_reason, /revocation backend unavailable/);
+  assert.equal(uncheckedReplayClaims, 0);
 });
 
 test('inspect advertises every v4 immutable runtime entity', () => {

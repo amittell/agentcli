@@ -296,10 +296,22 @@ async function resolveJwtTrustedKey(proof, profile, ctx = {}) {
     };
   }
 
+  let trustedKeyId;
+  try {
+    trustedKeyId = publicKeyId(selected.key);
+  } catch (error) {
+    return {
+      trustedKey: null,
+      trustedKeySource: 'jwks_uri',
+      trustedKeyId: null,
+      trustedKeyError: `could not derive selected JWKS key identity: ${error.message}`,
+    };
+  }
+
   return {
     trustedKey: selected.key,
     trustedKeySource: 'jwks_uri',
-    trustedKeyId: selected.key.kid || decoded.header?.kid || null,
+    trustedKeyId,
     trustedKeyError: null,
   };
 }
@@ -566,6 +578,11 @@ const jwtVerifier = {
     const clockSkewSeconds = v4Required
       ? (context.clockSkewSeconds ?? 60)
       : (context.clockSkewSeconds ?? 0);
+    const verificationNowMs = typeof context.now === 'number'
+      ? context.now
+      : context.now instanceof Date
+        ? context.now.getTime()
+        : Date.now();
 
     // Validate proof is a non-empty string
     if (!proof || typeof proof !== 'string') {
@@ -630,7 +647,7 @@ const jwtVerifier = {
     // Check expiry and issuance claims. Handoff v4 requires an explicit
     // bounded lifetime and replay identifier.
     const now = Math.floor(
-      (typeof context.now === 'number' ? context.now : Date.now()) / 1000,
+      verificationNowMs / 1000,
     );
     if (v4Required && payload.exp === undefined) {
       return {
@@ -782,10 +799,14 @@ const jwtVerifier = {
       signatureReason = signatureReason || 'signature required but no trusted key available';
     }
 
-    let verifiedKeyId = context.trustedKeyId || null;
-    if (signatureVerified && !verifiedKeyId) {
+    let verifiedKeyId = null;
+    if (signatureVerified) {
       try {
         verifiedKeyId = publicKeyId(context.trustedKey);
+        if (context.trustedKeyId && context.trustedKeyId !== verifiedKeyId) {
+          signatureVerified = false;
+          signatureReason = 'trusted JWT key ID does not match the verified signing key';
+        }
       } catch (error) {
         signatureVerified = false;
         signatureReason = `could not derive verified JWT key identity: ${error.message}`;
@@ -799,29 +820,6 @@ const jwtVerifier = {
       if (!verifiedKeyId) {
         runtimeGuardReason = 'handoff v4 requires a verified signing key identity';
       }
-      const claimReplay = context.claimProofReplay
-        ?? context.replayStore?.claim?.bind(context.replayStore);
-      if (!runtimeGuardReason && typeof claimReplay !== 'function') {
-        runtimeGuardReason = 'handoff v4 proof replay store is required';
-      } else if (!runtimeGuardReason) {
-        const replayResult = claimReplay({
-          method: 'jwt',
-          issuer: payload.iss ?? profile.issuer ?? null,
-          subject: payload.sub ?? null,
-          proofId: payload.jti,
-          artifactDigest,
-          expiresAt: new Date(payload.exp * 1000).toISOString(),
-          runId: context.runId ?? null,
-        });
-        if (replayResult && typeof replayResult.then === 'function') {
-          runtimeGuardReason = 'handoff v4 replay store must complete synchronously';
-        } else {
-          replayProtected = replayResult === true || replayResult?.claimed === true
-            || replayResult?.ok === true;
-          if (!replayProtected) runtimeGuardReason = replayResult?.reason || 'JWT jti was already used';
-        }
-      }
-
       const checkRevocation = context.checkProofRevocation
         ?? context.revocationChecker?.check?.bind(context.revocationChecker);
       if (!runtimeGuardReason && typeof checkRevocation !== 'function') {
@@ -844,6 +842,29 @@ const jwtVerifier = {
         } else {
           runtimeGuardReason = revocationResult?.reason
             || 'handoff v4 revocation checker did not explicitly confirm the JWT is not revoked';
+        }
+      }
+
+      const claimReplay = context.claimProofReplay
+        ?? context.replayStore?.claim?.bind(context.replayStore);
+      if (!runtimeGuardReason && typeof claimReplay !== 'function') {
+        runtimeGuardReason = 'handoff v4 proof replay store is required';
+      } else if (!runtimeGuardReason) {
+        const replayResult = claimReplay({
+          method: 'jwt',
+          issuer: payload.iss ?? profile.issuer ?? null,
+          subject: payload.sub ?? null,
+          proofId: payload.jti,
+          artifactDigest,
+          expiresAt: new Date(payload.exp * 1000).toISOString(),
+          runId: context.runId ?? null,
+        });
+        if (replayResult && typeof replayResult.then === 'function') {
+          runtimeGuardReason = 'handoff v4 replay store must complete synchronously';
+        } else {
+          replayProtected = replayResult === true || replayResult?.claimed === true
+            || replayResult?.ok === true;
+          if (!replayProtected) runtimeGuardReason = replayResult?.reason || 'JWT jti was already used';
         }
       }
     }
@@ -891,7 +912,7 @@ const jwtVerifier = {
       key_id: verifiedKeyId,
       key_source: context.trustedKeySource || null,
       manifest_digest: context.manifestDigest || null,
-      verified_at: new Date().toISOString(),
+      verified_at: new Date(verificationNowMs).toISOString(),
     };
 
     if (!signatureVerified) {

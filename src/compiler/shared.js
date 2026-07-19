@@ -652,9 +652,13 @@ export function buildEffectiveExecutionBinding({
   env = process.env,
   timeoutMs,
   instanceId,
+  bindingVersion = 1,
 } = {}) {
   if (!workflow || !task) {
     throw new TypeError('workflow and task are required to build an execution binding');
+  }
+  if (!Number.isInteger(bindingVersion) || bindingVersion < 1) {
+    throw new TypeError('bindingVersion must be a positive integer');
   }
 
   const resolvedIdentity = resolveIdentity(workflow, task);
@@ -684,7 +688,7 @@ export function buildEffectiveExecutionBinding({
   const evidence = evidenceRef ? mergeEvidenceProfile(evidenceProfile, evidenceRef) : null;
 
   return {
-    binding_version: 1,
+    binding_version: bindingVersion,
     manifest_version: expanded?.version ?? manifest?.version ?? null,
     manifest_digest: manifest
       ? canonicalDigest(manifest)

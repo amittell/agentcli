@@ -445,13 +445,14 @@ export async function applyManifestToScheduler(
     }
 
     if (
-      action === 'updated'
+      (action === 'updated' || action === 'adopted')
       && Number(existingJob?.handoff_version) === 4
       && Number(job.handoff_version) !== 4
     ) {
       throw Object.assign(
         new Error(
-          `Cannot update handoff v4 scheduler job "${job.id}" after runtime capability downgrade; ` +
+          `Cannot ${action === 'adopted' ? 'adopt' : 'update'} handoff v4 scheduler job ` +
+          `"${existingJob?.id ?? job.id}" after runtime capability downgrade; ` +
           'restore the exact v4 runtime contract before applying changes'
         ),
         { code: 'unsupported_capability' }
