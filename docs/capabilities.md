@@ -50,6 +50,21 @@ Feature keys include `approvals`, `model_policy`, `execution_intent`, `output_hi
 
 During scheduler apply, a live runtime value is authoritative for every known feature it reports, including `false`. Static target values are used only when the capability command is unavailable or omits a known key. This prevents a stale optimistic declaration from overriding the runtime's observed behavior.
 
+Security-relevant static fallback values are false. This includes runtime
+execution, identity resolution, trust, proof, authorization, evidence,
+approval, structured output, credential handoff, and every v4 gate. A live
+response must explicitly enable each enforcement feature. AgentCLI probes the
+runtime on every apply, including basic v0.1 manifests, so a v4-capable runtime
+can provide immutable artifacts without weakening offline fallback behavior.
+
+Handoff v4 additionally requires scheduler schema version 29 or newer and an
+exact `handoff_contract` object. The contract identifies artifact schema
+`openclaw.scheduler.handoff-artifact` version 1, canonicalization
+`json-sort-v1` version 1, SHA-256 digests, undefined values normalized to null,
+execution binding version 2, and scheduler job binding version 1. AgentCLI
+falls back to v3 when any contract field or required v4 feature is missing or
+mismatched. Static target declarations never authorize v4 emission.
+
 ## Current Target Matrix
 
 ### `standalone`
@@ -119,6 +134,8 @@ Interpretation:
 - output hints compile into scheduler output preview/offload budgets
 - queue, approval, and fan-out budgets compile into runtime guardrails
 - handoff version 3 is required to preserve approval risk, approver scope, and output format fields
+- handoff version 4 is selected only through exact live contract negotiation
+- `agentcli schema handoff-v4` exposes the complete immutable artifact schema
 - root manual approvals require `root_approval_gate`; approver scopes require `approval_scope_enforcement`; output formats require `structured_output_format`
 - `auto-reject` jobs compile disabled so an older dispatcher cannot accidentally run them
 - inline `shell.env` and `shell.stdin` are rejected because scheduler persistence is not a secret store

@@ -15,9 +15,14 @@ import { tmpdir } from 'node:os';
 import process from 'node:process';
 import { canonicalStringify, hashString } from '../canonical.js';
 import { registerVerifier } from './index.js';
+import { publicKeyId } from './key-identity.js';
 
 const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
+
+export function detachedSignatureKeyId(publicKey) {
+  return publicKeyId(publicKey);
+}
 
 export function buildDetachedSignatureV4SigningContent({
   artifactDigest,
@@ -196,9 +201,15 @@ function parseV4Envelope(proof, context) {
   return { signature: envelope.signature, envelope, v4: true };
 }
 
-function enforceV4RuntimeGuards(parsed, context, profile) {
+function enforceV4RuntimeGuards(parsed, context, profile, verifiedKeyId) {
   if (!parsed.v4) {
     return { ok: true, replayProtected: true, revocationChecked: true };
+  }
+  if (typeof verifiedKeyId !== 'string' || verifiedKeyId.length === 0) {
+    return { ok: false, reason: 'handoff v4 requires a verified detached-signature key identity' };
+  }
+  if (parsed.envelope.key_id !== verifiedKeyId) {
+    return { ok: false, reason: 'detached proof key_id does not match the verified signing key' };
   }
 
   const claimReplay = context.claimProofReplay
@@ -232,13 +243,20 @@ function enforceV4RuntimeGuards(parsed, context, profile) {
     issuer: profile.issuer ?? null,
     proofId: parsed.envelope.nonce,
     artifactDigest: context.artifactDigest,
-    keyId: parsed.envelope.key_id,
+    keyId: verifiedKeyId,
   });
   if (revocation && typeof revocation.then === 'function') {
     return { ok: false, reason: 'handoff v4 revocation checker must complete synchronously' };
   }
   if (revocation === true || revocation?.revoked === true) {
     return { ok: false, reason: revocation?.reason || 'detached proof key is revoked' };
+  }
+  if (revocation?.revoked !== false) {
+    return {
+      ok: false,
+      reason: revocation?.reason
+        || 'handoff v4 revocation checker did not explicitly confirm the detached proof key is not revoked',
+    };
   }
   return { ok: true, replayProtected: true, revocationChecked: true };
 }
@@ -306,7 +324,9 @@ function verifySshSignature(signature, content, options) {
     });
 
     if (result.status === 0) {
-      return { verified: true };
+      const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+      const fingerprint = output.match(/SHA256:[A-Za-z0-9+/]+={0,2}/)?.[0] ?? null;
+      return { verified: true, keyId: fingerprint };
     }
 
     return {
@@ -449,7 +469,7 @@ const detachedSignatureVerifier = {
       );
 
       const guards = sshResult.verified
-        ? enforceV4RuntimeGuards(parsed, context, profile || {})
+        ? enforceV4RuntimeGuards(parsed, context, profile || {}, sshResult.keyId)
         : { ok: false, reason: sshResult.reason };
       return {
         verified: sshResult.verified && guards.ok,
@@ -465,6 +485,7 @@ const detachedSignatureVerifier = {
           || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
         replay_protected: guards.replayProtected === true,
         revocation_checked: guards.revocationChecked === true,
+        key_id: sshResult.keyId ?? null,
         verified_at: verifiedAt(context),
       };
     }
@@ -502,8 +523,17 @@ const detachedSignatureVerifier = {
         verificationReason = `signature verification error: ${err.message}`;
       }
 
+      let verifiedKeyId = context.trustedKeyId ?? null;
+      if (signatureValid && !verifiedKeyId) {
+        try {
+          verifiedKeyId = detachedSignatureKeyId(context.trustedKey);
+        } catch (error) {
+          signatureValid = false;
+          verificationReason = `could not derive verified detached-signature key identity: ${error.message}`;
+        }
+      }
       const guards = signatureValid
-        ? enforceV4RuntimeGuards(parsed, context, profile || {})
+        ? enforceV4RuntimeGuards(parsed, context, profile || {}, verifiedKeyId)
         : { ok: false, reason: verificationReason };
       return {
         verified: signatureValid && guards.ok,
@@ -519,6 +549,7 @@ const detachedSignatureVerifier = {
           || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
         replay_protected: guards.replayProtected === true,
         revocation_checked: guards.revocationChecked === true,
+        key_id: verifiedKeyId,
         verified_at: verifiedAt(context),
       };
     }
@@ -557,6 +588,7 @@ const detachedSignatureVerifier = {
       artifact_bound: result.artifact_bound === true,
       replay_protected: result.replay_protected === true,
       revocation_checked: result.revocation_checked === true,
+      key_id: result.key_id || null,
       reason: result.signature_verification_reason || result.reason || null,
     };
   },

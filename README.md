@@ -357,7 +357,7 @@ Use `agentcli signing providers` to list the registered signing providers and th
 | `version` | Show package and manifest spec version. |
 | `init [--tool program] [--output path] [--workflow-id id] [--task-id id]` | Initialize agentcli home directory with starter manifests. |
 | `paths` | Show resolved agentcli home, manifest, output, state, and audit paths. |
-| `schema [target] [--legacy]` | Emit Draft 2020-12 JSON Schema for manifest, workflow, task, schedulerJob, standalonePlan, rpcRequest, or rpcResponse. `--legacy` opts into the older agentcli descriptor format. |
+| `schema [target] [--legacy]` | Emit Draft 2020-12 JSON Schema for manifest, workflow, task, schedulerJob, standalonePlan, handoffV4, rpcRequest, or rpcResponse. The `handoff-v4` alias exposes the immutable scheduler artifact contract. `--legacy` opts into the older agentcli descriptor format. |
 | `describe [target]` | Describe manifest, workflow, task, targets, commands, or rpc surfaces as structured JSON. |
 | `targets` | List available compilation targets. |
 | `skill-path` | Print the path to the agentcli skill manifest for MCP tool registration. |
@@ -493,7 +493,17 @@ agentcli compile my-workflow.json --target openclaw-scheduler --explain
 # Apply to the scheduler (creates or updates jobs)
 agentcli apply my-workflow.json --dry-run
 agentcli apply my-workflow.json
+
+# Discover and exercise the handoff v4 contract
+agentcli schema handoff-v4
+agentcli apply examples/handoff-v4.json --check-capabilities
 ```
+
+AgentCLI emits v4 only when the live scheduler advertises schema version 29 or
+newer, every required v4 feature, and an exact `handoff_contract` match for the
+artifact schema, canonicalization, digest, undefined-value handling, execution
+binding, and scheduler job binding. Missing or mismatched contract metadata
+falls back to handoff v3, so partial v4 support is never persisted.
 
 ## Migration from v0.1
 

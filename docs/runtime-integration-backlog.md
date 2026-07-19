@@ -124,7 +124,7 @@ Acceptance criteria:
 
 Owner: `agentcli` + `openclaw-scheduler`
 
-Status: shipped in AgentCLI 0.5.0 and OpenClaw Scheduler 0.5.0 as handoff v4. The canonical artifact, complete scheduler binding, shared fixtures, non-lossy apply/update/adopt path, immutable runtime bindings, and negative capability gates are executable release requirements.
+Status: shipped in AgentCLI 0.5.0 and OpenClaw Scheduler 0.5.0 as handoff v4. The canonical artifact, complete scheduler binding, shared fixtures, non-lossy apply/update/adopt path, final-origin rebinding, environment parity, immutable runtime bindings, strict public artifact schema, exact live contract negotiation, verified-key revocation identity, and negative capability gates are executable release requirements.
 
 Problem:
 

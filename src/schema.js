@@ -1,3 +1,5 @@
+import { HANDOFF_V4_JSON_SCHEMA } from './handoff/schema-v4.js';
+
 export const MANIFEST_VERSION = '0.2';
 
 const nullableString = { type: 'string', nullable: true };
@@ -1303,6 +1305,7 @@ export const JSON_SCHEMAS = Object.freeze({
     title: 'agentcli standalone compiled plan',
     ...legacyDescriptorToJsonSchema(MANIFEST_SCHEMA.standalonePlan),
   },
+  handoffV4: HANDOFF_V4_JSON_SCHEMA,
   rpcRequest: {
     $schema: JSON_SCHEMA_DIALECT,
     title: 'agentcli JSON-RPC request',

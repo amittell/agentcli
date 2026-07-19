@@ -19,6 +19,13 @@ import { registerVerifier } from './index.js';
 
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
 
+export function certificateProofKeyId(certificate) {
+  const parsed = certificate instanceof X509Certificate
+    ? certificate
+    : new X509Certificate(certificate);
+  return `x509-sha256:${parsed.fingerprint256.replaceAll(':', '').toLowerCase()}`;
+}
+
 export function buildCertificateV4SigningContent({
   artifactDigest,
   nonce,
@@ -153,6 +160,10 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
       ? { ok: false, reason: envelope.reason }
       : { ok: true, replayProtected: true, revocationChecked: true };
   }
+  const verifiedKeyId = certificateProofKeyId(cert);
+  if (parsed.key_id !== verifiedKeyId) {
+    return { ok: false, reason: 'certificate proof key_id does not match the verified certificate' };
+  }
 
   const claimReplay = context.claimProofReplay
     ?? context.replayStore?.claim?.bind(context.replayStore);
@@ -187,7 +198,7 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
     subject: cert.subject ?? null,
     proofId: parsed.nonce,
     artifactDigest: context.artifactDigest,
-    keyId: parsed.key_id ?? cert.fingerprint256,
+    keyId: verifiedKeyId,
     serialNumber: cert.serialNumber,
     fingerprint: cert.fingerprint256,
   });
@@ -196,6 +207,13 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
   }
   if (revocation === true || revocation?.revoked === true) {
     return { ok: false, reason: revocation?.reason || 'certificate proof is revoked' };
+  }
+  if (revocation?.revoked !== false) {
+    return {
+      ok: false,
+      reason: revocation?.reason
+        || 'handoff v4 revocation checker did not explicitly confirm the certificate is not revoked',
+    };
   }
   return { ok: true, replayProtected: true, revocationChecked: true };
 }

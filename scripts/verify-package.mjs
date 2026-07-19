@@ -42,8 +42,10 @@ try {
     'fixtures/handoff-v4/conformance.json',
     'scripts/verify-package.mjs',
     'src/handoff/index.js',
+    'src/handoff/schema-v4.js',
     'src/handoff/v4.js',
     'src/authorization-proof/jwt.js',
+    'src/authorization-proof/key-identity.js',
     'src/authorization-proof/detached-signature.js',
     'src/authorization-proof/certificate.js',
   ];
@@ -87,11 +89,27 @@ try {
   const handoff = await import(pathToFileURL(join(packageRoot, 'src/handoff/index.js')).href);
   for (const exportName of [
     'buildSchedulerHandoffV4Artifact',
+    'rebindSchedulerHandoffV4Job',
     'validateSchedulerHandoffV4Artifact',
   ]) {
     if (typeof handoff[exportName] !== 'function') {
       throw new Error(`packed handoff module is missing ${exportName}`);
     }
+  }
+  if (handoff.HANDOFF_V4_JSON_SCHEMA?.properties?.handoff_version?.const !== 4) {
+    throw new Error('packed handoff module is missing the v4 artifact schema');
+  }
+
+  const schemaOutput = JSON.parse(run(process.execPath, [
+    'bin/agentcli.js',
+    'schema',
+    'handoff-v4',
+    '--json',
+  ], { cwd: packageRoot }));
+  if (schemaOutput.ok !== true
+    || schemaOutput.schema_format !== 'json-schema-draft-2020-12'
+    || schemaOutput.schema?.properties?.handoff_version?.const !== 4) {
+    throw new Error('packed CLI does not expose the handoff v4 artifact schema');
   }
 
   const help = run(process.execPath, ['bin/agentcli.js', 'help'], { cwd: packageRoot });

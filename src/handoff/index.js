@@ -6,6 +6,10 @@ export {
   HANDOFF_V4_CANONICALIZATION,
   HANDOFF_V4_CANONICALIZATION_VERSION,
   HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
   buildSchedulerHandoffV4Artifact,
+  rebindSchedulerHandoffV4Job,
   validateSchedulerHandoffV4Artifact,
 } from './v4.js';
+
+export { HANDOFF_V4_JSON_SCHEMA } from './schema-v4.js';

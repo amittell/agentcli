@@ -22,7 +22,13 @@ import { validateManifest } from '../src/validate.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 import { compileManifestToStandalone } from '../src/compiler/standalone.js';
 import { applyManifestToScheduler, resolveSchedulerInvocation, shellCommandInvocation, SCHEDULER_FIELD_VERSIONS, SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02 } from '../src/apply.js';
-import { querySchedulerCapabilities, resolveEffectiveFeatures, validateManifestCapabilities } from '../src/capabilities.js';
+import {
+  HANDOFF_V4_REQUIRED_FEATURES,
+  HANDOFF_V4_RUNTIME_CONTRACT,
+  querySchedulerCapabilities,
+  resolveEffectiveFeatures,
+  validateManifestCapabilities,
+} from '../src/capabilities.js';
 import { resolveCommandValue } from '../src/command.js';
 import { runCli } from '../src/cli.js';
 import { inspectSchedulerState } from '../src/inspect.js';
@@ -985,16 +991,18 @@ test('applyManifestToScheduler plans and executes scheduler upserts', async () =
   assert.equal(calls[0].spec.enabled, true);
 });
 
-test('openclaw-scheduler target advertises the current verified runtime feature baseline', () => {
+test('openclaw-scheduler static target keeps runtime enforcement disabled', () => {
   const target = listTargets().find(candidate => candidate.name === 'openclaw-scheduler');
   assert.ok(target);
-  assert.equal(target.features.runtime_identity_resolution, true);
-  assert.equal(target.features.evidence_generation, true);
-  assert.equal(target.features.trust_evaluation, true);
-  assert.equal(target.features.delegation_validation, true);
-  assert.equal(target.features.handoff_v4_artifact, true);
-  assert.equal(target.features.artifact_bound_proofs, true);
-  assert.equal(target.features.signed_or_provider_verified_evidence, true);
+  assert.equal(target.features.model_policy, 'model+thinking');
+  assert.equal(target.features.runtime_identity_resolution, false);
+  assert.equal(target.features.evidence_generation, false);
+  assert.equal(target.features.trust_evaluation, false);
+  assert.equal(target.features.delegation_validation, false);
+  assert.equal(target.features.root_approval_gate, false);
+  assert.equal(target.features.handoff_v4_artifact, false);
+  assert.equal(target.features.artifact_bound_proofs, false);
+  assert.equal(target.features.signed_or_provider_verified_evidence, false);
 });
 
 test('applyManifestToScheduler projects only versioned runtime fields to backend specs', async () => {
@@ -2448,6 +2456,23 @@ test('barrel export includes io utilities', async () => {
 test('standalonePlan schema version has const constraint', async () => {
   const output = JSON.parse(await runCli(['schema', 'standalone-plan', '--legacy']));
   assert.equal(output.schema.fields.version.const, '0.2');
+});
+
+test('handoff v4 schema is discoverable from CLI and JSON-RPC', async () => {
+  const cli = JSON.parse(await runCli(['schema', 'handoff-v4']));
+  assert.equal(cli.ok, true);
+  assert.equal(cli.schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
+  assert.equal(cli.schema.properties.handoff_version.const, 4);
+  assert.deepEqual(cli.schema.required.includes('scheduler_job_binding'), true);
+
+  const rpc = await handleJsonRpcRequest({
+    jsonrpc: '2.0',
+    id: 'handoff-v4-schema',
+    method: 'agentcli.schema',
+    params: { target: 'handoff-v4' },
+  });
+  assert.equal(rpc.result.ok, true);
+  assert.deepEqual(rpc.result.schema, cli.schema);
 });
 
 test('json-rpc internal error uses fallback message', async () => {
@@ -7985,6 +8010,7 @@ test('querySchedulerCapabilities returns ok with features from a valid runner', 
         scheduler_version: '0.2.0',
         schema_version: 22,
         handoff_version: '2',
+        handoff_contract: HANDOFF_V4_RUNTIME_CONTRACT,
         features: {
           approvals: 'runtime',
           runtime_execution: true,
@@ -8007,6 +8033,7 @@ test('querySchedulerCapabilities returns ok with features from a valid runner', 
   assert.strictEqual(result.version, '0.2.0');
   assert.strictEqual(result.handoff_version, '2');
   assert.strictEqual(result.schema_version, 22);
+  assert.deepEqual(result.handoff_contract, HANDOFF_V4_RUNTIME_CONTRACT);
   assert.strictEqual(result.features.authorization_hook, true);
   assert.strictEqual(result.features.runtime_identity_resolution, true);
 });
@@ -8056,7 +8083,10 @@ test('resolveEffectiveFeatures upgrades static false to runtime true', () => {
       runtime_identity_resolution: true,
       authorization_proof_verification: true,
       credential_handoff: true,
-    }
+    },
+    schema_version: 29,
+    handoff_version: '4',
+    handoff_contract: HANDOFF_V4_RUNTIME_CONTRACT,
   };
   const result = resolveEffectiveFeatures('openclaw-scheduler', caps);
   assert.strictEqual(result.negotiated, true);
@@ -8067,6 +8097,9 @@ test('resolveEffectiveFeatures upgrades static false to runtime true', () => {
   assert.strictEqual(result.features.runtime_identity_resolution, true);
   assert.strictEqual(result.features.authorization_proof_verification, true);
   assert.strictEqual(result.features.credential_handoff, true);
+  assert.strictEqual(result.schema_version, 29);
+  assert.strictEqual(result.handoff_version, '4');
+  assert.deepEqual(result.handoff_contract, HANDOFF_V4_RUNTIME_CONTRACT);
 });
 
 test('resolveEffectiveFeatures treats live false values as authoritative downgrades', () => {
@@ -8114,9 +8147,9 @@ test('resolveEffectiveFeatures returns static features when no runtime capabilit
   const result = resolveEffectiveFeatures('openclaw-scheduler', null);
   assert.strictEqual(result.negotiated, false);
   assert.strictEqual(result.source, 'static');
-  assert.strictEqual(result.features.authorization_hook, true);
-  assert.strictEqual(result.features.handoff_v4_artifact, true);
-  assert.strictEqual(result.features.runtime_execution, true);
+  assert.strictEqual(result.features.authorization_hook, false);
+  assert.strictEqual(result.features.handoff_v4_artifact, false);
+  assert.strictEqual(result.features.runtime_execution, false);
 });
 
 test('resolveEffectiveFeatures returns static features when runtime ok is false', () => {
@@ -8560,18 +8593,26 @@ test('applyManifestToScheduler preserves capability warnings in structured resul
   }
 });
 
-test('applyManifestToScheduler skips runtime capability queries for pure v0.1 manifests', async () => {
+test('applyManifestToScheduler negotiates v4 for pure v0.1 manifests', async () => {
   let capabilityCalls = 0;
+  const added = [];
   const runner = {
     invocation: { label: 'fake-scheduler' },
     queryCapabilities() {
       capabilityCalls += 1;
-      throw new Error('capabilities should not be queried for v0.1 manifests');
+      return {
+        scheduler_version: '0.5.0',
+        schema_version: 29,
+        handoff_version: '4',
+        handoff_contract: HANDOFF_V4_RUNTIME_CONTRACT,
+        features: Object.fromEntries(HANDOFF_V4_REQUIRED_FEATURES.map(feature => [feature, true])),
+      };
     },
     listJobs() {
       return [];
     },
     addJob(spec) {
+      added.push(spec);
       return { ok: true, job: spec };
     },
     updateJob(id, spec) {
@@ -8581,10 +8622,14 @@ test('applyManifestToScheduler skips runtime capability queries for pure v0.1 ma
 
   const result = await applyManifestToScheduler(exampleManifest, { runner });
   assert.strictEqual(result.ok, true);
-  assert.strictEqual(capabilityCalls, 0);
+  assert.strictEqual(capabilityCalls, 1);
   assert.ok(result.capabilities);
-  assert.strictEqual(result.capabilities.source, 'static');
-  assert.strictEqual(result.capabilities.negotiated, false);
+  assert.strictEqual(result.capabilities.source, 'runtime');
+  assert.strictEqual(result.capabilities.negotiated, true);
+  assert.strictEqual(result.handoff.field_version, '4');
+  assert.ok(added.length > 0);
+  assert.ok(added.every(spec => spec.handoff_version === 4));
+  assert.ok(added.every(spec => typeof spec.handoff_artifact_digest === 'string'));
 });
 
 test('applyManifestToScheduler falls back to static when runner lacks queryCapabilities', async () => {
@@ -8606,6 +8651,27 @@ test('applyManifestToScheduler falls back to static when runner lacks queryCapab
   assert.ok(result.capabilities);
   assert.strictEqual(result.capabilities.source, 'static');
   assert.strictEqual(result.capabilities.negotiated, false);
+});
+
+test('static fallback refuses an unconfirmed v0.1 root approval gate', async () => {
+  const manifest = structuredClone(exampleManifest);
+  manifest.workflows[0].tasks[0].approval = { required: true, policy: 'manual' };
+  const runner = {
+    invocation: { label: 'scheduler-without-capability-discovery' },
+    listJobs: () => [],
+    addJob() {
+      throw new Error('unsafe job must not be written');
+    },
+    updateJob() {
+      throw new Error('unsafe job must not be written');
+    },
+  };
+
+  await assert.rejects(
+    applyManifestToScheduler(manifest, { runner }),
+    error => error.code === 'unsupported_capability'
+      && error.capability_errors?.some(item => item.feature === 'root_approval_gate'),
+  );
 });
 
 // ---------------------------------------------------------------------------

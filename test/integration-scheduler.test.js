@@ -85,7 +85,11 @@ const v02RuntimeSkipReason = schedulerRuntime.ok
 
 if (!schedulerRuntime.ok) {
   describe('integration-scheduler (skipped)', { skip: schedulerRuntime.reason }, () => {
-    it('placeholder', () => {});
+    it('records a concrete scheduler probe failure', () => {
+      assert.equal(schedulerRuntime.ok, false);
+      assert.equal(typeof schedulerRuntime.reason, 'string');
+      assert.ok(schedulerRuntime.reason.length > 0);
+    });
   });
 } else {
   describe('integration-scheduler', () => {
@@ -398,8 +402,8 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.ok, true);
       assert.ok(result.handoff, 'result should include handoff metadata');
       assert.ok(
-        result.handoff.field_version === '1' || result.handoff.field_version === '2',
-        `field_version should be '1' or '2', got '${result.handoff.field_version}'`
+        ['1', '2', '3', '4'].includes(result.handoff.field_version),
+        `field_version should be a supported handoff version, got '${result.handoff.field_version}'`
       );
       assert.equal(typeof result.handoff.projected_fields, 'number', 'projected_fields should be a number');
       assert.ok(result.handoff.projected_fields > 0, 'projected_fields should be positive');
@@ -452,7 +456,7 @@ if (!schedulerRuntime.ok) {
       assert.ok(!afterJobs.find(j => j.id === legacyId), 'legacy id job should be removed after adoption');
     });
 
-    it('v0.1 manifest backward compatibility with v22 scheduler', async () => {
+    it('v0.1 manifest backward compatibility with the current scheduler', async () => {
       // hello-world.json is a v0.1 manifest. This test explicitly verifies
       // that v0.1 manifests still produce successful results against the
       // current scheduler after all v0.2 capability negotiation changes.
@@ -470,12 +474,11 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.target, 'openclaw-scheduler');
       assert.equal(result.dry_run, false);
 
-      // Pure v0.1 manifests skip the extra runtime capability probe on apply.
-      // Use `agentcli apply --check-capabilities` when the caller wants a full
-      // runtime capability snapshot without requiring v0.2 fields.
+      // Every apply probes capabilities so v0.1 jobs also receive immutable v4
+      // artifacts when the runtime advertises the exact contract.
       assert.ok(result.capabilities, 'v0.1 apply should include capability metadata');
-      assert.equal(result.capabilities.source, 'static', 'v0.1 apply should use the static baseline');
-      assert.equal(result.capabilities.negotiated, false, 'v0.1 apply should skip negotiation');
+      assert.equal(result.capabilities.source, 'runtime', 'v0.1 apply should use live capabilities');
+      assert.equal(result.capabilities.negotiated, true, 'v0.1 apply should negotiate the handoff');
 
       // All jobs should be created successfully
       for (const action of result.actions) {

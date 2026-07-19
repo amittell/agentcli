@@ -8,14 +8,28 @@ import {
   buildEffectiveExecutionBinding,
   computeEffectiveTaskHash,
 } from '../compiler/shared.js';
+import {
+  HANDOFF_V4_SCHEMA,
+  HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  HANDOFF_V4_VERSION,
+  HANDOFF_V4_SCHEDULER_SCHEMA_MIN,
+  HANDOFF_V4_CANONICALIZATION,
+  HANDOFF_V4_CANONICALIZATION_VERSION,
+  HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+  validateHandoffV4Structure,
+} from './schema-v4.js';
 
-export const HANDOFF_V4_SCHEMA = 'openclaw.scheduler.handoff-artifact';
-export const HANDOFF_V4_ARTIFACT_SCHEMA_VERSION = 1;
-export const HANDOFF_V4_VERSION = 4;
-export const HANDOFF_V4_SCHEDULER_SCHEMA_MIN = 29;
-export const HANDOFF_V4_CANONICALIZATION = 'json-sort-v1';
-export const HANDOFF_V4_CANONICALIZATION_VERSION = 1;
-export const HANDOFF_V4_EXECUTION_BINDING_VERSION = 2;
+export {
+  HANDOFF_V4_SCHEMA,
+  HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  HANDOFF_V4_VERSION,
+  HANDOFF_V4_SCHEDULER_SCHEMA_MIN,
+  HANDOFF_V4_CANONICALIZATION,
+  HANDOFF_V4_CANONICALIZATION_VERSION,
+  HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+} from './schema-v4.js';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const CRYPTOGRAPHIC_PROOF_METHODS = new Set(['jwt', 'detached-signature', 'certificate']);
@@ -453,7 +467,7 @@ export function buildSchedulerHandoffV4Artifact({
     },
     execution_binding_version: HANDOFF_V4_EXECUTION_BINDING_VERSION,
     scheduler_job_binding: {
-      version: 1,
+      version: HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
       digest: canonicalDigest(schedulerJobExecutionProjection(job)),
     },
     manifest: {
@@ -555,6 +569,37 @@ export function buildSchedulerHandoffV4Artifact({
   return { payload, digest, effectiveTaskHash, canonical };
 }
 
+export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
+  if (!job || Number(job.handoff_version) !== HANDOFF_V4_VERSION) {
+    throw new TypeError('rebindSchedulerHandoffV4Job requires a handoff v4 job');
+  }
+  const reboundJob = { ...job, ...overrides };
+  const payload = structuredClone(normalizePayload(job.handoff_artifact_payload));
+  if (!payload?.scheduler_job_binding || typeof payload.scheduler_job_binding !== 'object') {
+    throw Object.assign(new Error('handoff v4 artifact is missing scheduler_job_binding'), {
+      code: 'HANDOFF_ARTIFACT_INVALID',
+    });
+  }
+  payload.scheduler_job_binding = {
+    version: HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+    digest: canonicalDigest(schedulerJobExecutionProjection(reboundJob)),
+  };
+  const canonical = canonicalStringify(payload);
+  const digest = hashString(canonical);
+  const validation = validateSchedulerHandoffV4Artifact(payload, { expectedDigest: digest });
+  if (!validation.ok) {
+    throw Object.assign(
+      new Error(`Rebound handoff v4 artifact is invalid: ${validation.errors.join('; ')}`),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: validation.errors },
+    );
+  }
+  return {
+    ...reboundJob,
+    handoff_artifact_payload: payload,
+    handoff_artifact_digest: digest,
+  };
+}
+
 export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {}) {
   let payload;
   try {
@@ -563,7 +608,7 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     return { ok: false, digest: null, errors: [error.message] };
   }
 
-  const errors = [];
+  const errors = validateHandoffV4Structure(payload);
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return { ok: false, digest: null, errors: ['artifact payload must be an object'] };
   }
@@ -586,7 +631,7 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     errors.push('execution_binding_version must be 2');
   }
 
-  if (payload.scheduler_job_binding?.version !== 1) {
+  if (payload.scheduler_job_binding?.version !== HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION) {
     errors.push('scheduler_job_binding.version must be 1');
   }
   validateHash(

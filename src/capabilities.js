@@ -1,4 +1,13 @@
 import { TARGETS } from './targets.js';
+import {
+  HANDOFF_V4_SCHEMA,
+  HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  HANDOFF_V4_SCHEDULER_SCHEMA_MIN,
+  HANDOFF_V4_CANONICALIZATION,
+  HANDOFF_V4_CANONICALIZATION_VERSION,
+  HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+} from './handoff/schema-v4.js';
 
 export const HANDOFF_V4_REQUIRED_FEATURES = Object.freeze([
   'handoff_v4_artifact',
@@ -10,11 +19,33 @@ export const HANDOFF_V4_REQUIRED_FEATURES = Object.freeze([
   'immutable_runtime_events',
 ]);
 
+export const HANDOFF_V4_RUNTIME_CONTRACT = Object.freeze({
+  artifact_schema: HANDOFF_V4_SCHEMA,
+  artifact_schema_version: HANDOFF_V4_ARTIFACT_SCHEMA_VERSION,
+  canonicalization: HANDOFF_V4_CANONICALIZATION,
+  canonicalization_version: HANDOFF_V4_CANONICALIZATION_VERSION,
+  digest: 'sha256',
+  undefined: 'null',
+  execution_binding_version: HANDOFF_V4_EXECUTION_BINDING_VERSION,
+  scheduler_job_binding_version: HANDOFF_V4_SCHEDULER_JOB_BINDING_VERSION,
+});
+
+function supportsExactV4Contract(contract) {
+  return contract != null
+    && typeof contract === 'object'
+    && Object.entries(HANDOFF_V4_RUNTIME_CONTRACT)
+      .every(([key, expected]) => contract[key] === expected);
+}
+
 export function supportsSchedulerHandoffV4(effectiveCapabilities = {}) {
-  const version = Number.parseInt(String(effectiveCapabilities.handoff_version ?? '0'), 10);
+  const version = Number(effectiveCapabilities.handoff_version);
+  const schemaVersion = Number(effectiveCapabilities.schema_version);
   const features = effectiveCapabilities.features ?? {};
   return Number.isInteger(version)
     && version >= 4
+    && Number.isInteger(schemaVersion)
+    && schemaVersion >= HANDOFF_V4_SCHEDULER_SCHEMA_MIN
+    && supportsExactV4Contract(effectiveCapabilities.handoff_contract)
     && HANDOFF_V4_REQUIRED_FEATURES.every(feature => features[feature] === true);
 }
 
@@ -38,6 +69,7 @@ export function querySchedulerCapabilities(runner) {
       version: result.scheduler_version || null,
       handoff_version: result.handoff_version || null,
       schema_version: result.schema_version || null,
+      handoff_contract: result.handoff_contract || null,
       source: 'runtime',
     };
   } catch (err) {
@@ -75,6 +107,8 @@ export function resolveEffectiveFeatures(targetName, runtimeCapabilities) {
     source: 'runtime',
     negotiated: true,
     handoff_version: runtimeCapabilities.handoff_version || null,
+    schema_version: runtimeCapabilities.schema_version || null,
+    handoff_contract: runtimeCapabilities.handoff_contract || null,
   };
 }
 

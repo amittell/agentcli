@@ -8,7 +8,7 @@ export const COMMAND_DESCRIPTIONS = [
   },
   {
     command: 'schema',
-    summary: 'Emit machine-readable schema fragments for manifests, tasks, targets, and RPC payloads.'
+    summary: 'Emit machine-readable schema fragments for manifests, compiled artifacts, and RPC payloads.'
   },
   {
     command: 'describe',

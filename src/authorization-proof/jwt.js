@@ -12,6 +12,7 @@
 import { createPublicKey, createVerify } from 'node:crypto';
 import { canonicalDigest } from '../canonical.js';
 import { registerVerifier } from './index.js';
+import { publicKeyId } from './key-identity.js';
 
 const DEFAULT_JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUDIT_SAFE_CLAIMS = [
@@ -702,6 +703,15 @@ const jwtVerifier = {
           signature_verified: false,
         };
       }
+      if (payload.exp <= payload.iat) {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: 'handoff v4 JWT exp claim must be greater than iat claim',
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
       if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
         return {
           verified: false,
@@ -772,15 +782,28 @@ const jwtVerifier = {
       signatureReason = signatureReason || 'signature required but no trusted key available';
     }
 
+    let verifiedKeyId = context.trustedKeyId || null;
+    if (signatureVerified && !verifiedKeyId) {
+      try {
+        verifiedKeyId = publicKeyId(context.trustedKey);
+      } catch (error) {
+        signatureVerified = false;
+        signatureReason = `could not derive verified JWT key identity: ${error.message}`;
+      }
+    }
+
     let replayProtected = !v4Required;
     let revocationChecked = !v4Required;
     let runtimeGuardReason = null;
     if (v4Required && signatureVerified && manifestBound && artifactBound) {
+      if (!verifiedKeyId) {
+        runtimeGuardReason = 'handoff v4 requires a verified signing key identity';
+      }
       const claimReplay = context.claimProofReplay
         ?? context.replayStore?.claim?.bind(context.replayStore);
-      if (typeof claimReplay !== 'function') {
+      if (!runtimeGuardReason && typeof claimReplay !== 'function') {
         runtimeGuardReason = 'handoff v4 proof replay store is required';
-      } else {
+      } else if (!runtimeGuardReason) {
         const replayResult = claimReplay({
           method: 'jwt',
           issuer: payload.iss ?? profile.issuer ?? null,
@@ -810,14 +833,17 @@ const jwtVerifier = {
           subject: payload.sub ?? null,
           proofId: payload.jti,
           artifactDigest,
-          keyId: context.trustedKeyId || header.kid || null,
+          keyId: verifiedKeyId,
         });
         if (revocationResult && typeof revocationResult.then === 'function') {
           runtimeGuardReason = 'handoff v4 revocation checker must complete synchronously';
         } else if (revocationResult?.revoked === true || revocationResult === true) {
           runtimeGuardReason = revocationResult?.reason || 'JWT proof is revoked';
-        } else {
+        } else if (revocationResult?.revoked === false) {
           revocationChecked = true;
+        } else {
+          runtimeGuardReason = revocationResult?.reason
+            || 'handoff v4 revocation checker did not explicitly confirm the JWT is not revoked';
         }
       }
     }
@@ -862,7 +888,7 @@ const jwtVerifier = {
       replay_protected: replayProtected,
       revocation_checked: revocationChecked,
       decoded_claims: decodedClaims,
-      key_id: context.trustedKeyId || header.kid || null,
+      key_id: verifiedKeyId,
       key_source: context.trustedKeySource || null,
       manifest_digest: context.manifestDigest || null,
       verified_at: new Date().toISOString(),

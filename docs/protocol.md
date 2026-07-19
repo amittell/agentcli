@@ -69,7 +69,7 @@ Result:
 
 Params:
 
-- `target` - defaults to `"manifest"` when omitted. Valid targets: `manifest`, `workflow`, `task`, `schedulerJob`, `standalonePlan`, `rpcRequest`, `rpcResponse`. Also accepts kebab-case aliases: `scheduler-job`, `standalone-plan`, `rpc-request`, `rpc-response`.
+- `target` - defaults to `"manifest"` when omitted. Valid targets: `manifest`, `workflow`, `task`, `schedulerJob`, `standalonePlan`, `handoffV4`, `rpcRequest`, `rpcResponse`. Also accepts kebab-case aliases: `scheduler-job`, `standalone-plan`, `handoff-v4`, `rpc-request`, `rpc-response`.
 - `legacy` - boolean, defaults to `false`. When false, returns JSON Schema Draft 2020-12. When true, returns the legacy agentcli descriptor.
 
 Result:
@@ -146,7 +146,7 @@ Params:
 
 Result:
 
-- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "capabilities": { "source": "static|runtime", "negotiated": <boolean>, "handoff_version": "..." }, "handoff": { "field_version": "1|2|3|4", "projected_fields": <int>, "v02_fields_included": <boolean> }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
+- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "capabilities": { "source": "static|runtime", "negotiated": <boolean>, "handoff_version": "...", "schema_version": <integer|null>, "handoff_contract": <object|null> }, "handoff": { "field_version": "1|2|3|4", "projected_fields": <int>, "v02_fields_included": <boolean> }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
 - `adopted_from_job_id` is present only when `action` is `"adopted"`
 - `capabilities` summarizes runtime capability negotiation for the selected scheduler
 - `handoff` summarizes which scheduler field version was projected during apply

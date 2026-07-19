@@ -848,8 +848,28 @@ digest.
 
 ### Runtime gates
 
-The runtime MUST advertise all of these boolean features before AgentCLI emits
-v4: `handoff_v4_artifact`, `artifact_bound_proofs`,
+The runtime MUST report scheduler schema version 29 or newer and the following
+exact `handoff_contract` before AgentCLI emits v4:
+
+```json
+{
+  "artifact_schema": "openclaw.scheduler.handoff-artifact",
+  "artifact_schema_version": 1,
+  "canonicalization": "json-sort-v1",
+  "canonicalization_version": 1,
+  "digest": "sha256",
+  "undefined": "null",
+  "execution_binding_version": 2,
+  "scheduler_job_binding_version": 1
+}
+```
+
+Every field is required and an exact match. Missing, older, or newer contract
+metadata is incompatible with v4 and MUST fall back to handoff v3 or reject
+apply. A handoff version number alone is not sufficient negotiation.
+
+The runtime MUST also advertise all of these boolean features before AgentCLI
+emits v4: `handoff_v4_artifact`, `artifact_bound_proofs`,
 `signed_or_provider_verified_evidence`, `provider_session_cache`,
 `credential_presentation`, `source_run_bound_delegation`, and
 `immutable_runtime_events`. AgentCLI uses the live capability response as
@@ -860,6 +880,14 @@ artifact digest, proof identity, validity interval, verification key, and a
 single-use replay identifier. Required revocation checks MUST run before user
 code. Missing, tampered, replayed, transplanted, expired, prematurely valid,
 revoked, or unbound proofs fail closed.
+
+Proof expiration MUST be later than issuance regardless of clock skew. A
+detached-signature or certificate envelope key ID MUST match the key or
+certificate that actually verified. JWT revocation uses the trusted JWKS key ID
+or a deterministic identity derived from the verified public key, never an
+untrusted header value. A revocation checker MUST explicitly return a
+not-revoked result such as `{ "revoked": false }`; missing, malformed, or
+indeterminate results fail closed.
 
 Credential release MUST use exactly one negotiated medium: environment,
 temporary file, stdin, or a Gateway capability-bound environment header.
@@ -884,6 +912,19 @@ versions 1 through 3 retain their existing behavior. Producers and consumers
 SHOULD publish identical positive and negative conformance vectors. The
 reference vectors are packaged under `fixtures/handoff-v4/` in AgentCLI and
 OpenClaw Scheduler.
+
+The complete artifact structure is discoverable through `agentcli schema
+handoff-v4` and JSON-RPC `agentcli.schema` with target `handoff-v4`. Producers
+and consumers MUST reject missing required identity fields and unknown artifact
+properties before digest or semantic verification.
+
+AgentCLI probes live scheduler capabilities for every apply, including a basic
+v0.1 manifest, so immutable artifacts cover all jobs when v4 is available. An
+unavailable capability command leaves security-relevant runtime features false.
+During adoption, any final persisted origin override is rebound into the
+scheduler job binding before create. The environment used to compile execution
+hashes is the same merged operational environment passed to the scheduler
+process.
 
 ## Compiler Targets
 

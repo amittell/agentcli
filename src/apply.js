@@ -22,6 +22,7 @@ import {
   SCHEDULER_FIELDS_V04,
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
+import { rebindSchedulerHandoffV4Job } from './handoff/v4.js';
 export { shellCommandInvocation } from './command.js';
 export {
   SCHEDULER_FIELDS_V1,
@@ -178,16 +179,6 @@ function duplicateNames(items) {
     .map(([name]) => name);
 }
 
-function jobRequiresCapabilityNegotiation(job) {
-  return Boolean(
-    job.identity || job.identity_ref || job.authorization || job.authorization_ref
-    || job.evidence || job.evidence_ref || job.child_credential_policy
-    || job.contract_required_trust_level || job.authorization_proof || job.authorization_proof_ref
-    || (job.approval_required && !job.parent_id) || job.approval_approver_scope
-    || job.output_format
-  );
-}
-
 export function createSchedulerCliRunner(options = {}) {
   const invocation = resolveSchedulerInvocation(options);
   const baseEnv = { ...process.env, ...(options.env || {}) };
@@ -263,56 +254,51 @@ export async function applyManifestToScheduler(
   } = {}
 ) {
   let compiled = compileManifestToScheduler(manifest, { includeExplain });
+  const schedulerEnv = { ...process.env, ...(env || {}) };
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
-  const requiredHandoffVersion = requiredSchedulerFieldVersion(compiled.jobs);
-  const requiresCapabilityNegotiation =
-    manifest.version === '0.2'
-    || requiredHandoffVersion > 1
-    || compiled.jobs.some(jobRequiresCapabilityNegotiation);
 
-  // Construct the scheduler runner once; runtime capability negotiation is only
-  // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
+  // Construct the scheduler runner once. Every apply probes capabilities so a
+  // basic v0.1 job receives a v4 artifact when the runtime supports the exact
+  // contract, while an unavailable capability command still falls back safely.
   const schedulerRunner = runner || createSchedulerCliRunner({
     schedulerPrefix,
     schedulerBin,
     dbPath,
     cwd,
-    env
+    env: schedulerEnv,
   });
 
-  let effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', null);
-  let handoffVersion = '1';
-  let capabilityWarnings = [];
-  if (requiresCapabilityNegotiation) {
-    const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
-    effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+  const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
+  const effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+  let handoffVersion;
 
-    if (supportsSchedulerHandoffV4(runtimeCaps)) {
-      compiled = compileManifestToScheduler(manifest, {
-        includeExplain,
-        schedulerHandoffVersion: '4',
-        cwd,
-        env,
-      });
-    }
+  if (supportsSchedulerHandoffV4(runtimeCaps)) {
+    compiled = compileManifestToScheduler(manifest, {
+      includeExplain,
+      schedulerHandoffVersion: '4',
+      cwd,
+      env: schedulerEnv,
+    });
+  }
 
-    const { errors: capabilityErrors, warnings } = validateManifestCapabilities(compiled, effectiveResult);
-    capabilityWarnings = warnings;
-    if (capabilityErrors.length > 0) {
-      throw Object.assign(
-        new Error(capabilityErrors.map(error => error.message).join('; ')),
-        { code: 'unsupported_capability', capability_errors: capabilityErrors }
-      );
-    }
-    handoffVersion = negotiateSchedulerFieldVersion(
-      compiled.jobs,
-      effectiveResult.handoff_version || '1'
+  const {
+    errors: capabilityErrors,
+    warnings: capabilityWarnings,
+  } = validateManifestCapabilities(compiled, effectiveResult);
+  if (capabilityErrors.length > 0) {
+    throw Object.assign(
+      new Error(capabilityErrors.map(error => error.message).join('; ')),
+      { code: 'unsupported_capability', capability_errors: capabilityErrors }
     );
-    if (capabilityWarnings.length > 0) {
-      for (const warning of capabilityWarnings) {
-        process.stderr.write(`warning: ${warning.message}\n`);
-      }
+  }
+  handoffVersion = negotiateSchedulerFieldVersion(
+    compiled.jobs,
+    effectiveResult.handoff_version || '1'
+  );
+  if (capabilityWarnings.length > 0) {
+    for (const warning of capabilityWarnings) {
+      process.stderr.write(`warning: ${warning.message}\n`);
     }
   }
   const effectiveFeatures = effectiveResult.features;
@@ -468,9 +454,14 @@ export async function applyManifestToScheduler(
             { code: 'scheduler_error' }
           );
         }
-        schedulerRunner.addJob(
-          schedulerCreateSpec(job, { originOverride: existingJob?.origin ?? 'system', fieldVersion: handoffVersion })
-        );
+        const adoptedOrigin = existingJob?.origin ?? 'system';
+        const adoptedJob = Number(job.handoff_version) === 4
+          ? rebindSchedulerHandoffV4Job(job, { origin: adoptedOrigin })
+          : job;
+        schedulerRunner.addJob(schedulerCreateSpec(adoptedJob, {
+          originOverride: adoptedOrigin,
+          fieldVersion: handoffVersion,
+        }));
         try {
           schedulerRunner.deleteJob(existingId);
         } catch (err) {
@@ -518,6 +509,8 @@ export async function applyManifestToScheduler(
       source: effectiveResult.source,
       negotiated: effectiveResult.negotiated,
       handoff_version: effectiveResult.handoff_version || null,
+      schema_version: effectiveResult.schema_version || null,
+      handoff_contract: effectiveResult.handoff_contract || null,
       ...(capabilityWarnings?.length > 0 ? { warnings: capabilityWarnings } : {}),
     },
     handoff: {

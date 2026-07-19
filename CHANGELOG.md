@@ -4,10 +4,25 @@
 
 - scheduler: added handoff v4 canonical artifacts with explicit artifact,
   canonicalization, execution-binding, and scheduler-binding versions
+- discovery: added Draft 2020-12 schema access for the complete handoff v4
+  artifact through CLI, JSON-RPC, and the public handoff module
+- validation: handoff v4 artifacts now reject missing required identity fields,
+  invalid nested types, and unknown properties before semantic verification
+- negotiation: v4 now requires scheduler schema 29 or newer plus an exact live
+  artifact, canonicalization, digest, and binding contract; partial or
+  mismatched runtimes fall back to v3
+- negotiation: every apply, including basic v0.1 manifests, probes the live
+  runtime so v4 coverage is complete; static fallback enforcement features are
+  disabled until explicitly advertised
 - scheduler: complete non-lossy create, replace-style update, null clear, and
   adopt projections now carry the immutable artifact payload and digest
+- scheduler: adoption rebinds the artifact after the final origin is selected,
+  and apply hashes the same merged operational environment passed to the runner
 - security: JWT, detached-signature, and certificate proofs bind the exact v4
   artifact, replay identifier, validity, key, and revocation result
+- security: v4 proofs reject inverted validity intervals, bind asserted key IDs
+  to the key or certificate that actually verified, and require an explicit
+  not-revoked result from the runtime checker
 - security: credential handoff compiles to exactly one runtime medium without
   persisting values, and delegation binds the exact source run and scope
 - evidence: the complete AgentCLI evidence payload and verification envelope
@@ -17,6 +32,8 @@
   credential presentations to the scheduler inspection surface
 - conformance: added shared positive and negative v4 fixtures and exact digest
   parity tests with OpenClaw Scheduler
+- examples: added a public scheduler manifest for exercising negotiated v4
+  apply and schema discovery
 - compatibility: handoff versions 1 through 3 and manifest versions 0.1 and 0.2
   retain their existing behavior
 
