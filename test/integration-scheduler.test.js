@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
 import { applyManifestToScheduler, createSchedulerCliRunner, resolveSchedulerInvocation } from '../src/apply.js';
+import { supportsSchedulerHandoffV4 } from '../src/capabilities.js';
 import { compileManifestToScheduler } from '../src/compiler/openclaw-scheduler.js';
 
 const SCHEDULER_PATH = process.env.SCHEDULER_PATH || resolve(import.meta.dirname, '../../openclaw-scheduler');
@@ -298,11 +299,15 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.capabilities.negotiated, true, 'capabilities should be negotiated');
       assert.ok(result.handoff, 'result should include handoff metadata');
       assert.equal(result.handoff.v02_fields_included, true, 'v0.2 fields should be included');
-      const expectedVersion = String(Math.min(
-        Number.parseInt(schedulerRuntime.capabilities.handoff_version, 10),
-        4,
-      ));
-      assert.equal(result.handoff.field_version, expectedVersion, 'field_version should match the negotiated runtime version');
+      const advertisedVersion = Number.parseInt(schedulerRuntime.capabilities.handoff_version, 10);
+      const expectedVersion = supportsSchedulerHandoffV4(schedulerRuntime.capabilities)
+        ? 4
+        : Math.min(advertisedVersion, 3);
+      assert.equal(
+        result.handoff.field_version,
+        String(expectedVersion),
+        'field_version should match the exact compatible runtime contract',
+      );
     });
 
     it('v0.2 identity fields are stored in scheduler', { skip: v02RuntimeSkipReason || false }, async () => {
