@@ -483,6 +483,54 @@ test('scheduler execution binding covers routing and resource controls', () => {
   }
 });
 
+test('scheduler execution binding covers every watchdog execution control', () => {
+  const job = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const originalBinding = job.handoff_artifact_payload.scheduler_job_binding.digest;
+  const explicitDefaults = rebindSchedulerHandoffV4Job(job, {
+    job_type: 'standard',
+    watchdog_target_label: null,
+    watchdog_check_cmd: null,
+    watchdog_timeout_min: null,
+    watchdog_alert_channel: null,
+    watchdog_alert_target: null,
+    watchdog_self_destruct: true,
+    watchdog_started_at: null,
+  });
+
+  assert.equal(
+    explicitDefaults.handoff_artifact_payload.scheduler_job_binding.digest,
+    originalBinding,
+    'standard jobs must bind the documented watchdog defaults',
+  );
+
+  for (const override of [
+    { job_type: 'watchdog' },
+    { watchdog_target_label: 'gateway' },
+    { watchdog_check_cmd: '/usr/bin/health-check --strict' },
+    { watchdog_timeout_min: 15 },
+    { watchdog_alert_channel: 'ops' },
+    { watchdog_alert_target: 'on-call' },
+    { watchdog_self_destruct: false },
+    { watchdog_started_at: '2026-07-19T04:45:00.000Z' },
+  ]) {
+    const rebound = rebindSchedulerHandoffV4Job(job, override);
+    assert.notEqual(
+      rebound.handoff_artifact_payload.scheduler_job_binding.digest,
+      originalBinding,
+      `${Object.keys(override)[0]} must affect scheduler_job_binding.digest`,
+    );
+    assert.equal(
+      canonicalStringify(rebound.handoff_artifact_payload).includes('/usr/bin/health-check --strict'),
+      false,
+      'watchdog check commands must be represented only by their digest',
+    );
+  }
+});
+
 test('handoff v4 scheduler rebinding replaces adoption metadata atomically', () => {
   const job = compileManifestToScheduler(manifest(), {
     schedulerHandoffVersion: '4',
@@ -516,6 +564,20 @@ test('handoff v4 scheduler rebinding rejects artifact-bound overrides', () => {
     ['effective_task_hash', `sha256:${'0'.repeat(64)}`],
     ['handoff_artifact_payload', {}],
     ['handoff_artifact_digest', `sha256:${'1'.repeat(64)}`],
+    ['enabled', 0],
+    ['session_target', 'isolated'],
+    ['payload_message', 'different payload'],
+    ['run_timeout_ms', 1],
+    ['approval_required', false],
+    ['output_format', 'json'],
+    ['identity', null],
+    ['authorization_proof', null],
+    ['authorization', null],
+    ['evidence', null],
+    ['contract_audit', 'never'],
+    ['verify_shell', 'exit 0'],
+    ['child_credential_policy', null],
+    ['execution_intent', 'dry-run'],
   ]) {
     assert.throws(
       () => rebindSchedulerHandoffV4Job(job, { [field]: value }),
