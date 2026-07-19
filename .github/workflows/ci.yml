@@ -18,14 +18,14 @@ jobs:
       matrix:
         node-version: ['22.13.0', '24.x']
     env:
-      OPENCLAW_SCHEDULER_REF: 1c62d5a4a1d43a0f47d3949c0af30c2fdbfd732d
+      OPENCLAW_SCHEDULER_REF: b6dd91180244b39e0c3c93e14a12d7c55d2ea0a6
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check out pinned openclaw-scheduler
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: amittell/openclaw-scheduler
-          ref: 1c62d5a4a1d43a0f47d3949c0af30c2fdbfd732d
+          ref: b6dd91180244b39e0c3c93e14a12d7c55d2ea0a6
           path: openclaw-scheduler
       - name: Configure scheduler fixture path
         run: echo "SCHEDULER_PATH=$RUNNER_TEMP/openclaw-scheduler" >> "$GITHUB_ENV"
