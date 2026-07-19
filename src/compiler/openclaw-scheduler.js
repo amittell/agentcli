@@ -11,7 +11,13 @@ import {
 import { expandManifestShorthands } from '../shorthand.js';
 import { canonicalDigest } from '../canonical.js';
 import { renderShellExecution } from '../shell.js';
-import { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03 } from '../scheduler-fields.js';
+import { buildSchedulerHandoffV4Artifact } from '../handoff/v4.js';
+import {
+  SCHEDULER_FIELDS_V1,
+  SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELDS_V03,
+  SCHEDULER_FIELDS_V04,
+} from '../scheduler-fields.js';
 
 const TRIGGERED_SENTINEL_CRON = '0 0 31 2 *';
 const TRIGGERED_SENTINEL_TZ = 'UTC';
@@ -153,16 +159,10 @@ function sanitizeAuthorizationDeclaration(authorization) {
 function sanitizeAuthorizationProofValueFrom(valueFrom) {
   if (!valueFrom) return null;
 
-  const sanitized = {
-    env: valueFrom.env ?? null,
-    file: valueFrom.file ?? null,
-  };
-
-  if (!sanitized.env && !sanitized.file) {
-    return null;
-  }
-
-  return sanitized;
+  const sanitized = {};
+  if (valueFrom.env != null) sanitized.env = valueFrom.env;
+  if (valueFrom.file != null) sanitized.file = valueFrom.file;
+  return Object.keys(sanitized).length > 0 ? sanitized : null;
 }
 
 function sanitizeAuthorizationProofDeclaration(authorizationProof) {
@@ -261,7 +261,18 @@ function validateSchedulerShellInputs(errors, taskPath, plan) {
   }
 }
 
-export function compileManifestToScheduler(manifest, { includeExplain = false } = {}) {
+export function compileManifestToScheduler(
+  manifest,
+  {
+    includeExplain = false,
+    schedulerHandoffVersion = '3',
+    cwd = process.cwd(),
+    env = process.env,
+  } = {},
+) {
+  if (!['1', '2', '3', '4'].includes(String(schedulerHandoffVersion))) {
+    throw new TypeError('schedulerHandoffVersion must be one of 1, 2, 3, or 4');
+  }
   const validation = validateManifest(manifest);
   if (!validation.ok) {
     const err = new Error('Manifest validation failed');
@@ -404,6 +415,24 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
 
         delete_after_run: plan.delete_after_run ? 1 : 0
       };
+
+      if (String(schedulerHandoffVersion) === '4') {
+        const artifact = buildSchedulerHandoffV4Artifact({
+          manifest,
+          expanded,
+          workflow,
+          task,
+          plan,
+          job,
+          cwd,
+          env,
+        });
+        job.handoff_version = 4;
+        job.handoff_artifact_digest = artifact.digest;
+        job.handoff_artifact_payload = artifact.payload;
+        job.effective_task_hash = artifact.effectiveTaskHash;
+      }
+
       validateSchedulerStringLimits(targetErrors, taskPath, job);
       validateSchedulerReservedValues(targetErrors, taskPath, job);
       validateSchedulerShellInputs(targetErrors, taskPath, plan);
@@ -482,10 +511,14 @@ export function compileManifestToScheduler(manifest, { includeExplain = false } 
     target: 'openclaw-scheduler',
     version: '0.2',
     handoff: {
-      field_version: '3',
+      field_version: String(schedulerHandoffVersion),
       v1_field_count: SCHEDULER_FIELDS_V1.length,
       v2_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length,
       v3_field_count: SCHEDULER_FIELDS_V1.length + SCHEDULER_FIELDS_V02.length + SCHEDULER_FIELDS_V03.length,
+      v4_field_count: SCHEDULER_FIELDS_V1.length
+        + SCHEDULER_FIELDS_V02.length
+        + SCHEDULER_FIELDS_V03.length
+        + SCHEDULER_FIELDS_V04.length,
     },
     jobs,
     ...profiles,

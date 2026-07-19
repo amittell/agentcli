@@ -426,7 +426,7 @@ Approvals are single-use and consumed before `spawnSync` (fail-closed: a crashed
 
 | Command | Description |
 |---|---|
-| `inspect <jobs\|runs\|queue\|approvals> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]` | Inspect scheduler runtime state with field masks and sanitization. |
+| `inspect <jobs\|runs\|queue\|approvals\|evidence\|artifacts\|events\|provider_sessions\|credential_presentations> [--db path] [--fields a,b,c] [--limit n] [--sanitize basic] [--ndjson]` | Inspect scheduler runtime state with field masks and sanitization. |
 | `audit [--limit n]` | Display recent audit records from the append-only log. |
 | `verify <execution-id> [--allowed-signers path]` | Verify execution evidence for a completed run. |
 | `signing providers` | List registered signing providers and their attestation methods. |
@@ -481,7 +481,7 @@ See [docs/protocol.md](docs/protocol.md) for the full protocol specification.
 | Target | Description |
 |---|---|
 | `standalone` | Portable plan for authoring, validation, explanation, and protocol use. No durable runtime required. |
-| `openclaw-scheduler` | Compiler target for the durable scheduler runtime. Apply uses live runtime capabilities when reported and conservative static fallback values otherwise. Governed root approvals, approver scopes, structured output, and v3 handoff fields require explicit runtime support. |
+| `openclaw-scheduler` | Compiler target for the durable scheduler runtime. Apply uses live runtime capabilities when reported and conservative static fallback values otherwise. Handoff v4 adds immutable canonical execution artifacts, artifact-bound proofs and evidence, exact source-run delegation, provider sessions, credential presentation, and runtime events. Handoff versions 1 through 3 remain compatible. |
 
 ```bash
 # Compile for standalone use

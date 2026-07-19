@@ -40,7 +40,7 @@ The `v0.1` and `v0.2` headings below are manifest specification milestones, not 
 - Cryptographic, manifest-bound authorization proofs and versioned evidence envelopes with transplantation detection
 - Fail-closed sandbox, network, provider capability, delegation, and credential cleanup behavior
 - Draft 2020-12 JSON Schema output, strict nested validation, strict CLI flags, and read-only JSON-RPC discovery methods
-- Scheduler handoff v3, authoritative live capabilities, governed feature gates, auto-reject disabling, and refusal to persist inline shell credentials
+- Scheduler handoff v4 with immutable canonical artifacts, artifact-bound cryptographic proofs and evidence, exact source-run delegation, provider session recovery, credential presentation tracking, append-only runtime events, shared conformance fixtures, and a public restart-backed E2E
 
 ## Future identity and runtime expansion
 

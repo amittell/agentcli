@@ -12,16 +12,24 @@ import { expandManifestShorthands } from './shorthand.js';
 import {
   querySchedulerCapabilities,
   resolveEffectiveFeatures,
+  supportsSchedulerHandoffV4,
   validateManifestCapabilities,
 } from './capabilities.js';
 import {
   SCHEDULER_FIELDS_V1,
   SCHEDULER_FIELDS_V02,
   SCHEDULER_FIELDS_V03,
+  SCHEDULER_FIELDS_V04,
   SCHEDULER_FIELD_VERSIONS,
 } from './scheduler-fields.js';
 export { shellCommandInvocation } from './command.js';
-export { SCHEDULER_FIELDS_V1, SCHEDULER_FIELDS_V02, SCHEDULER_FIELDS_V03, SCHEDULER_FIELD_VERSIONS };
+export {
+  SCHEDULER_FIELDS_V1,
+  SCHEDULER_FIELDS_V02,
+  SCHEDULER_FIELDS_V03,
+  SCHEDULER_FIELDS_V04,
+  SCHEDULER_FIELD_VERSIONS,
+};
 
 function npmCommandForPlatform(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -98,6 +106,7 @@ function spawnSchedulerJson(invocation, args, { cwd, env, runner = spawnSync } =
 // Fields that the scheduler stores as JSON text blobs rather than scalar columns.
 const JSON_BLOB_FIELDS = new Set([
   'identity', 'authorization_proof', 'authorization', 'evidence',
+  'handoff_artifact_payload',
 ]);
 
 function projectSchedulerSpec(job, fields, { includeNulls = false } = {}) {
@@ -127,6 +136,7 @@ export function schedulerCreateSpec(job, { originOverride, fieldVersion = '1' } 
 }
 
 export function requiredSchedulerFieldVersion(jobs = []) {
+  if (jobs.some(job => SCHEDULER_FIELDS_V04.some(field => job[field] != null))) return 4;
   if (jobs.some(job => SCHEDULER_FIELDS_V03.some(field => job[field] != null))) return 3;
   if (jobs.some(job => SCHEDULER_FIELDS_V02.some(field => job[field] != null))) return 2;
   return 1;
@@ -147,7 +157,7 @@ export function negotiateSchedulerFieldVersion(jobs, advertisedVersion = '1') {
       }
     );
   }
-  return String(Math.min(parsedVersion, 3));
+  return String(Math.min(parsedVersion, requiredVersion >= 4 ? 4 : 3));
 }
 
 function schedulerUpdateSpec(job, { fieldVersion = '1' } = {}) {
@@ -252,12 +262,14 @@ export async function applyManifestToScheduler(
     allowValueFromCommand = false
   } = {}
 ) {
-  const compiled = compileManifestToScheduler(manifest, { includeExplain });
+  let compiled = compileManifestToScheduler(manifest, { includeExplain });
   const verificationByTask = new Map();
   const resolvedProofsByTask = buildResolvedAuthorizationProofsByTask(manifest);
   const requiredHandoffVersion = requiredSchedulerFieldVersion(compiled.jobs);
   const requiresCapabilityNegotiation =
-    requiredHandoffVersion > 1 || compiled.jobs.some(jobRequiresCapabilityNegotiation);
+    manifest.version === '0.2'
+    || requiredHandoffVersion > 1
+    || compiled.jobs.some(jobRequiresCapabilityNegotiation);
 
   // Construct the scheduler runner once; runtime capability negotiation is only
   // needed when the compiled manifest actually uses v0.2 runtime-gated fields.
@@ -275,6 +287,15 @@ export async function applyManifestToScheduler(
   if (requiresCapabilityNegotiation) {
     const runtimeCaps = querySchedulerCapabilities(schedulerRunner);
     effectiveResult = resolveEffectiveFeatures('openclaw-scheduler', runtimeCaps);
+
+    if (supportsSchedulerHandoffV4(effectiveResult)) {
+      compiled = compileManifestToScheduler(manifest, {
+        includeExplain,
+        schedulerHandoffVersion: '4',
+        cwd,
+        env,
+      });
+    }
 
     const { errors: capabilityErrors, warnings } = validateManifestCapabilities(compiled, effectiveResult);
     capabilityWarnings = warnings;

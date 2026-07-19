@@ -46,8 +46,21 @@ export const SCHEDULER_FIELDS_V03 = [
   'output_format',
 ];
 
+export const SCHEDULER_FIELDS_V04 = [
+  'handoff_version',
+  'handoff_artifact_digest',
+  'handoff_artifact_payload',
+  'effective_task_hash',
+];
+
 export const SCHEDULER_FIELD_VERSIONS = {
   '1': SCHEDULER_FIELDS_V1,
   '2': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02],
   '3': [...SCHEDULER_FIELDS_V1, ...SCHEDULER_FIELDS_V02, ...SCHEDULER_FIELDS_V03],
+  '4': [
+    ...SCHEDULER_FIELDS_V1,
+    ...SCHEDULER_FIELDS_V02,
+    ...SCHEDULER_FIELDS_V03,
+    ...SCHEDULER_FIELDS_V04,
+  ],
 };

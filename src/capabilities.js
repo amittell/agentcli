@@ -1,5 +1,23 @@
 import { TARGETS } from './targets.js';
 
+export const HANDOFF_V4_REQUIRED_FEATURES = Object.freeze([
+  'handoff_v4_artifact',
+  'artifact_bound_proofs',
+  'signed_or_provider_verified_evidence',
+  'provider_session_cache',
+  'credential_presentation',
+  'source_run_bound_delegation',
+  'immutable_runtime_events',
+]);
+
+export function supportsSchedulerHandoffV4(effectiveCapabilities = {}) {
+  const version = Number.parseInt(String(effectiveCapabilities.handoff_version ?? '0'), 10);
+  const features = effectiveCapabilities.features ?? {};
+  return Number.isInteger(version)
+    && version >= 4
+    && HANDOFF_V4_REQUIRED_FEATURES.every(feature => features[feature] === true);
+}
+
 /**
  * Query the scheduler for its runtime capabilities.
  * @param {object} runner - scheduler CLI runner with queryCapabilities() method
@@ -84,6 +102,19 @@ export function validateManifestCapabilities(compiledOutput, effectiveFeatures) 
   // validation remains execution-time only (chains are only known after a
   // concrete session is resolved).
   for (const job of compiledOutput.jobs) {
+    if (Number(job.handoff_version) === 4) {
+      for (const feature of HANDOFF_V4_REQUIRED_FEATURES) {
+        if (features[feature] !== true) {
+          errors.push({
+            code: 'capability_mismatch',
+            feature,
+            required_by: `handoff v4 job "${job.name || job.id}"`,
+            message: `Job "${job.name || job.id}" uses handoff v4 but the runtime does not advertise ${feature}`,
+          });
+        }
+      }
+    }
+
     if (job.approval_required && !job.parent_id && !features.root_approval_gate) {
       errors.push({
         code: 'capability_mismatch',

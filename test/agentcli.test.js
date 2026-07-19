@@ -985,13 +985,16 @@ test('applyManifestToScheduler plans and executes scheduler upserts', async () =
   assert.equal(calls[0].spec.enabled, true);
 });
 
-test('openclaw-scheduler target does not advertise unsupported v0.2 runtime features', () => {
+test('openclaw-scheduler target advertises the current verified runtime feature baseline', () => {
   const target = listTargets().find(candidate => candidate.name === 'openclaw-scheduler');
   assert.ok(target);
-  assert.equal(target.features.runtime_identity_resolution, false);
-  assert.equal(target.features.evidence_generation, false);
-  assert.equal(target.features.trust_evaluation, false);
-  assert.equal(target.features.delegation_validation, false);
+  assert.equal(target.features.runtime_identity_resolution, true);
+  assert.equal(target.features.evidence_generation, true);
+  assert.equal(target.features.trust_evaluation, true);
+  assert.equal(target.features.delegation_validation, true);
+  assert.equal(target.features.handoff_v4_artifact, true);
+  assert.equal(target.features.artifact_bound_proofs, true);
+  assert.equal(target.features.signed_or_provider_verified_evidence, true);
 });
 
 test('applyManifestToScheduler projects only versioned runtime fields to backend specs', async () => {
@@ -7516,13 +7519,11 @@ test('v0.2 scheduler compilation redacts provider inputs from durable specs', ()
   assert.strictEqual(job.identity.auth.inputs, null);
   assert.deepStrictEqual(job.authorization_proof.proof.value_from, {
     env: 'SECRET_PROOF',
-    file: null,
   });
   assert.strictEqual(job.authorization.provider_config, null);
   assert.strictEqual(job.evidence.provider_config, null);
   assert.deepStrictEqual(compiled.authorization_proof_profiles[0].proof.value_from, {
     env: 'SECRET_PROOF',
-    file: null,
   });
   assert.strictEqual(compiled.identity_profiles[0].provider_config, null);
   assert.strictEqual(compiled.identity_profiles[0].auth.provider_config, null);
@@ -7657,7 +7658,6 @@ test('applyManifestToScheduler returns authorization proof verification summarie
   assert.strictEqual(persistedProof.ref, 'jwt-proof');
   assert.deepStrictEqual(persistedProof.proof.value_from, {
     env: 'TEST_AGENTCLI_JWT',
-    file: null,
   });
 });
 
@@ -8114,7 +8114,8 @@ test('resolveEffectiveFeatures returns static features when no runtime capabilit
   const result = resolveEffectiveFeatures('openclaw-scheduler', null);
   assert.strictEqual(result.negotiated, false);
   assert.strictEqual(result.source, 'static');
-  assert.strictEqual(result.features.authorization_hook, false);
+  assert.strictEqual(result.features.authorization_hook, true);
+  assert.strictEqual(result.features.handoff_v4_artifact, true);
   assert.strictEqual(result.features.runtime_execution, true);
 });
 
@@ -8371,7 +8372,10 @@ test('applyManifestToScheduler rejects unsupported trust and evidence capabiliti
       return {
         scheduler_version: '0.2.0',
         handoff_version: '3',
-        features: {},
+        features: {
+          trust_evaluation: false,
+          evidence_generation: false,
+        },
       };
     },
     listJobs() {

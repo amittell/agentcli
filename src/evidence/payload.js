@@ -101,6 +101,9 @@ export function buildCompleteEvidencePayload({
   manifestDigest,
   effectiveTask,
   effectiveTaskHash,
+  handoffArtifactDigest = null,
+  sourceRunId = null,
+  sourceRunHandoffArtifactDigest = null,
   declaredIdentity = null,
   resolvedIdentity = null,
   authorizationProof = null,
@@ -150,6 +153,13 @@ export function buildCompleteEvidencePayload({
     bindings: {
       manifest_digest: resolvedManifestDigest,
       effective_task_hash: resolvedTaskHash,
+      ...(handoffArtifactDigest != null
+        ? {
+            handoff_artifact_digest: handoffArtifactDigest,
+            source_run_id: sourceRunId,
+            source_run_handoff_artifact_digest: sourceRunHandoffArtifactDigest,
+          }
+        : {}),
     },
     declared_identity: redactSensitiveEvidence(declaredIdentity),
     resolved_identity: redactSensitiveEvidence(resolvedIdentity),
@@ -202,6 +212,21 @@ export function validateCompleteEvidencePayload(payload) {
       if (!/^sha256:[a-f0-9]{64}$/.test(payload.bindings[field])) {
         errors.push(`bindings.${field} must be a SHA-256 digest`);
       }
+    }
+    for (const field of ['handoff_artifact_digest', 'source_run_handoff_artifact_digest']) {
+      const value = payload.bindings[field];
+      if (value != null && !/^sha256:[a-f0-9]{64}$/.test(value)) {
+        errors.push(`bindings.${field} must be null or a SHA-256 digest`);
+      }
+    }
+    if (payload.bindings.source_run_id != null
+      && (typeof payload.bindings.source_run_id !== 'string'
+        || payload.bindings.source_run_id.length === 0)) {
+      errors.push('bindings.source_run_id must be null or a non-empty string');
+    }
+    if ((payload.bindings.source_run_id == null)
+      !== (payload.bindings.source_run_handoff_artifact_digest == null)) {
+      errors.push('source run id and source run artifact digest must be declared together');
     }
   }
   if (!payload.command || typeof payload.command !== 'object' || Array.isArray(payload.command)) {
@@ -292,6 +317,17 @@ export function validateEvidenceRecordBinding(payload, record) {
   }
   if (payload.bindings?.effective_task_hash !== record.effective_task_hash) {
     errors.push('effective task hash does not match the audit record');
+  }
+  if ((payload.bindings?.handoff_artifact_digest ?? null)
+    !== (record.handoff_artifact_digest ?? null)) {
+    errors.push('handoff artifact digest does not match the audit record');
+  }
+  if ((payload.bindings?.source_run_id ?? null) !== (record.source_run_id ?? null)) {
+    errors.push('source run id does not match the audit record');
+  }
+  if ((payload.bindings?.source_run_handoff_artifact_digest ?? null)
+    !== (record.source_run_handoff_artifact_digest ?? null)) {
+    errors.push('source run artifact digest does not match the audit record');
   }
   const recordOutputHash = record.result?.output_hash ?? record.hashes?.result ?? null;
   if (payload.result?.output_hash !== recordOutputHash) {

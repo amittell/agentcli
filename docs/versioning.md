@@ -2,7 +2,7 @@
 
 ## Current Versions
 
-- package version: `0.4.0`
+- package version: `0.5.0`
 - manifest spec version: `0.2`
 - protocol status: draft, aligned to manifest spec `0.2`
 

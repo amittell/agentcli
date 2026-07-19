@@ -17,6 +17,26 @@ import { canonicalStringify, hashString } from '../canonical.js';
 import { registerVerifier } from './index.js';
 
 const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
+const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
+
+export function buildDetachedSignatureV4SigningContent({
+  artifactDigest,
+  nonce,
+  issuedAt,
+  expiresAt,
+  keyId,
+} = {}) {
+  return canonicalStringify({
+    schema: V4_PROOF_SCHEMA,
+    version: 4,
+    method: 'detached-signature',
+    artifact_digest: artifactDigest,
+    nonce,
+    issued_at: issuedAt,
+    expires_at: expiresAt,
+    key_id: keyId,
+  });
+}
 
 /**
  * Attempt to auto-detect a suitable verification algorithm from a PEM public key.
@@ -52,39 +72,50 @@ function normalizeDigest(value) {
 }
 
 function canonicalManifestContext(ctx = {}) {
-  const manifestValue = ctx.manifest ?? ctx.manifestContent;
-  if (manifestValue === undefined || manifestValue === null) {
-    return { error: 'canonical manifest content is required' };
+  const artifactMode = ctx.artifactDigest != null || ctx.handoffArtifactDigest != null;
+  const sourceValue = artifactMode
+    ? ctx.artifactPayload
+    : (ctx.manifest ?? ctx.manifestContent);
+  if (sourceValue === undefined || sourceValue === null) {
+    return {
+      error: artifactMode
+        ? 'canonical handoff artifact payload is required'
+        : 'canonical manifest content is required',
+    };
   }
 
-  let manifest;
-  if (Buffer.isBuffer(manifestValue)) {
+  let source;
+  if (Buffer.isBuffer(sourceValue)) {
     try {
-      manifest = JSON.parse(manifestValue.toString('utf8'));
+      source = JSON.parse(sourceValue.toString('utf8'));
     } catch (error) {
-      return { error: `manifest content must be valid JSON: ${error.message}` };
+      return { error: `signed content must be valid JSON: ${error.message}` };
     }
-  } else if (typeof manifestValue === 'string') {
+  } else if (typeof sourceValue === 'string') {
     try {
-      manifest = JSON.parse(manifestValue);
+      source = JSON.parse(sourceValue);
     } catch (error) {
-      return { error: `manifest content must be valid JSON: ${error.message}` };
+      return { error: `signed content must be valid JSON: ${error.message}` };
     }
-  } else if (typeof manifestValue === 'object' && !Array.isArray(manifestValue)) {
-    manifest = manifestValue;
+  } else if (typeof sourceValue === 'object' && !Array.isArray(sourceValue)) {
+    source = sourceValue;
   } else {
-    return { error: 'manifest content must be a JSON object' };
+    return { error: 'signed content must be a JSON object' };
   }
 
-  const content = canonicalStringify(manifest);
+  const content = canonicalStringify(source);
   const digest = hashString(content);
-  if (
-    ctx.manifestDigest &&
-    normalizeDigest(ctx.manifestDigest) !== normalizeDigest(digest)
-  ) {
-    return { error: 'provided manifest digest does not match canonical manifest content' };
+  const expectedDigest = artifactMode
+    ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
+    : ctx.manifestDigest;
+  if (expectedDigest && normalizeDigest(expectedDigest) !== normalizeDigest(digest)) {
+    return {
+      error: artifactMode
+        ? 'provided artifact digest does not match canonical artifact payload'
+        : 'provided manifest digest does not match canonical manifest content',
+    };
   }
-  return { content, digest };
+  return { content, digest, artifactMode };
 }
 
 export function resolveDetachedSignatureVerificationContext(profile = {}, ctx = {}) {
@@ -96,7 +127,13 @@ export function resolveDetachedSignatureVerificationContext(profile = {}, ctx = 
   return {
     ...ctx,
     manifestContent: canonical.content || null,
-    manifestDigest: canonical.digest || null,
+    manifestDigest: canonical.artifactMode
+      ? (ctx.manifestDigest ?? null)
+      : (canonical.digest || null),
+    artifactDigest: canonical.artifactMode
+      ? canonical.digest
+      : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
+    handoffVersion: canonical.artifactMode ? 4 : (ctx.handoffVersion ?? null),
     manifestContextError: canonical.error || null,
     trustedKey: ctx.trustedKey || profile.public_key || null,
     allowedSignersPath,
@@ -115,6 +152,115 @@ function decodeBase64Signature(proof) {
     throw new TypeError('detached signature is not valid base64');
   }
   return Buffer.from(normalized, 'base64');
+}
+
+function parseV4Envelope(proof, context) {
+  const v4 = context.handoffVersion === 4 || context.artifactDigest != null;
+  if (!v4) return { signature: proof, v4: false };
+
+  let envelope = proof;
+  if (Buffer.isBuffer(envelope)) envelope = envelope.toString('utf8');
+  if (typeof envelope === 'string') {
+    try {
+      envelope = JSON.parse(envelope);
+    } catch {
+      return { error: 'handoff v4 detached proof must be a JSON envelope', v4: true };
+    }
+  }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return { error: 'handoff v4 detached proof must be an object', v4: true };
+  }
+
+  for (const field of ['signature', 'artifact_digest', 'nonce', 'issued_at', 'expires_at', 'key_id']) {
+    if (typeof envelope[field] !== 'string' || envelope[field].length === 0) {
+      return { error: `handoff v4 detached proof is missing ${field}`, v4: true };
+    }
+  }
+  if (normalizeDigest(envelope.artifact_digest) !== normalizeDigest(context.artifactDigest)) {
+    return { error: 'detached proof artifact digest does not match', v4: true };
+  }
+
+  const now = typeof context.now === 'number' ? context.now : Date.now();
+  const issuedAt = Date.parse(envelope.issued_at);
+  const expiresAt = Date.parse(envelope.expires_at);
+  const skewMs = (context.clockSkewSeconds ?? 60) * 1000;
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
+    return { error: 'detached proof has invalid issued_at or expires_at', v4: true };
+  }
+  if (issuedAt > now + skewMs) {
+    return { error: 'detached proof issued_at is in the future', v4: true };
+  }
+  if (expiresAt + skewMs <= now) {
+    return { error: 'detached proof has expired', v4: true };
+  }
+  return { signature: envelope.signature, envelope, v4: true };
+}
+
+function enforceV4RuntimeGuards(parsed, context, profile) {
+  if (!parsed.v4) {
+    return { ok: true, replayProtected: true, revocationChecked: true };
+  }
+
+  const claimReplay = context.claimProofReplay
+    ?? context.replayStore?.claim?.bind(context.replayStore);
+  if (typeof claimReplay !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof replay store is required' };
+  }
+  const replay = claimReplay({
+    method: 'detached-signature',
+    issuer: profile.issuer ?? null,
+    proofId: parsed.envelope.nonce,
+    artifactDigest: context.artifactDigest,
+    expiresAt: parsed.envelope.expires_at,
+    runId: context.runId ?? null,
+  });
+  if (replay && typeof replay.then === 'function') {
+    return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
+  }
+  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
+  if (!replayProtected) {
+    return { ok: false, reason: replay?.reason || 'detached proof nonce was already used' };
+  }
+
+  const checkRevocation = context.checkProofRevocation
+    ?? context.revocationChecker?.check?.bind(context.revocationChecker);
+  if (typeof checkRevocation !== 'function') {
+    return { ok: false, reason: 'handoff v4 proof revocation checker is required' };
+  }
+  const revocation = checkRevocation({
+    method: 'detached-signature',
+    issuer: profile.issuer ?? null,
+    proofId: parsed.envelope.nonce,
+    artifactDigest: context.artifactDigest,
+    keyId: parsed.envelope.key_id,
+  });
+  if (revocation && typeof revocation.then === 'function') {
+    return { ok: false, reason: 'handoff v4 revocation checker must complete synchronously' };
+  }
+  if (revocation === true || revocation?.revoked === true) {
+    return { ok: false, reason: revocation?.reason || 'detached proof key is revoked' };
+  }
+  return { ok: true, replayProtected: true, revocationChecked: true };
+}
+
+function signedContent(parsed, context) {
+  if (!parsed.v4) return context.manifestContent;
+  return buildDetachedSignatureV4SigningContent({
+    artifactDigest: parsed.envelope.artifact_digest,
+    nonce: parsed.envelope.nonce,
+    issuedAt: parsed.envelope.issued_at,
+    expiresAt: parsed.envelope.expires_at,
+    keyId: parsed.envelope.key_id,
+  });
+}
+
+function verifiedAt(context) {
+  const now = typeof context.now === 'number'
+    ? context.now
+    : context.now instanceof Date
+      ? context.now.getTime()
+      : Date.now();
+  return new Date(now).toISOString();
 }
 
 /**
@@ -260,6 +406,23 @@ const detachedSignatureVerifier = {
   verifyProof(proof, profile, ctx) {
     const context = resolveDetachedSignatureVerificationContext(profile, ctx || {});
     const digest = context.manifestDigest;
+    const parsed = parseV4Envelope(proof, context);
+
+    if (parsed.error) {
+      return {
+        verified: false,
+        method: 'detached-signature',
+        issuer: profile?.issuer ?? null,
+        signature_verified: false,
+        signature_verification_reason: parsed.error,
+        manifest_digest: digest,
+        artifact_digest: context.artifactDigest ?? null,
+        artifact_bound: false,
+        replay_protected: false,
+        revocation_checked: false,
+        verified_at: verifiedAt(context),
+      };
+    }
 
     if (context.manifestContextError || !context.manifestContent) {
       return {
@@ -269,15 +432,15 @@ const detachedSignatureVerifier = {
         signature_verified: false,
         signature_verification_reason: context.manifestContextError || 'canonical manifest content is required',
         manifest_digest: digest,
-        verified_at: new Date().toISOString(),
+        verified_at: verifiedAt(context),
       };
     }
 
     // SSH-style verification path
     if (context.allowedSignersPath) {
       const sshResult = verifySshSignature(
-        proof,
-        context.manifestContent,
+        parsed.signature,
+        signedContent(parsed, context),
         {
           allowedSignersPath: context.allowedSignersPath,
           principal: context.principal || 'agentcli',
@@ -285,14 +448,24 @@ const detachedSignatureVerifier = {
         }
       );
 
+      const guards = sshResult.verified
+        ? enforceV4RuntimeGuards(parsed, context, profile || {})
+        : { ok: false, reason: sshResult.reason };
       return {
-        verified: sshResult.verified,
+        verified: sshResult.verified && guards.ok,
         method: 'detached-signature',
         issuer: (profile && profile.issuer) || null,
         signature_verified: sshResult.verified,
-        signature_verification_reason: sshResult.verified ? null : sshResult.reason,
+        signature_verification_reason: sshResult.verified && guards.ok
+          ? null
+          : (guards.reason || sshResult.reason),
         manifest_digest: digest,
-        verified_at: new Date().toISOString(),
+        artifact_digest: context.artifactDigest ?? null,
+        artifact_bound: !parsed.v4
+          || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
+        replay_protected: guards.replayProtected === true,
+        revocation_checked: guards.revocationChecked === true,
+        verified_at: verifiedAt(context),
       };
     }
 
@@ -304,17 +477,17 @@ const detachedSignatureVerifier = {
       let signatureValid;
 
       try {
-        const signature = decodeBase64Signature(proof);
+        const signature = decodeBase64Signature(parsed.signature);
         if (algorithm === null) {
           signatureValid = verifySignature(
             null,
-            Buffer.from(context.manifestContent, 'utf8'),
+            Buffer.from(signedContent(parsed, context), 'utf8'),
             context.trustedKey,
             signature
           );
         } else if (algorithm) {
           const verifier = createVerify(algorithm);
-          verifier.update(context.manifestContent);
+          verifier.update(signedContent(parsed, context));
           signatureValid = verifier.verify(context.trustedKey, signature);
         } else {
           signatureValid = false;
@@ -329,14 +502,24 @@ const detachedSignatureVerifier = {
         verificationReason = `signature verification error: ${err.message}`;
       }
 
+      const guards = signatureValid
+        ? enforceV4RuntimeGuards(parsed, context, profile || {})
+        : { ok: false, reason: verificationReason };
       return {
-        verified: signatureValid,
+        verified: signatureValid && guards.ok,
         method: 'detached-signature',
         issuer: (profile && profile.issuer) || null,
         signature_verified: signatureValid,
-        signature_verification_reason: signatureValid ? null : verificationReason,
+        signature_verification_reason: signatureValid && guards.ok
+          ? null
+          : (guards.reason || verificationReason),
         manifest_digest: digest,
-        verified_at: new Date().toISOString(),
+        artifact_digest: context.artifactDigest ?? null,
+        artifact_bound: !parsed.v4
+          || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
+        replay_protected: guards.replayProtected === true,
+        revocation_checked: guards.revocationChecked === true,
+        verified_at: verifiedAt(context),
       };
     }
 
@@ -348,7 +531,7 @@ const detachedSignatureVerifier = {
       signature_verified: false,
       signature_verification_reason: 'no trusted key available for detached signature verification',
       manifest_digest: digest,
-      verified_at: new Date().toISOString(),
+      verified_at: verifiedAt(context),
     };
   },
 
@@ -370,6 +553,10 @@ const detachedSignatureVerifier = {
       manifest_digest: result.manifest_digest || null,
       verifier: 'detached-signature',
       signature_verified: result.signature_verified,
+      artifact_digest: result.artifact_digest || null,
+      artifact_bound: result.artifact_bound === true,
+      replay_protected: result.replay_protected === true,
+      revocation_checked: result.revocation_checked === true,
       reason: result.signature_verification_reason || result.reason || null,
     };
   },

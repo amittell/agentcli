@@ -84,6 +84,10 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+function normalizeDigest(value) {
+  return typeof value === 'string' ? value.replace(/^sha256:/, '') : null;
+}
+
 function normalizeAudience(value) {
   if (Array.isArray(value)) return value;
   if (value === undefined || value === null) return [];
@@ -555,6 +559,12 @@ const jwtVerifier = {
     const context = ctx || {};
     const signatureRequired = Boolean(context.requireSignature);
     const manifestBindingRequired = context.requireManifestBinding !== false;
+    const artifactDigest = context.artifactDigest ?? context.handoffArtifactDigest ?? null;
+    const v4Required = context.handoffVersion === 4 || context.handoff_version === 4
+      || artifactDigest != null;
+    const clockSkewSeconds = v4Required
+      ? (context.clockSkewSeconds ?? 60)
+      : (context.clockSkewSeconds ?? 0);
 
     // Validate proof is a non-empty string
     if (!proof || typeof proof !== 'string') {
@@ -616,8 +626,20 @@ const jwtVerifier = {
       }
     }
 
-    // Check expiry (exp claim)
-    const now = Math.floor(Date.now() / 1000);
+    // Check expiry and issuance claims. Handoff v4 requires an explicit
+    // bounded lifetime and replay identifier.
+    const now = Math.floor(
+      (typeof context.now === 'number' ? context.now : Date.now()) / 1000,
+    );
+    if (v4Required && payload.exp === undefined) {
+      return {
+        verified: false,
+        method: 'jwt',
+        reason: 'handoff v4 JWT is missing required exp claim',
+        claims_validated: false,
+        signature_verified: false,
+      };
+    }
     if (payload.exp !== undefined) {
       if (typeof payload.exp !== 'number') {
         return {
@@ -628,7 +650,7 @@ const jwtVerifier = {
           signature_verified: false,
         };
       }
-      if (now >= payload.exp) {
+      if (now >= payload.exp + clockSkewSeconds) {
         return {
           verified: false,
           method: 'jwt',
@@ -650,11 +672,41 @@ const jwtVerifier = {
           signature_verified: false,
         };
       }
-      if (now < payload.nbf) {
+      if (now + clockSkewSeconds < payload.nbf) {
         return {
           verified: false,
           method: 'jwt',
           reason: `JWT is not yet valid (nbf: ${payload.nbf}, now: ${now})`,
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
+    }
+
+    if (v4Required) {
+      if (typeof payload.iat !== 'number') {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: 'handoff v4 JWT is missing a numeric iat claim',
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
+      if (payload.iat > now + clockSkewSeconds) {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: 'handoff v4 JWT iat claim is in the future',
+          claims_validated: false,
+          signature_verified: false,
+        };
+      }
+      if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
+        return {
+          verified: false,
+          method: 'jwt',
+          reason: 'handoff v4 JWT is missing required jti claim',
           claims_validated: false,
           signature_verified: false,
         };
@@ -693,6 +745,21 @@ const jwtVerifier = {
       }
     }
 
+    let artifactBound = !v4Required;
+    let artifactBindingReason = null;
+    if (v4Required) {
+      const claimedArtifact = payload.handoff_artifact_digest ?? payload.artifact_digest;
+      if (typeof artifactDigest !== 'string' || artifactDigest.length === 0) {
+        artifactBindingReason = 'trusted handoff artifact digest is required';
+      } else if (typeof claimedArtifact !== 'string') {
+        artifactBindingReason = 'JWT is missing required handoff artifact digest claim';
+      } else if (normalizeDigest(claimedArtifact) !== normalizeDigest(artifactDigest)) {
+        artifactBindingReason = 'JWT handoff artifact digest does not match the compiled artifact';
+      } else {
+        artifactBound = true;
+      }
+    }
+
     // Attempt signature verification
     let signatureVerified = false;
     let signatureReason = context.trustedKeyError || 'no trusted key available for signature verification';
@@ -703,6 +770,56 @@ const jwtVerifier = {
       signatureReason = sigResult.verified ? undefined : sigResult.reason;
     } else if (signatureRequired) {
       signatureReason = signatureReason || 'signature required but no trusted key available';
+    }
+
+    let replayProtected = !v4Required;
+    let revocationChecked = !v4Required;
+    let runtimeGuardReason = null;
+    if (v4Required && signatureVerified && manifestBound && artifactBound) {
+      const claimReplay = context.claimProofReplay
+        ?? context.replayStore?.claim?.bind(context.replayStore);
+      if (typeof claimReplay !== 'function') {
+        runtimeGuardReason = 'handoff v4 proof replay store is required';
+      } else {
+        const replayResult = claimReplay({
+          method: 'jwt',
+          issuer: payload.iss ?? profile.issuer ?? null,
+          subject: payload.sub ?? null,
+          proofId: payload.jti,
+          artifactDigest,
+          expiresAt: new Date(payload.exp * 1000).toISOString(),
+          runId: context.runId ?? null,
+        });
+        if (replayResult && typeof replayResult.then === 'function') {
+          runtimeGuardReason = 'handoff v4 replay store must complete synchronously';
+        } else {
+          replayProtected = replayResult === true || replayResult?.claimed === true
+            || replayResult?.ok === true;
+          if (!replayProtected) runtimeGuardReason = replayResult?.reason || 'JWT jti was already used';
+        }
+      }
+
+      const checkRevocation = context.checkProofRevocation
+        ?? context.revocationChecker?.check?.bind(context.revocationChecker);
+      if (!runtimeGuardReason && typeof checkRevocation !== 'function') {
+        runtimeGuardReason = 'handoff v4 proof revocation checker is required';
+      } else if (!runtimeGuardReason) {
+        const revocationResult = checkRevocation({
+          method: 'jwt',
+          issuer: payload.iss ?? profile.issuer ?? null,
+          subject: payload.sub ?? null,
+          proofId: payload.jti,
+          artifactDigest,
+          keyId: context.trustedKeyId || header.kid || null,
+        });
+        if (revocationResult && typeof revocationResult.then === 'function') {
+          runtimeGuardReason = 'handoff v4 revocation checker must complete synchronously';
+        } else if (revocationResult?.revoked === true || revocationResult === true) {
+          runtimeGuardReason = revocationResult?.reason || 'JWT proof is revoked';
+        } else {
+          revocationChecked = true;
+        }
+      }
     }
 
     // Build audit-safe subset of decoded claims
@@ -723,7 +840,11 @@ const jwtVerifier = {
 
     // Claims-only parsing is useful diagnostics, not authorization. A JWT is
     // verified only after cryptographic verification by a trusted key.
-    const verified = signatureVerified && manifestBound;
+    const verified = signatureVerified
+      && manifestBound
+      && artifactBound
+      && replayProtected
+      && revocationChecked;
 
     const result = {
       verified,
@@ -735,6 +856,11 @@ const jwtVerifier = {
       signature_required: signatureRequired,
       manifest_binding_required: manifestBindingRequired,
       manifest_bound: manifestBound,
+      artifact_binding_required: v4Required,
+      artifact_bound: artifactBound,
+      artifact_digest: artifactDigest,
+      replay_protected: replayProtected,
+      revocation_checked: revocationChecked,
       decoded_claims: decodedClaims,
       key_id: context.trustedKeyId || header.kid || null,
       key_source: context.trustedKeySource || null,
@@ -749,6 +875,8 @@ const jwtVerifier = {
       result.reason = [
         !signatureVerified ? signatureReason : null,
         !manifestBound ? manifestBindingReason : null,
+        !artifactBound ? artifactBindingReason : null,
+        runtimeGuardReason,
       ].filter(Boolean).join('; ') || 'JWT verification failed';
     }
 
@@ -778,6 +906,11 @@ const jwtVerifier = {
       signature_required: result.signature_required,
       manifest_binding_required: result.manifest_binding_required,
       manifest_bound: result.manifest_bound,
+      artifact_binding_required: result.artifact_binding_required === true,
+      artifact_bound: result.artifact_bound === true,
+      artifact_digest: result.artifact_digest || null,
+      replay_protected: result.replay_protected === true,
+      revocation_checked: result.revocation_checked === true,
       decoded_claims: result.decoded_claims || null,
       key_id: result.key_id || null,
       key_source: result.key_source || null,

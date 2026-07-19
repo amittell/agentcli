@@ -296,7 +296,7 @@ if (!schedulerRuntime.ok) {
       assert.equal(result.handoff.v02_fields_included, true, 'v0.2 fields should be included');
       const expectedVersion = String(Math.min(
         Number.parseInt(schedulerRuntime.capabilities.handoff_version, 10),
-        3,
+        4,
       ));
       assert.equal(result.handoff.field_version, expectedVersion, 'field_version should match the negotiated runtime version');
     });

@@ -63,7 +63,7 @@ Purpose:
 
 Result:
 
-- `{ "ok": true, "package_version": "0.4.0", "manifest_version": "0.2" }`
+- `{ "ok": true, "package_version": "0.5.0", "manifest_version": "0.2" }`
 
 ### `agentcli.schema`
 
@@ -146,7 +146,7 @@ Params:
 
 Result:
 
-- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "capabilities": { "source": "static|runtime", "negotiated": <boolean>, "handoff_version": "..." }, "handoff": { "field_version": "1|2|3", "projected_fields": <int>, "v02_fields_included": <boolean> }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
+- `{ "ok": true, "target": "openclaw-scheduler", "dry_run": <boolean>, "scheduler": { "command": "...", "db_path": "..." }, "capabilities": { "source": "static|runtime", "negotiated": <boolean>, "handoff_version": "..." }, "handoff": { "field_version": "1|2|3|4", "projected_fields": <int>, "v02_fields_included": <boolean> }, "job_count": <int>, "actions": [{ "action": "created|updated|adopted", "job_id": "...", "adopted_from_job_id": "...", "name": "...", "invocation_mode": "schedule|trigger", "authorization_proof_verification": { ... } }], "authorization_proof_verifications": [{ ... }], "explain": [...] }`
 - `adopted_from_job_id` is present only when `action` is `"adopted"`
 - `capabilities` summarizes runtime capability negotiation for the selected scheduler
 - `handoff` summarizes which scheduler field version was projected during apply

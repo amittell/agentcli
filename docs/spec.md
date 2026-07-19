@@ -803,6 +803,88 @@ The two attestation layers work together:
 - Manifest-time (`identity.attestation`): proves the manifest was authorized
 - Execution-time (audit record): proves each run was performed by a specific identity
 
+## Scheduler Handoff Version 4
+
+A scheduler target MAY advertise handoff version 4 only when it implements the
+complete protocol below. Partial support MUST fall back to an earlier handoff
+version or reject apply. It MUST NOT emit a partial v4 artifact.
+
+### Artifact and canonicalization
+
+The artifact schema is `openclaw.scheduler.handoff-artifact`, artifact schema
+version 1, handoff version 4, and minimum scheduler schema 29. Canonicalization
+is `json-sort-v1`, canonicalization version 1, using SHA-256. Object keys are
+sorted recursively, array order is preserved, undefined values normalize to
+JSON null, numbers must be finite, and the artifact digest is the SHA-256 digest
+of the UTF-8 canonical JSON.
+
+The artifact uses execution binding version 2 and scheduler job binding version
+1. It MUST bind the canonical manifest digest, workflow and task IDs, stable job
+ID, effective task hash, command and input hashes, complete persisted scheduler
+execution projection, lifecycle, runtime, approval, output, identity, proof,
+authorization, evidence, contract, verification, intent, delegation, and
+credential-presentation policy.
+
+The artifact MUST NOT contain a raw credential, proof value, stdin value,
+environment value, private key, token, password, or provider session secret.
+Credential and proof sources are represented by declarative locations and
+hashes. A consumer MUST recompute and compare the artifact, scheduler binding,
+and effective task digests before execution.
+
+### Persistence and replacement
+
+Artifacts are immutable and content-addressed. Create, update, adoption,
+explicit null clearing, migration, inspection, restart, stale-claim recovery,
+and crash recovery MUST preserve the exact payload and digest. A replacement
+creates a new artifact and retains the old artifact for referenced runtime
+history. Pending work bound to a superseded artifact MUST be cancelled or
+executed from a complete immutable snapshot; it MUST NOT silently execute the
+replacement configuration.
+
+Every v4 dispatch, approval, run, runtime event, provider session, credential
+presentation, and evidence record MUST carry the exact artifact digest. Chain
+and retry work MUST also carry the exact source run ID and source artifact
+digest.
+
+### Runtime gates
+
+The runtime MUST advertise all of these boolean features before AgentCLI emits
+v4: `handoff_v4_artifact`, `artifact_bound_proofs`,
+`signed_or_provider_verified_evidence`, `provider_session_cache`,
+`credential_presentation`, `source_run_bound_delegation`, and
+`immutable_runtime_events`. AgentCLI uses the live capability response as
+authoritative for every key it reports.
+
+JWT, detached-signature, and certificate proofs MUST cryptographically bind the
+artifact digest, proof identity, validity interval, verification key, and a
+single-use replay identifier. Required revocation checks MUST run before user
+code. Missing, tampered, replayed, transplanted, expired, prematurely valid,
+revoked, or unbound proofs fail closed.
+
+Credential release MUST use exactly one negotiated medium: environment,
+temporary file, stdin, or a Gateway capability-bound environment header.
+Materialization state is recorded before release, values are never persisted,
+cleanup is durable and restart-recoverable, and cleanup failure is visible to an
+operator.
+
+Delegation MUST bind the concrete source run, validate every grant and actor,
+reject cycles, enforce maximum depth and scope, and prevent credential scope
+escalation. Selecting a newer run from the same parent job is not equivalent.
+
+Evidence MUST bind the artifact, runtime instance, lineage, identity, proof,
+authorization, command result, structured output, postcondition, and terminal
+status. A required evidence provider MUST sign or externally verify the
+canonical payload. Verification failure MUST remain terminal and MUST NOT be
+downgraded to checksum-only evidence.
+
+### Compatibility and conformance
+
+Handoff v4 is additive. Manifest versions 0.1 and 0.2 and scheduler handoff
+versions 1 through 3 retain their existing behavior. Producers and consumers
+SHOULD publish identical positive and negative conformance vectors. The
+reference vectors are packaged under `fixtures/handoff-v4/` in AgentCLI and
+OpenClaw Scheduler.
+
 ## Compiler Targets
 
 This spec does not require a single runtime.

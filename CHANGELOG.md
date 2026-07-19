@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 (2026-07-18)
+
+- scheduler: added handoff v4 canonical artifacts with explicit artifact,
+  canonicalization, execution-binding, and scheduler-binding versions
+- scheduler: complete non-lossy create, replace-style update, null clear, and
+  adopt projections now carry the immutable artifact payload and digest
+- security: JWT, detached-signature, and certificate proofs bind the exact v4
+  artifact, replay identifier, validity, key, and revocation result
+- security: credential handoff compiles to exactly one runtime medium without
+  persisting values, and delegation binds the exact source run and scope
+- evidence: the complete AgentCLI evidence payload and verification envelope
+  are available to the scheduler runtime for signed or provider-verified
+  terminal evidence
+- inspect: added immutable artifacts, runtime events, provider sessions, and
+  credential presentations to the scheduler inspection surface
+- conformance: added shared positive and negative v4 fixtures and exact digest
+  parity tests with OpenClaw Scheduler
+- compatibility: handoff versions 1 through 3 and manifest versions 0.1 and 0.2
+  retain their existing behavior
+
 ## 0.4.1 (2026-07-13)
 
 - scheduler: post-success verification for shell tasks now runs from the task working directory while retaining the runtime-provided execution environment, and expanded verifier commands are checked against the scheduler's storage limit before apply

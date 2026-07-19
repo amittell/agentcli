@@ -10,6 +10,8 @@
  *   describe - (envelope, ctx) => produce audit-safe metadata about the evidence
  */
 
+import { validateEvidenceRecordBinding } from './payload.js';
+
 const providers = new Map();
 
 export function registerEvidenceProvider(provider) {
@@ -96,6 +98,15 @@ export async function verifyEvidenceEnvelope(envelope, options = {}, ctx = {}) {
 
   try {
     const result = await provider.verify(envelope, options, ctx);
+    if (result?.verified === true && options.record) {
+      const binding = validateEvidenceRecordBinding(result.payload, options.record);
+      if (!binding.valid) {
+        return {
+          verified: false,
+          reason: `evidence binding failed: ${binding.errors.join('; ')}`,
+        };
+      }
+    }
     return result?.verified === true
       ? result
       : {

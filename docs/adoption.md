@@ -191,7 +191,7 @@ The main current risks are:
 
 - the standard is still draft
 - only one production-grade runtime adapter exists today
-- runtime compatibility depends on explicit capability negotiation, especially for root approvals, approver scope, structured output, and handoff v3
+- runtime compatibility depends on explicit capability negotiation, especially for root approvals, approver scope, structured output, and handoff v4
 
 ### Avoiding heavy single-prompt jobs
 
