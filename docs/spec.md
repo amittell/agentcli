@@ -829,15 +829,19 @@ The artifact MUST NOT contain a raw credential, proof value, stdin value,
 environment value, private key, token, password, or provider session secret.
 Credential and proof sources are represented by declarative locations and
 hashes. A consumer MUST recompute and compare the artifact, scheduler binding,
-and effective task digests before execution.
+and effective task digests before execution. The command argument count MUST
+equal the number of argument hashes, and `argv_sha256` MUST equal the canonical
+digest of the emitted program followed by those argument hashes.
 
 When evidence is declared, the persisted scheduler evidence declaration MUST
 retain canonical `payload_hash` and `provider_config_hash` values that exactly
 match the artifact evidence binding. Raw `provider_config` remains null. An
 absent evidence declaration requires both artifact hashes to be null, while a
-declared payload or provider configuration requires its corresponding hash to
-be non-null. A consumer MUST reject any semantic or hash mismatch between the
-persisted declaration and the artifact.
+declared evidence block always requires a non-null canonical `payload_hash`,
+including when its normalized payload is empty. A declared provider
+configuration also requires a non-null `provider_config_hash`. A consumer MUST
+reject any semantic or hash mismatch between the persisted declaration and the
+artifact.
 
 ### Persistence and replacement
 
@@ -901,6 +905,11 @@ single-use replay identifier. Required revocation checks MUST run before user
 code. Missing, tampered, replayed, transplanted, expired, prematurely valid,
 revoked, or unbound proofs fail closed.
 
+Trusted and claimed artifact digests MUST use the exact lowercase
+`sha256:<64 hex>` representation. A replay store succeeds only by returning
+literal `true` or an object with `claimed` set to `true` and no conflicting
+`ok` value. Ambiguous or contradictory replay results fail closed.
+
 Proof expiration MUST be later than issuance regardless of clock skew. A
 detached-signature or certificate envelope key ID MUST match the key or
 certificate that actually verified. JWT revocation uses the trusted JWKS key ID
@@ -923,7 +932,8 @@ Evidence MUST bind the artifact, runtime instance, lineage, identity, proof,
 authorization, command result, structured output, postcondition, and terminal
 status. A required evidence provider MUST sign or externally verify the
 canonical payload. Verification failure MUST remain terminal and MUST NOT be
-downgraded to checksum-only evidence.
+downgraded to checksum-only evidence. A v4 verifier MUST require exact parity
+between signed and persisted terminal status and structured-output hash fields.
 
 ### Compatibility and conformance
 

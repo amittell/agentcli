@@ -16,9 +16,11 @@ import {
 import { canonicalStringify, hashString } from '../canonical.js';
 import { resolveValueFrom } from '../command.js';
 import { registerVerifier } from './index.js';
+import { replayClaimAccepted } from './replay.js';
 import { normalizeProofTimeContext } from './time.js';
 
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
+const CANONICAL_SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 export function certificateProofKeyId(certificate) {
   const parsed = certificate instanceof X509Certificate
@@ -78,7 +80,13 @@ function resolveCanonicalManifest(ctx = {}) {
   const expectedDigest = artifactMode
     ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
     : ctx.manifestDigest;
-  if (expectedDigest && normalizeDigest(expectedDigest) !== normalizeDigest(digest)) {
+  if (artifactMode && !CANONICAL_SHA256_PATTERN.test(expectedDigest)) {
+    return { error: 'provided artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  const digestMatches = artifactMode
+    ? expectedDigest === digest
+    : normalizeDigest(expectedDigest) === normalizeDigest(digest);
+  if (expectedDigest && !digestMatches) {
     return {
       error: artifactMode
         ? 'provided artifact digest does not match canonical artifact payload'
@@ -136,7 +144,13 @@ function validateV4CertificateEnvelope(parsed, context) {
       return { ok: false, v4: true, reason: `handoff v4 certificate proof is missing ${field}` };
     }
   }
-  if (normalizeDigest(parsed.artifact_digest) !== normalizeDigest(context.artifactDigest)) {
+  if (!CANONICAL_SHA256_PATTERN.test(context.trustedArtifactDigest)) {
+    return { ok: false, v4: true, reason: 'trusted handoff artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  if (!CANONICAL_SHA256_PATTERN.test(parsed.artifact_digest)) {
+    return { ok: false, v4: true, reason: 'certificate proof artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  if (parsed.artifact_digest !== context.trustedArtifactDigest) {
     return { ok: false, v4: true, reason: 'certificate proof artifact digest does not match' };
   }
   const proofTime = normalizeProofTimeContext(context);
@@ -217,7 +231,7 @@ function enforceV4CertificateGuards(parsed, context, profile, cert) {
   if (replay && typeof replay.then === 'function') {
     return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
   }
-  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
+  const replayProtected = replayClaimAccepted(replay);
   if (!replayProtected) {
     return { ok: false, reason: replay?.reason || 'certificate proof nonce was already used' };
   }
@@ -296,6 +310,9 @@ export function resolveCertificateVerificationContext(profile = {}, ctx = {}) {
     artifactDigest: manifest.artifactMode
       ? manifest.digest
       : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
+    trustedArtifactDigest: manifest.artifactMode
+      ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
+      : null,
     handoffVersion: manifest.artifactMode
       ? 4
       : (ctx.handoffVersion ?? ctx.handoff_version ?? null),
@@ -712,7 +729,7 @@ const certificateVerifier = {
       manifest_digest: context.manifestDigest || null,
       artifact_digest: context.artifactDigest ?? null,
       artifact_bound: !envelope.v4
-        || normalizeDigest(parsedProof.artifact_digest) === normalizeDigest(context.artifactDigest),
+        || parsedProof.artifact_digest === context.trustedArtifactDigest,
       replay_protected: guards.replayProtected === true,
       revocation_checked: guards.revocationChecked === true,
       verified_at: verifiedAt,

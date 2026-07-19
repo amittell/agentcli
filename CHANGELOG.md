@@ -33,6 +33,9 @@
   not-revoked result from the runtime checker
 - security: JWT artifact claims and trusted context now require the exact
   lowercase `sha256:<64 hex>` representation before v4 binding can succeed
+- security: detached-signature and certificate artifact bindings now require
+  the same canonical digest representation, and every v4 proof method accepts
+  replay claims only from an explicit, non-conflicting claimed result
 - security: JWKS-provided raw JWK objects are normalized before stable public
   key identity derivation, while private JWK material remains forbidden
 - security: credential handoff compiles to exactly one runtime medium without
@@ -45,7 +48,11 @@
   exact artifact parity while raw provider configuration remains absent
 - evidence: persisted declarations must match artifact evidence semantics and
   hashes; explicitly v4 evidence records require a canonical artifact digest,
-  and child records require complete source-run lineage
+  child records require complete source-run lineage, and terminal status and
+  structured-output hashes must exactly match the surrounding audit record
+- validation: v4 command argument counts and aggregate argument digests are
+  recomputed, and every declared evidence block requires a canonical payload
+  hash even when the authored profile omits an explicit payload object
 - inspect: added immutable artifacts, runtime events, provider sessions, and
   credential presentations to the scheduler inspection surface, with every
   entity enumerated in JSON help and structured command discovery

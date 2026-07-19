@@ -428,7 +428,7 @@ function evidenceBinding(binding) {
       : Array.isArray(evidence.payload?.bind_targets)
         ? evidence.payload.bind_targets
         : [],
-    payload_hash: hashObject(evidence.payload),
+    payload_hash: canonicalDigest(evidence.payload ?? {}),
     provider_config_hash: evidence.provider_config_hash ?? null,
     verify_required: evidence.verify?.required === true,
     retention: evidence.payload?.retention ?? null,
@@ -460,7 +460,7 @@ function validatePersistedEvidenceBinding(job, artifactEvidence) {
     if (declaration.provider_config != null) {
       errors.push('persisted evidence declaration must not contain raw provider_config');
     }
-    const expectedPayloadHash = hashObject(declaration.payload);
+    const expectedPayloadHash = canonicalDigest(declaration.payload ?? {});
     if ((declaration.payload_hash ?? null) !== expectedPayloadHash) {
       errors.push('persisted evidence payload_hash does not match its payload');
     }
@@ -498,12 +498,13 @@ function commandBinding(binding, task, job) {
       ? 'prompt'
       : 'system';
   const argsHashes = command?.args_hashes ?? [];
+  const program = command?.program ?? null;
   return {
     kind,
-    program: command?.program ?? null,
+    program,
     args_count: command?.args_count ?? 0,
     args_sha256: argsHashes,
-    argv_sha256: command ? canonicalDigest([command.program, ...argsHashes]) : null,
+    argv_sha256: canonicalDigest([program, ...argsHashes]),
     cwd: command?.cwd ?? null,
     stdin_sha256: command?.stdin_hash ?? null,
     prompt_sha256: hashNullableString(task.prompt),
@@ -825,7 +826,16 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
   validateHash(payload.manifest?.digest, 'manifest.digest', errors, { required: true });
   validateHash(payload.compiled?.effective_task_hash, 'compiled.effective_task_hash', errors, { required: true });
   validateHash(payload.command?.payload_message_sha256, 'command.payload_message_sha256', errors, { required: true });
-  validateHashCollection(payload.command?.args_sha256, 'command.args_sha256', errors);
+  const commandArgumentHashes = payload.command?.args_sha256;
+  if (!Array.isArray(commandArgumentHashes)) {
+    errors.push('command.args_sha256 must be an array');
+  } else {
+    validateHashCollection(commandArgumentHashes, 'command.args_sha256', errors);
+    if (Number.isInteger(payload.command?.args_count)
+      && payload.command.args_count !== commandArgumentHashes.length) {
+      errors.push('command.args_count does not match command.args_sha256 length');
+    }
+  }
   validateHashCollection(
     payload.command?.env?.effective_env_value_sha256,
     'command.env.effective_env_value_sha256',
@@ -852,6 +862,15 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     ['delegation.allowed_delegators_hash', payload.delegation?.allowed_delegators_hash],
   ]) {
     validateHash(value, path, errors);
+  }
+  if (payload.command && Array.isArray(commandArgumentHashes)) {
+    const expectedArgvHash = canonicalDigest([
+      payload.command.program ?? null,
+      ...commandArgumentHashes,
+    ]);
+    if (payload.command.argv_sha256 !== expectedArgvHash) {
+      errors.push('command.argv_sha256 does not match command program and argument hashes');
+    }
   }
 
   requiredBoolean(payload.lifecycle?.enabled, 'lifecycle.enabled', errors);
@@ -912,7 +931,8 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     errors.push('declared evidence providers require signed or provider-verified evidence');
   }
   const artifactEvidence = payload.evidence ?? {};
-  const hasEvidenceDeclaration = artifactEvidence.ref != null
+  const hasEvidenceDeclaration = artifactEvidence.signed_or_provider_verified_required === true
+    || artifactEvidence.ref != null
     || artifactEvidence.provider != null
     || (Array.isArray(artifactEvidence.methods) && artifactEvidence.methods.length > 0)
     || (Array.isArray(artifactEvidence.payload_bind) && artifactEvidence.payload_bind.length > 0)
@@ -925,6 +945,8 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     if (artifactEvidence.provider_config_hash != null) {
       errors.push('evidence.provider_config_hash must be null when evidence is not declared');
     }
+  } else if (!SHA256_PATTERN.test(artifactEvidence.payload_hash)) {
+    errors.push('evidence.payload_hash must be a lowercase SHA-256 digest when evidence is declared');
   }
   if (payload.delegation?.mode && payload.delegation.mode !== 'none'
     && payload.delegation.source_binding !== 'source_run_id') {

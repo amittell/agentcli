@@ -13,6 +13,7 @@ import { createPublicKey, createVerify } from 'node:crypto';
 import { canonicalDigest } from '../canonical.js';
 import { registerVerifier } from './index.js';
 import { publicKeyId } from './key-identity.js';
+import { replayClaimAccepted } from './replay.js';
 import { normalizeProofTimeContext } from './time.js';
 
 const DEFAULT_JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -889,8 +890,7 @@ const jwtVerifier = {
         if (replayResult && typeof replayResult.then === 'function') {
           runtimeGuardReason = 'handoff v4 replay store must complete synchronously';
         } else {
-          replayProtected = replayResult === true || replayResult?.claimed === true
-            || replayResult?.ok === true;
+          replayProtected = replayClaimAccepted(replayResult);
           if (!replayProtected) runtimeGuardReason = replayResult?.reason || 'JWT jti was already used';
         }
       }

@@ -205,9 +205,7 @@ function sanitizeEvidenceDeclaration(evidence, { includeHashes = false } = {}) {
     ...evidence,
     ...(includeHashes
       ? {
-          payload_hash: evidence.payload == null
-            ? null
-            : canonicalDigest(evidence.payload),
+          payload_hash: canonicalDigest(evidence.payload ?? {}),
           provider_config_hash: evidence.provider_config == null
             ? null
             : canonicalDigest(evidence.provider_config),

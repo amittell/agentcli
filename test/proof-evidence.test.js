@@ -95,6 +95,7 @@ function evidencePayload(overrides = {}) {
       stdin: 'secret-stdin',
     },
     result: {
+      status: 'succeeded',
       exit_code: 0,
       timed_out: false,
       duration_ms: 10,
@@ -143,8 +144,8 @@ function evidenceRecordForPayload(payload, overrides = {}) {
         : payload.command[field] ?? null,
     ])),
     result: Object.fromEntries([
-      'exit_code', 'signal', 'timed_out', 'duration_ms', 'stdout_bytes',
-      'stderr_bytes', 'output_hash',
+      'status', 'exit_code', 'signal', 'timed_out', 'duration_ms', 'stdout_bytes',
+      'stderr_bytes', 'output_hash', 'structured_hash',
     ].map(field => [field, payload.result[field] ?? null])),
     verify: {
       passed: true,
@@ -529,11 +530,75 @@ test('v4 evidence records require canonical artifact and child lineage bindings'
     { valid: true, errors: [] },
   );
 
+  for (const [field, value, expected] of [
+    ['status', 'cancelled', /result\.status does not match/],
+    ['structured_hash', `sha256:${'e'.repeat(64)}`, /result\.structured_hash does not match/],
+  ]) {
+    const changedResult = validateEvidenceRecordBinding(rootPayload, {
+      ...rootRecord,
+      result: { ...rootRecord.result, [field]: value },
+    });
+    assert.equal(changedResult.valid, false, field);
+    assert.ok(changedResult.errors.some(error => expected.test(error)), field);
+  }
+
+  for (const field of ['status', 'structured_hash']) {
+    const missingPayloadField = structuredClone(rootPayload);
+    delete missingPayloadField.result[field];
+    const missingPayloadResult = validateEvidenceRecordBinding(missingPayloadField, rootRecord);
+    assert.equal(missingPayloadResult.valid, false, `payload ${field}`);
+    assert.ok(missingPayloadResult.errors.some(error => error.includes(`result.${field}`)));
+
+    const missingRecordField = structuredClone(rootRecord);
+    delete missingRecordField.result[field];
+    const missingRecordResult = validateEvidenceRecordBinding(rootPayload, missingRecordField);
+    assert.equal(missingRecordResult.valid, false, `record ${field}`);
+    assert.ok(missingRecordResult.errors.some(error => error.includes(`result.${field}`)));
+  }
+
+  const nonCanonicalStructuredHashPayload = structuredClone(rootPayload);
+  const nonCanonicalStructuredHashRecord = structuredClone(rootRecord);
+  const uppercaseStructuredHash = `sha256:${'E'.repeat(64)}`;
+  nonCanonicalStructuredHashPayload.result.structured_hash = uppercaseStructuredHash;
+  nonCanonicalStructuredHashRecord.result.structured_hash = uppercaseStructuredHash;
+  const nonCanonicalStructuredHash = validateEvidenceRecordBinding(
+    nonCanonicalStructuredHashPayload,
+    nonCanonicalStructuredHashRecord,
+  );
+  assert.equal(nonCanonicalStructuredHash.valid, false);
+  assert.ok(nonCanonicalStructuredHash.errors.some(error => /lowercase SHA-256 digest/.test(error)));
+
+  const legacyPayload = evidencePayload();
+  const legacyRecord = evidenceRecordForPayload(legacyPayload);
+  delete legacyPayload.result.status;
+  delete legacyPayload.result.structured_hash;
+  delete legacyRecord.result.status;
+  delete legacyRecord.result.structured_hash;
+  assert.deepEqual(
+    validateEvidenceRecordBinding(legacyPayload, legacyRecord),
+    { valid: true, errors: [] },
+  );
+  assert.deepEqual(
+    validateEvidenceRecordBinding(legacyPayload, {
+      ...legacyRecord,
+      parent_id: 'legacy-parent',
+    }),
+    { valid: true, errors: [] },
+  );
+
   const missingPayload = evidencePayload();
   const missingRecord = evidenceRecordForPayload(missingPayload, { handoff_version: 4 });
   const missingArtifact = validateEvidenceRecordBinding(missingPayload, missingRecord);
   assert.equal(missingArtifact.valid, false);
   assert.ok(missingArtifact.errors.some(error => /handoff artifact digest/.test(error)));
+
+  const nestedV4Marker = validateEvidenceRecordBinding(missingPayload, {
+    ...missingRecord,
+    handoff_version: undefined,
+    handoff: { handoff_version: 4 },
+  });
+  assert.equal(nestedV4Marker.valid, false);
+  assert.ok(nestedV4Marker.errors.some(error => /handoff artifact digest/.test(error)));
 
   const malformedPayload = structuredClone(rootPayload);
   malformedPayload.bindings.handoff_artifact_digest = 'not-a-digest';

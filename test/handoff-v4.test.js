@@ -216,6 +216,17 @@ test('handoff v4 artifact is canonical, deterministic, and tamper evident', () =
   });
   assert.equal(validation.ok, true, validation.errors.join('; '));
   assert.equal(job.effective_task_hash, job.handoff_artifact_payload.compiled.effective_task_hash);
+  assert.equal(
+    job.handoff_artifact_payload.command.args_count,
+    job.handoff_artifact_payload.command.args_sha256.length,
+  );
+  assert.equal(
+    job.handoff_artifact_payload.command.argv_sha256,
+    canonicalDigest([
+      job.handoff_artifact_payload.command.program,
+      ...job.handoff_artifact_payload.command.args_sha256,
+    ]),
+  );
 
   const reordered = JSON.parse(canonicalStringify(job.handoff_artifact_payload));
   assert.equal(
@@ -232,6 +243,56 @@ test('handoff v4 artifact is canonical, deterministic, and tamper evident', () =
   });
   assert.equal(tamperedValidation.ok, false);
   assert.match(tamperedValidation.errors.join('; '), /digest does not match/);
+
+  const wrongCount = structuredClone(job.handoff_artifact_payload);
+  wrongCount.command.args_count += 1;
+  const wrongCountValidation = validateSchedulerHandoffV4Artifact(wrongCount, {
+    expectedDigest: canonicalDigest(wrongCount),
+  });
+  assert.equal(wrongCountValidation.ok, false);
+  assert.match(wrongCountValidation.errors.join('; '), /args_count does not match/);
+
+  const wrongArgv = structuredClone(job.handoff_artifact_payload);
+  wrongArgv.command.argv_sha256 = `sha256:${'f'.repeat(64)}`;
+  const wrongArgvValidation = validateSchedulerHandoffV4Artifact(wrongArgv, {
+    expectedDigest: canonicalDigest(wrongArgv),
+  });
+  assert.equal(wrongArgvValidation.ok, false);
+  assert.match(wrongArgvValidation.errors.join('; '), /argv_sha256 does not match/);
+
+  const objectArguments = structuredClone(job.handoff_artifact_payload);
+  objectArguments.command.args_sha256 = {
+    first: objectArguments.command.args_sha256[0],
+  };
+  const objectArgumentsValidation = validateSchedulerHandoffV4Artifact(objectArguments, {
+    expectedDigest: canonicalDigest(objectArguments),
+  });
+  assert.equal(objectArgumentsValidation.ok, false);
+  assert.match(objectArgumentsValidation.errors.join('; '), /command\.args_sha256 must be an array/);
+
+  const promptManifest = manifest();
+  promptManifest.workflows[0].tasks[0] = {
+    id: 'prompt',
+    name: 'Prompt task',
+    prompt: 'Review the current state.',
+    target: { session_target: 'isolated' },
+    schedule: { cron: '0 * * * *' },
+    delivery: { mode: 'none' },
+  };
+  const promptPayload = compileManifestToScheduler(promptManifest, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0].handoff_artifact_payload;
+  assert.equal(promptPayload.command.program, null);
+  assert.equal(
+    promptPayload.command.argv_sha256,
+    canonicalDigest([null, ...promptPayload.command.args_sha256]),
+  );
+  assert.equal(
+    validateSchedulerHandoffV4Artifact(promptPayload).ok,
+    true,
+  );
 
   const future = structuredClone(job.handoff_artifact_payload);
   future.scheduler_schema_min = 30;
@@ -410,6 +471,49 @@ test('handoff v4 persists audit-safe evidence hashes with the scheduler declarat
   const storedV4 = schedulerCreateSpec(job, { fieldVersion: '4' });
   assert.equal(JSON.parse(storedV4.evidence).payload.context.policy_version, null);
   assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(storedV4));
+
+  const payloadlessManifest = structuredClone(evidenceManifest);
+  delete payloadlessManifest.evidence_profiles[0].payload;
+  const payloadlessJob = compileManifestToScheduler(payloadlessManifest, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const payloadlessExpectedHash = canonicalDigest(payloadlessJob.evidence.payload ?? {});
+  assert.equal(payloadlessJob.evidence.payload_hash, payloadlessExpectedHash);
+  assert.equal(
+    payloadlessJob.handoff_artifact_payload.evidence.payload_hash,
+    payloadlessExpectedHash,
+  );
+  assert.doesNotThrow(() => assertValidSchedulerHandoffV4Job(payloadlessJob));
+
+  const declarationMarkerArtifact = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0].handoff_artifact_payload;
+  declarationMarkerArtifact.evidence.payload_hash = canonicalDigest({});
+  declarationMarkerArtifact.evidence.signed_or_provider_verified_required = true;
+  const declarationMarkerValidation = validateSchedulerHandoffV4Artifact(
+    declarationMarkerArtifact,
+    { expectedDigest: canonicalDigest(declarationMarkerArtifact) },
+  );
+  assert.equal(
+    declarationMarkerValidation.ok,
+    true,
+    declarationMarkerValidation.errors.join('; '),
+  );
+
+  const nullPayloadHash = structuredClone(payloadlessJob.handoff_artifact_payload);
+  nullPayloadHash.evidence.payload_hash = null;
+  const nullPayloadHashValidation = validateSchedulerHandoffV4Artifact(nullPayloadHash, {
+    expectedDigest: canonicalDigest(nullPayloadHash),
+  });
+  assert.equal(nullPayloadHashValidation.ok, false);
+  assert.match(
+    nullPayloadHashValidation.errors.join('; '),
+    /evidence\.payload_hash must be a lowercase SHA-256 digest when evidence is declared/,
+  );
 
   for (const field of ['payload_hash', 'provider_config_hash']) {
     const tampered = structuredClone(job);
@@ -1454,6 +1558,36 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(indeterminateResult.verified, false);
   assert.match(indeterminateResult.reason, /did not explicitly confirm/);
   assert.equal(indeterminateReplayClaims, 0);
+
+  for (const [name, replayResult] of [
+    ['ambiguous-ok', { ok: true }],
+    ['conflicting-false-claim', { ok: true, claimed: false }],
+    ['conflicting-false-ok', { ok: false, claimed: true }],
+    ['null-result', null],
+    ['array-result', [{ claimed: true }]],
+    ['inherited-claim', Object.create({ claimed: true })],
+  ]) {
+    const rejectedReplay = jwtVerifier.verifyProof(
+      signJwt({ ...payload, jti: `proof-${name}` }, privateKey),
+      profile,
+      { ...context, claimProofReplay: () => replayResult },
+    );
+    assert.equal(rejectedReplay.verified, false, name);
+    assert.equal(rejectedReplay.replay_protected, false, name);
+    assert.match(rejectedReplay.reason, /already used/, name);
+  }
+
+  for (const [name, replayResult] of [
+    ['literal-true', true],
+    ['explicit-claim', { claimed: true, ok: true }],
+  ]) {
+    const acceptedReplay = jwtVerifier.verifyProof(
+      signJwt({ ...payload, jti: `proof-${name}` }, privateKey),
+      profile,
+      { ...context, claimProofReplay: () => replayResult },
+    );
+    assert.equal(acceptedReplay.verified, true, name);
+  }
 });
 
 test('handoff v4 detached signatures cover nonce, validity, key, and artifact metadata', () => {
@@ -1506,6 +1640,29 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
   assert.equal(verified.replay_protected, true);
   assert.equal(verified.revocation_checked, true);
   assert.equal(verified.verified_at, new Date(now).toISOString());
+
+  for (const [name, proofDigest, trustedDigest] of [
+    ['bare trusted digest', fields.artifactDigest, fields.artifactDigest.slice('sha256:'.length)],
+    ['uppercase trusted digest', fields.artifactDigest, fields.artifactDigest.toUpperCase()],
+    ['bare proof digest', fields.artifactDigest.slice('sha256:'.length), fields.artifactDigest],
+    ['uppercase proof digest', fields.artifactDigest.toUpperCase(), fields.artifactDigest],
+  ]) {
+    const malformedDigest = detachedSignatureVerifier.verifyProof(
+      { ...envelope, artifact_digest: proofDigest },
+      profile,
+      {
+        ...context,
+        artifactDigest: trustedDigest,
+        claimProofReplay: () => ({ claimed: true }),
+      },
+    );
+    assert.equal(malformedDigest.verified, false, name);
+    assert.match(
+      malformedDigest.signature_verification_reason ?? malformedDigest.reason,
+      /canonical lowercase SHA-256 digest/,
+      name,
+    );
+  }
 
   const invalidSkew = detachedSignatureVerifier.verifyProof(envelope, profile, {
     ...context,
@@ -1597,6 +1754,30 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
   assert.match(unchecked.signature_verification_reason, /did not explicitly confirm/);
   assert.equal(uncheckedReplayClaims, 0);
 
+  for (const [name, replayResult] of [
+    ['ambiguous-ok', { ok: true }],
+    ['conflicting-claim', { ok: true, claimed: false }],
+    ['conflicting-false-ok', { ok: false, claimed: true }],
+    ['null-result', null],
+    ['array-result', [{ claimed: true }]],
+    ['inherited-claim', Object.create({ claimed: true })],
+  ]) {
+    const replayFields = { ...fields, nonce: `detached-proof-${name}` };
+    const replaySigner = createSign('RSA-SHA256');
+    replaySigner.update(buildDetachedSignatureV4SigningContent(replayFields));
+    const rejectedReplay = detachedSignatureVerifier.verifyProof({
+      ...envelope,
+      signature: replaySigner.sign(privateKey).toString('base64'),
+      nonce: replayFields.nonce,
+    }, profile, {
+      ...context,
+      claimProofReplay: () => replayResult,
+    });
+    assert.equal(rejectedReplay.verified, false, name);
+    assert.equal(rejectedReplay.replay_protected, false, name);
+    assert.match(rejectedReplay.signature_verification_reason, /already used/, name);
+  }
+
   const snakeCaseContext = detachedSignatureVerifier.verifyProof(envelope, profile, {
     handoff_version: 4,
     manifest: manifest(),
@@ -1681,6 +1862,29 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   const verified = certificateVerifier.verifyProof(envelope, profile, context);
   assert.equal(verified.verified, true, verified.signature_verification_reason);
   assert.equal(verified.verified_at, new Date(now).toISOString());
+
+  for (const [name, proofDigest, trustedDigest] of [
+    ['bare trusted digest', fields.artifactDigest, fields.artifactDigest.slice('sha256:'.length)],
+    ['uppercase trusted digest', fields.artifactDigest, fields.artifactDigest.toUpperCase()],
+    ['bare proof digest', fields.artifactDigest.slice('sha256:'.length), fields.artifactDigest],
+    ['uppercase proof digest', fields.artifactDigest.toUpperCase(), fields.artifactDigest],
+  ]) {
+    const malformedDigest = certificateVerifier.verifyProof(
+      { ...envelope, artifact_digest: proofDigest },
+      profile,
+      {
+        ...context,
+        artifactDigest: trustedDigest,
+        claimProofReplay: () => ({ claimed: true }),
+      },
+    );
+    assert.equal(malformedDigest.verified, false, name);
+    assert.match(
+      malformedDigest.signature_verification_reason ?? malformedDigest.reason,
+      /canonical lowercase SHA-256 digest/,
+      name,
+    );
+  }
 
   const invalidSkew = certificateVerifier.verifyProof(envelope, profile, {
     ...context,
@@ -1778,6 +1982,30 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   assert.equal(unchecked.verified, false);
   assert.match(unchecked.signature_verification_reason, /revocation backend unavailable/);
   assert.equal(uncheckedReplayClaims, 0);
+
+  for (const [name, replayResult] of [
+    ['ambiguous-ok', { ok: true }],
+    ['conflicting-claim', { ok: true, claimed: false }],
+    ['conflicting-false-ok', { ok: false, claimed: true }],
+    ['null-result', null],
+    ['array-result', [{ claimed: true }]],
+    ['inherited-claim', Object.create({ claimed: true })],
+  ]) {
+    const replayFields = { ...fields, nonce: `certificate-proof-${name}` };
+    const replaySigner = createSign('SHA256');
+    replaySigner.update(buildCertificateV4SigningContent(replayFields));
+    const rejectedReplay = certificateVerifier.verifyProof({
+      ...envelope,
+      signature: replaySigner.sign(readFileSync(keyPath, 'utf8')).toString('base64'),
+      nonce: replayFields.nonce,
+    }, profile, {
+      ...context,
+      claimProofReplay: () => replayResult,
+    });
+    assert.equal(rejectedReplay.verified, false, name);
+    assert.equal(rejectedReplay.replay_protected, false, name);
+    assert.match(rejectedReplay.signature_verification_reason, /already used/, name);
+  }
 
   const snakeCaseContext = certificateVerifier.verifyProof(envelope, profile, {
     handoff_version: 4,

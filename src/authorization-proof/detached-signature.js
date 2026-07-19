@@ -16,10 +16,12 @@ import process from 'node:process';
 import { canonicalStringify, hashString } from '../canonical.js';
 import { registerVerifier } from './index.js';
 import { publicKeyId } from './key-identity.js';
+import { replayClaimAccepted } from './replay.js';
 import { normalizeProofTimeContext } from './time.js';
 
 const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
+const CANONICAL_SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 export function detachedSignatureKeyId(publicKey) {
   return publicKeyId(publicKey);
@@ -114,7 +116,13 @@ function canonicalManifestContext(ctx = {}) {
   const expectedDigest = artifactMode
     ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
     : ctx.manifestDigest;
-  if (expectedDigest && normalizeDigest(expectedDigest) !== normalizeDigest(digest)) {
+  if (artifactMode && !CANONICAL_SHA256_PATTERN.test(expectedDigest)) {
+    return { error: 'provided artifact digest must be a canonical lowercase SHA-256 digest' };
+  }
+  const digestMatches = artifactMode
+    ? expectedDigest === digest
+    : normalizeDigest(expectedDigest) === normalizeDigest(digest);
+  if (expectedDigest && !digestMatches) {
     return {
       error: artifactMode
         ? 'provided artifact digest does not match canonical artifact payload'
@@ -139,6 +147,9 @@ export function resolveDetachedSignatureVerificationContext(profile = {}, ctx = 
     artifactDigest: canonical.artifactMode
       ? canonical.digest
       : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
+    trustedArtifactDigest: canonical.artifactMode
+      ? (ctx.artifactDigest ?? ctx.handoffArtifactDigest)
+      : null,
     handoffVersion: canonical.artifactMode
       ? 4
       : (ctx.handoffVersion ?? ctx.handoff_version ?? null),
@@ -185,7 +196,13 @@ function parseV4Envelope(proof, context) {
       return { error: `handoff v4 detached proof is missing ${field}`, v4: true };
     }
   }
-  if (normalizeDigest(envelope.artifact_digest) !== normalizeDigest(context.artifactDigest)) {
+  if (!CANONICAL_SHA256_PATTERN.test(context.trustedArtifactDigest)) {
+    return { error: 'trusted handoff artifact digest must be a canonical lowercase SHA-256 digest', v4: true };
+  }
+  if (!CANONICAL_SHA256_PATTERN.test(envelope.artifact_digest)) {
+    return { error: 'detached proof artifact digest must be a canonical lowercase SHA-256 digest', v4: true };
+  }
+  if (envelope.artifact_digest !== context.trustedArtifactDigest) {
     return { error: 'detached proof artifact digest does not match', v4: true };
   }
 
@@ -262,7 +279,7 @@ function enforceV4RuntimeGuards(parsed, context, profile, verifiedKeyId) {
   if (replay && typeof replay.then === 'function') {
     return { ok: false, reason: 'handoff v4 replay store must complete synchronously' };
   }
-  const replayProtected = replay === true || replay?.claimed === true || replay?.ok === true;
+  const replayProtected = replayClaimAccepted(replay);
   if (!replayProtected) {
     return { ok: false, reason: replay?.reason || 'detached proof nonce was already used' };
   }
@@ -507,7 +524,7 @@ const detachedSignatureVerifier = {
         manifest_digest: digest,
         artifact_digest: context.artifactDigest ?? null,
         artifact_bound: !parsed.v4
-          || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
+          || parsed.envelope?.artifact_digest === context.trustedArtifactDigest,
         replay_protected: guards.replayProtected === true,
         revocation_checked: guards.revocationChecked === true,
         key_id: sshResult.keyId ?? null,
@@ -575,7 +592,7 @@ const detachedSignatureVerifier = {
         manifest_digest: digest,
         artifact_digest: context.artifactDigest ?? null,
         artifact_bound: !parsed.v4
-          || normalizeDigest(parsed.envelope?.artifact_digest) === normalizeDigest(context.artifactDigest),
+          || parsed.envelope?.artifact_digest === context.trustedArtifactDigest,
         replay_protected: guards.replayProtected === true,
         revocation_checked: guards.revocationChecked === true,
         key_id: verifiedKeyId,
