@@ -575,9 +575,15 @@ const jwtVerifier = {
     const artifactDigest = context.artifactDigest ?? context.handoffArtifactDigest ?? null;
     const v4Required = Number(context.handoffVersion ?? context.handoff_version) === 4
       || artifactDigest != null;
-    const clockSkewSeconds = v4Required
+    const clockSkewInput = v4Required
       ? (context.clockSkewSeconds ?? 60)
       : (context.clockSkewSeconds ?? 0);
+    const clockSkewSeconds = (
+      (typeof clockSkewInput === 'number' || typeof clockSkewInput === 'string')
+      && !(typeof clockSkewInput === 'string' && clockSkewInput.trim() === '')
+    )
+      ? Number(clockSkewInput)
+      : Number.NaN;
     const verificationNowMs = typeof context.now === 'number'
       ? context.now
       : context.now instanceof Date
@@ -590,6 +596,16 @@ const jwtVerifier = {
         verified: false,
         method: 'jwt',
         reason: 'proof value is missing or not a string',
+        claims_validated: false,
+        signature_verified: false,
+      };
+    }
+
+    if (!Number.isFinite(clockSkewSeconds) || clockSkewSeconds < 0) {
+      return {
+        verified: false,
+        method: 'jwt',
+        reason: 'clockSkewSeconds must be a finite non-negative number',
         claims_validated: false,
         signature_verified: false,
       };

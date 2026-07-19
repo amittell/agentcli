@@ -498,6 +498,10 @@ test('scheduler execution binding covers routing and resource controls', () => {
     { payload_scope: 'global' },
     { resource_pool: 'different-pool' },
     { job_class: 'pre_compaction_flush' },
+    { payload_timeout_seconds: 321 },
+    { payload_model_fallback: 'fallback-model' },
+    { auth_profile_fallback: 'fallback-profile' },
+    { shell_env_policy: 'inherit' },
   ]) {
     const rebound = rebindSchedulerHandoffV4Job(job, override);
     assert.notEqual(
@@ -574,6 +578,22 @@ test('handoff v4 scheduler rebinding replaces adoption metadata atomically', () 
   assert.equal(validateSchedulerHandoffV4Artifact(rebound.handoff_artifact_payload, {
     expectedDigest: rebound.handoff_artifact_digest,
   }).ok, true);
+});
+
+test('handoff v4 scheduler rebinding rejects a tampered original artifact', () => {
+  const job = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const tampered = structuredClone(job);
+  tampered.handoff_artifact_payload.manifest.digest = `sha256:${'a'.repeat(64)}`;
+
+  assert.throws(
+    () => rebindSchedulerHandoffV4Job(tampered, { origin: 'legacy-origin' }),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && /artifact digest does not match payload/.test(error.message),
+  );
 });
 
 test('handoff v4 scheduler rebinding rejects artifact-bound overrides', () => {
@@ -769,6 +789,10 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
     payload_scope: 'global',
     resource_pool: 'legacy-pool',
     job_class: 'pre_compaction_flush',
+    payload_timeout_seconds: 321,
+    payload_model_fallback: 'legacy-fallback-model',
+    auth_profile_fallback: 'legacy-fallback-profile',
+    shell_env_policy: 'inherit',
     job_type: 'watchdog',
     watchdog_target_label: 'legacy-target',
     watchdog_check_cmd: '/usr/bin/legacy-health-check',
@@ -825,6 +849,10 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
     payload_scope: 'global',
     resource_pool: 'preserved-pool',
     job_class: 'pre_compaction_flush',
+    payload_timeout_seconds: 654,
+    payload_model_fallback: 'preserved-fallback-model',
+    auth_profile_fallback: 'preserved-fallback-profile',
+    shell_env_policy: 'inherit',
     job_type: 'watchdog',
     watchdog_target_label: 'preserved-target',
     watchdog_check_cmd: '/usr/bin/preserved-health-check --strict',
@@ -1013,6 +1041,31 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   );
   assert.equal(stringVersionUnbound.verified, false);
   assert.match(stringVersionUnbound.reason, /trusted handoff artifact digest/);
+
+  const expiredBeyondStringSkew = jwtVerifier.verifyProof(
+    signJwt({
+      ...payload,
+      iat: now - 300,
+      exp: now - 61,
+      jti: 'proof-expired-string-skew',
+    }, privateKey),
+    profile,
+    {
+      ...context,
+      clockSkewSeconds: '60',
+      claimProofReplay: () => ({ claimed: true }),
+    },
+  );
+  assert.equal(expiredBeyondStringSkew.verified, false);
+  assert.match(expiredBeyondStringSkew.reason, /expired/);
+
+  const invalidSkew = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-invalid-skew' }, privateKey),
+    profile,
+    { ...context, clockSkewSeconds: 'not-a-number' },
+  );
+  assert.equal(invalidSkew.verified, false);
+  assert.match(invalidSkew.reason, /clockSkewSeconds/);
 
   const inverted = signJwt({
     ...payload,

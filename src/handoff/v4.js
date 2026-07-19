@@ -35,10 +35,14 @@ const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const CRYPTOGRAPHIC_PROOF_METHODS = new Set(['jwt', 'detached-signature', 'certificate']);
 const PRESENTATION_MEDIA = new Set(['none', 'env', 'temp-file', 'stdin', 'gateway-env-header']);
 const SCHEDULER_JOB_REBINDABLE_FIELDS = new Set([
+  'auth_profile_fallback',
   'job_class',
   'origin',
+  'payload_model_fallback',
   'payload_scope',
+  'payload_timeout_seconds',
   'resource_pool',
+  'shell_env_policy',
   'watchdog_alert_channel',
   'watchdog_alert_target',
   'watchdog_check_cmd',
@@ -628,8 +632,20 @@ export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
       { code: 'HANDOFF_REBIND_OVERRIDE_INVALID', fields: invalidFields },
     );
   }
+  const originalValidation = validateSchedulerHandoffV4Artifact(
+    job.handoff_artifact_payload,
+    { expectedDigest: job.handoff_artifact_digest },
+  );
+  if (!originalValidation.ok) {
+    throw Object.assign(
+      new Error(
+        `Cannot rebind invalid handoff v4 artifact: ${originalValidation.errors.join('; ')}`,
+      ),
+      { code: 'HANDOFF_ARTIFACT_INVALID', errors: originalValidation.errors },
+    );
+  }
   const reboundJob = { ...job, ...overrides };
-  const payload = structuredClone(normalizePayload(job.handoff_artifact_payload));
+  const payload = structuredClone(originalValidation.payload);
   if (!payload?.scheduler_job_binding || typeof payload.scheduler_job_binding !== 'object') {
     throw Object.assign(new Error('handoff v4 artifact is missing scheduler_job_binding'), {
       code: 'HANDOFF_ARTIFACT_INVALID',

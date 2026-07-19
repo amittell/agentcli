@@ -3306,6 +3306,22 @@ test('cli schema accepts kebab-case aliases', async () => {
   assert.ok(output.schema.fields.id);
 });
 
+test('scheduler-job JSON Schema describes every v4 projected and compiled field', async () => {
+  const schemaOutput = JSON.parse(await runCli(['schema', 'scheduler-job']));
+  const schema = schemaOutput.schema;
+  const compiled = compileManifestToScheduler(readExample('hello-world.json'), {
+    schedulerHandoffVersion: '4',
+  }).jobs[0];
+
+  assert.equal(schema.additionalProperties, false);
+  for (const field of SCHEDULER_FIELD_VERSIONS['4']) {
+    assert.ok(schema.properties[field], `${field} must be described by scheduler-job schema`);
+  }
+  for (const field of Object.keys(compiled)) {
+    assert.ok(schema.properties[field], `${field} from compiled v4 output must be described`);
+  }
+});
+
 test('subpath exports resolve correctly', async () => {
   const describe = await import('../src/describe.js');
   assert.equal(typeof describe.describeTarget, 'function');
