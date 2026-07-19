@@ -178,6 +178,7 @@ export const HANDOFF_V4_JSON_SCHEMA = Object.freeze({
       'audience',
       'claims_hash',
       'proof_source_hash',
+      'verification_context_hash',
       'artifact_binding_required',
       'replay_protection_required',
       'revocation_check_required',

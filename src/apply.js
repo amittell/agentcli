@@ -397,10 +397,8 @@ export async function applyManifestToScheduler(
     }
   }
 
-  const actions = [];
+  const plannedActions = [];
   for (const job of compiled.jobs) {
-    const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
-
     let action;
     let existingId;
     let existingJob;
@@ -444,11 +442,13 @@ export async function applyManifestToScheduler(
       }
     }
 
-    if (
-      (action === 'updated' || action === 'adopted')
+    plannedActions.push({ job, action, existingId, existingJob });
+  }
+
+  for (const { job, action, existingJob } of plannedActions) {
+    if ((action === 'updated' || action === 'adopted')
       && Number(existingJob?.handoff_version) === 4
-      && Number(job.handoff_version) !== 4
-    ) {
+      && Number(job.handoff_version) !== 4) {
       throw Object.assign(
         new Error(
           `Cannot ${action === 'adopted' ? 'adopt' : 'update'} handoff v4 scheduler job ` +
@@ -458,6 +458,17 @@ export async function applyManifestToScheduler(
         { code: 'unsupported_capability' }
       );
     }
+    if (!dryRun && action === 'adopted' && typeof schedulerRunner.deleteJob !== 'function') {
+      throw Object.assign(
+        new Error('Scheduler runner does not support deleteJob(); cannot adopt legacy rows by name'),
+        { code: 'scheduler_error' }
+      );
+    }
+  }
+
+  const actions = [];
+  for (const { job, action, existingId, existingJob } of plannedActions) {
+    const verificationEntry = verificationByTask.get(`${job.source.workflow_id}:${job.source.task_id}`) ?? null;
 
     if (!dryRun) {
       if (action === 'created') {
@@ -469,12 +480,6 @@ export async function applyManifestToScheduler(
           : job;
         schedulerRunner.updateJob(job.id, schedulerUpdateSpec(updateJob, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
-        if (typeof schedulerRunner.deleteJob !== 'function') {
-          throw Object.assign(
-            new Error('Scheduler runner does not support deleteJob(); cannot adopt legacy rows by name'),
-            { code: 'scheduler_error' }
-          );
-        }
         const adoptedOrigin = existingJob?.origin ?? 'system';
         const adoptedJob = Number(job.handoff_version) === 4
           ? rebindSchedulerHandoffV4Job(job, { origin: adoptedOrigin })

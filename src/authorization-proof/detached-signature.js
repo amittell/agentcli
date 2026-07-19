@@ -138,7 +138,9 @@ export function resolveDetachedSignatureVerificationContext(profile = {}, ctx = 
     artifactDigest: canonical.artifactMode
       ? canonical.digest
       : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
-    handoffVersion: canonical.artifactMode ? 4 : (ctx.handoffVersion ?? null),
+    handoffVersion: canonical.artifactMode
+      ? 4
+      : (ctx.handoffVersion ?? ctx.handoff_version ?? null),
     manifestContextError: canonical.error || null,
     trustedKey: ctx.trustedKey || profile.public_key || null,
     allowedSignersPath,
@@ -160,7 +162,8 @@ function decodeBase64Signature(proof) {
 }
 
 function parseV4Envelope(proof, context) {
-  const v4 = context.handoffVersion === 4 || context.artifactDigest != null;
+  const v4 = Number(context.handoffVersion ?? context.handoff_version) === 4
+    || context.artifactDigest != null;
   if (!v4) return { signature: proof, v4: false };
 
   let envelope = proof;

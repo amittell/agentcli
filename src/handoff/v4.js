@@ -302,6 +302,7 @@ function proofBinding(binding) {
       audience: null,
       claims_hash: null,
       proof_source_hash: null,
+      verification_context_hash: null,
       artifact_binding_required: false,
       replay_protection_required: false,
       revocation_check_required: false,
@@ -704,7 +705,6 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
     ['identity.auth_hash', payload.identity?.auth_hash],
     ['authorization_proof.claims_hash', payload.authorization_proof?.claims_hash],
     ['authorization_proof.proof_source_hash', payload.authorization_proof?.proof_source_hash],
-    ['authorization_proof.verification_context_hash', payload.authorization_proof?.verification_context_hash],
     ['authorization.policy_digest', payload.authorization?.policy_digest],
     ['authorization.request_hash', payload.authorization?.request_hash],
     ['authorization.decision_hash', payload.authorization?.decision_hash],
@@ -760,6 +760,12 @@ export function validateSchedulerHandoffV4Artifact(input, { expectedDigest } = {
   }
 
   const proof = payload.authorization_proof ?? {};
+  validateHash(
+    proof.verification_context_hash,
+    'authorization_proof.verification_context_hash',
+    errors,
+    { required: CRYPTOGRAPHIC_PROOF_METHODS.has(proof.method) },
+  );
   if (CRYPTOGRAPHIC_PROOF_METHODS.has(proof.method)
     && (!proof.artifact_binding_required
       || !proof.replay_protection_required

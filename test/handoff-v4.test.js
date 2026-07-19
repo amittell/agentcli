@@ -287,6 +287,31 @@ test('handoff v4 schema accepts every valid cleanup policy and rejects unknown p
   const proofValidation = validateSchedulerHandoffV4Artifact(unknownProof);
   assert.equal(proofValidation.ok, false);
   assert.match(proofValidation.errors.join('; '), /authorization_proof\.method/);
+
+  assert.equal(payload.authorization_proof.verification_context_hash, null);
+  const cryptographicProof = structuredClone(payload);
+  cryptographicProof.authorization_proof.method = 'jwt';
+  cryptographicProof.authorization_proof.verification_context_hash = `sha256:${'a'.repeat(64)}`;
+  cryptographicProof.authorization_proof.artifact_binding_required = true;
+  cryptographicProof.authorization_proof.replay_protection_required = true;
+  cryptographicProof.authorization_proof.revocation_check_required = true;
+  const cryptographicValidation = validateSchedulerHandoffV4Artifact(cryptographicProof);
+  assert.equal(cryptographicValidation.ok, true, cryptographicValidation.errors.join('; '));
+
+  for (const missingValue of ['delete', 'null']) {
+    const missingContext = structuredClone(cryptographicProof);
+    if (missingValue === 'delete') {
+      delete missingContext.authorization_proof.verification_context_hash;
+    } else {
+      missingContext.authorization_proof.verification_context_hash = null;
+    }
+    const missingContextValidation = validateSchedulerHandoffV4Artifact(missingContext);
+    assert.equal(missingContextValidation.ok, false, missingValue);
+    assert.match(
+      missingContextValidation.errors.join('; '),
+      /authorization_proof\.verification_context_hash.*required/,
+    );
+  }
 });
 
 test('shared handoff v4 conformance fixtures have exact digest parity and fail closed', () => {
@@ -842,6 +867,45 @@ test('v4 updates preserve the stored origin and reject runtime-contract downgrad
       && /runtime capability downgrade/.test(error.message),
   );
   assert.deepEqual(downgradedAdopter.history, []);
+
+  const multiJobManifest = manifest();
+  multiJobManifest.workflows[0].tasks = [
+    {
+      ...structuredClone(multiJobManifest.workflows[0].tasks[0]),
+      id: 'new-before-conflict',
+      name: 'New before conflict',
+    },
+    {
+      ...structuredClone(multiJobManifest.workflows[0].tasks[0]),
+      id: 'existing-v4-conflict',
+      name: 'Existing v4 conflict',
+    },
+  ];
+  const existingConflict = compileManifestToScheduler(multiJobManifest, {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[1];
+  const partiallyApplicable = statefulRunner([
+    schedulerCreateSpec(existingConflict, { fieldVersion: '4' }),
+  ], {
+    handoffVersion: '3',
+    features: { ...V4_FEATURES, immutable_runtime_events: false },
+  });
+  await assert.rejects(
+    applyManifestToScheduler(multiJobManifest, {
+      runner: partiallyApplicable,
+      cwd: '/tmp',
+      env: { PATH: '/usr/bin' },
+    }),
+    error => error.code === 'unsupported_capability'
+      && /runtime capability downgrade/.test(error.message),
+  );
+  assert.deepEqual(
+    partiallyApplicable.history,
+    [],
+    'all downgrade conflicts must be detected before the first scheduler write',
+  );
 });
 
 test('handoff v4 JWT requires artifact binding, replay claim, and revocation check', () => {
@@ -1067,6 +1131,14 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
   assert.equal(unchecked.verified, false);
   assert.match(unchecked.signature_verification_reason, /did not explicitly confirm/);
   assert.equal(uncheckedReplayClaims, 0);
+
+  const snakeCaseContext = detachedSignatureVerifier.verifyProof(envelope, profile, {
+    handoff_version: 4,
+    manifest: manifest(),
+    trustedKey: profile.public_key,
+  });
+  assert.equal(snakeCaseContext.verified, false);
+  assert.match(snakeCaseContext.signature_verification_reason, /artifact digest/);
 });
 
 test('handoff v4 certificate proof signs its replay and validity controls', t => {
@@ -1227,6 +1299,13 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   assert.equal(unchecked.verified, false);
   assert.match(unchecked.signature_verification_reason, /revocation backend unavailable/);
   assert.equal(uncheckedReplayClaims, 0);
+
+  const snakeCaseContext = certificateVerifier.verifyProof(envelope, profile, {
+    handoff_version: 4,
+    manifest: manifest(),
+  });
+  assert.equal(snakeCaseContext.verified, false);
+  assert.match(snakeCaseContext.reason, /artifact digest/);
 });
 
 test('inspect advertises every v4 immutable runtime entity', () => {

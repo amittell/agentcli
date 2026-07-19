@@ -119,7 +119,8 @@ function parseCertificateProof(proof) {
 }
 
 function validateV4CertificateEnvelope(parsed, context) {
-  const v4 = context.handoffVersion === 4 || context.artifactDigest != null;
+  const v4 = Number(context.handoffVersion ?? context.handoff_version) === 4
+    || context.artifactDigest != null;
   if (!v4) return { ok: true, v4: false };
   for (const field of [
     'certificate',
@@ -294,7 +295,9 @@ export function resolveCertificateVerificationContext(profile = {}, ctx = {}) {
     artifactDigest: manifest.artifactMode
       ? manifest.digest
       : (ctx.artifactDigest ?? ctx.handoffArtifactDigest ?? null),
-    handoffVersion: manifest.artifactMode ? 4 : (ctx.handoffVersion ?? null),
+    handoffVersion: manifest.artifactMode
+      ? 4
+      : (ctx.handoffVersion ?? ctx.handoff_version ?? null),
     manifestContextError: manifest.error || null,
     requireProofOfPossession: ctx.requireProofOfPossession ?? true,
   };

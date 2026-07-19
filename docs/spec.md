@@ -869,7 +869,8 @@ metadata is incompatible with v4 and MUST fall back to handoff v3 or reject
 apply. A handoff version number alone is not sufficient negotiation.
 
 The runtime MUST also advertise all of these boolean features before AgentCLI
-emits v4: `handoff_v4_artifact`, `artifact_bound_proofs`,
+emits v4: `authorization_proof_verification`, `handoff_v4_artifact`,
+`artifact_bound_proofs`,
 `signed_or_provider_verified_evidence`, `provider_session_cache`,
 `credential_presentation`, `source_run_bound_delegation`, and
 `immutable_runtime_events`. AgentCLI uses the live capability response as
