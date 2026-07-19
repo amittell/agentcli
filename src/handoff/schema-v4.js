@@ -139,7 +139,7 @@ export const HANDOFF_V4_JSON_SCHEMA = Object.freeze({
         handoff: presentationMedium,
         bindings: { type: 'array', items: presentationBindingSchema },
         default_redaction: { type: ['boolean', 'null'] },
-        cleanup: { type: 'string', enum: ['always', 'on-success', 'never'] },
+        cleanup: { type: 'string', enum: ['always', 'on-success', 'on-failure', 'never'] },
       }),
     }),
     contract: strictObject({
@@ -159,7 +159,10 @@ export const HANDOFF_V4_JSON_SCHEMA = Object.freeze({
     }),
     authorization_proof: strictObject({
       ref: nullableString,
-      method: nullableString,
+      method: {
+        type: ['string', 'null'],
+        enum: ['none', 'jwt', 'detached-signature', 'certificate', null],
+      },
       issuer: nullableString,
       audience: nullableString,
       claims_hash: nullableDigest,

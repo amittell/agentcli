@@ -120,7 +120,12 @@ function runner({
   };
 }
 
-function statefulRunner(initialJobs = []) {
+function statefulRunner(initialJobs = [], {
+  handoffVersion = '4',
+  schemaVersion = 29,
+  handoffContract = HANDOFF_V4_RUNTIME_CONTRACT,
+  features = V4_FEATURES,
+} = {}) {
   const jobs = new Map(initialJobs.map(job => [job.id, structuredClone(job)]));
   const history = [];
   return {
@@ -129,10 +134,10 @@ function statefulRunner(initialJobs = []) {
     queryCapabilities() {
       return {
         scheduler_version: 'test',
-        schema_version: 29,
-        handoff_version: '4',
-        handoff_contract: HANDOFF_V4_RUNTIME_CONTRACT,
-        features: V4_FEATURES,
+        schema_version: schemaVersion,
+        handoff_version: handoffVersion,
+        handoff_contract: handoffContract,
+        features,
       };
     },
     listJobs() {
@@ -257,6 +262,25 @@ test('handoff v4 validation rejects missing identity fields and unknown properti
     assert.equal(credentialValidation.ok, false, field);
     assert.match(credentialValidation.errors.join('; '), new RegExp(`${field} is not allowed`));
   }
+});
+
+test('handoff v4 schema accepts every valid cleanup policy and rejects unknown proof methods', () => {
+  const payload = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0].handoff_artifact_payload;
+
+  const cleanupOnFailure = structuredClone(payload);
+  cleanupOnFailure.identity.presentation.cleanup = 'on-failure';
+  const cleanupValidation = validateSchedulerHandoffV4Artifact(cleanupOnFailure);
+  assert.equal(cleanupValidation.ok, true, cleanupValidation.errors.join('; '));
+
+  const unknownProof = structuredClone(payload);
+  unknownProof.authorization_proof.method = 'jtw';
+  const proofValidation = validateSchedulerHandoffV4Artifact(unknownProof);
+  assert.equal(proofValidation.ok, false);
+  assert.match(proofValidation.errors.join('; '), /authorization_proof\.method/);
 });
 
 test('shared handoff v4 conformance fixtures have exact digest parity and fail closed', () => {
@@ -615,6 +639,50 @@ test('v4 apply add, update, clear-null, and adopt preserve complete immutable ar
   assert.equal(adopter.history[0].spec.handoff_artifact_digest, expectedAdopted.handoff_artifact_digest);
 });
 
+test('v4 updates preserve the stored origin and reject runtime-contract downgrades', async () => {
+  const compiled = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const existing = rebindSchedulerHandoffV4Job(compiled, { origin: 'legacy-origin' });
+  const scheduler = statefulRunner([
+    schedulerCreateSpec(existing, { originOverride: 'legacy-origin', fieldVersion: '4' }),
+  ]);
+
+  const result = await applyManifestToScheduler(manifest(), {
+    runner: scheduler,
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  });
+  assert.equal(result.actions[0].action, 'updated');
+  const update = scheduler.history.at(-1);
+  assert.equal(update.action, 'update');
+  const expected = rebindSchedulerHandoffV4Job(compiled, { origin: 'legacy-origin' });
+  assert.equal(update.spec.handoff_artifact_digest, expected.handoff_artifact_digest);
+  assert.equal(
+    JSON.parse(update.spec.handoff_artifact_payload).scheduler_job_binding.digest,
+    expected.handoff_artifact_payload.scheduler_job_binding.digest,
+  );
+
+  const downgraded = statefulRunner([
+    schedulerCreateSpec(existing, { originOverride: 'legacy-origin', fieldVersion: '4' }),
+  ], {
+    handoffVersion: '3',
+    features: { ...V4_FEATURES, immutable_runtime_events: false },
+  });
+  await assert.rejects(
+    applyManifestToScheduler(manifest(), {
+      runner: downgraded,
+      cwd: '/tmp',
+      env: { PATH: '/usr/bin' },
+    }),
+    error => error.code === 'unsupported_capability'
+      && /runtime capability downgrade/.test(error.message),
+  );
+  assert.deepEqual(downgraded.history, []);
+});
+
 test('handoff v4 JWT requires artifact binding, replay claim, and revocation check', () => {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const artifactDigest = `sha256:${'a'.repeat(64)}`;
@@ -873,6 +941,18 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   const verified = certificateVerifier.verifyProof(envelope, profile, context);
   assert.equal(verified.verified, true, verified.signature_verification_reason);
   assert.equal(verified.verified_at, new Date(now).toISOString());
+
+  const forged = certificateVerifier.verifyProof({
+    ...envelope,
+    nonce: 'certificate-proof-forged',
+    signature: Buffer.from('forged-signature').toString('base64'),
+  }, profile, {
+    ...context,
+    requireProofOfPossession: false,
+  });
+  assert.equal(forged.verified, false);
+  assert.equal(forged.proof_of_possession_verified, false);
+  assert.match(forged.signature_verification_reason, /signature verification failed/);
 
   const tampered = certificateVerifier.verifyProof({
     ...envelope,

@@ -644,7 +644,7 @@ const certificateVerifier = {
       : context.manifestContent;
     const possession = context.manifestContextError
       ? { verified: false, reason: context.manifestContextError }
-      : context.requireProofOfPossession
+      : envelope.v4 || context.requireProofOfPossession
         ? verifyProofOfPossession(cert, parsedProof.signature, possessionContent)
         : { verified: true };
 

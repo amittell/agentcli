@@ -412,6 +412,7 @@ export async function applyManifestToScheduler(
 
       if (exactMatch) {
         action = 'updated';
+        existingJob = exactMatch;
       } else {
         duplicateLegacyJobs = sameNameJobs;
       }
@@ -435,18 +436,37 @@ export async function applyManifestToScheduler(
         }
       }
     } else {
-      if (existingById.has(job.id)) {
+      existingJob = existingById.get(job.id) || null;
+      if (existingJob) {
         action = 'updated';
       } else {
         action = 'created';
       }
     }
 
+    if (
+      action === 'updated'
+      && Number(existingJob?.handoff_version) === 4
+      && Number(job.handoff_version) !== 4
+    ) {
+      throw Object.assign(
+        new Error(
+          `Cannot update handoff v4 scheduler job "${job.id}" after runtime capability downgrade; ` +
+          'restore the exact v4 runtime contract before applying changes'
+        ),
+        { code: 'unsupported_capability' }
+      );
+    }
+
     if (!dryRun) {
       if (action === 'created') {
         schedulerRunner.addJob(schedulerCreateSpec(job, { fieldVersion: handoffVersion }));
       } else if (action === 'updated') {
-        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(job, { fieldVersion: handoffVersion }));
+        const existingOrigin = existingJob?.origin ?? job.origin ?? 'system';
+        const updateJob = Number(job.handoff_version) === 4
+          ? rebindSchedulerHandoffV4Job(job, { origin: existingOrigin })
+          : job;
+        schedulerRunner.updateJob(job.id, schedulerUpdateSpec(updateJob, { fieldVersion: handoffVersion }));
       } else if (action === 'adopted') {
         if (typeof schedulerRunner.deleteJob !== 'function') {
           throw Object.assign(
