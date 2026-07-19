@@ -16,6 +16,7 @@ import {
 import { canonicalStringify, hashString } from '../canonical.js';
 import { resolveValueFrom } from '../command.js';
 import { registerVerifier } from './index.js';
+import { normalizeProofTimeContext } from './time.js';
 
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
 
@@ -138,14 +139,14 @@ function validateV4CertificateEnvelope(parsed, context) {
   if (normalizeDigest(parsed.artifact_digest) !== normalizeDigest(context.artifactDigest)) {
     return { ok: false, v4: true, reason: 'certificate proof artifact digest does not match' };
   }
-  const now = typeof context.now === 'number'
-    ? context.now
-    : context.now instanceof Date
-      ? context.now.getTime()
-      : Date.now();
+  const proofTime = normalizeProofTimeContext(context);
+  if (!proofTime.ok) {
+    return { ok: false, v4: true, reason: proofTime.reason };
+  }
+  const now = proofTime.nowMs;
   const issuedAt = Date.parse(parsed.issued_at);
   const expiresAt = Date.parse(parsed.expires_at);
-  const skewMs = (context.clockSkewSeconds ?? 60) * 1000;
+  const skewMs = proofTime.clockSkewMs;
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
     return { ok: false, v4: true, reason: 'certificate proof has invalid issued_at or expires_at' };
   }
@@ -486,12 +487,26 @@ const certificateVerifier = {
    * @returns {object} Verification result.
    */
   verifyProof(proof, profile, ctx) {
-    const context = resolveCertificateVerificationContext(profile, ctx || {});
-    const verificationNowMs = typeof context.now === 'number'
-      ? context.now
-      : context.now instanceof Date
-        ? context.now.getTime()
-        : Date.now();
+    let context = resolveCertificateVerificationContext(profile, ctx || {});
+    const proofTime = normalizeProofTimeContext(context);
+    if (!proofTime.ok) {
+      return {
+        verified: false,
+        method: 'certificate',
+        reason: proofTime.reason,
+        claims_validated: false,
+        signature_verified: false,
+        proof_of_possession_verified: false,
+        manifest_digest: context.manifestDigest || null,
+        verified_at: null,
+      };
+    }
+    context = {
+      ...context,
+      now: proofTime.nowMs,
+      clockSkewSeconds: proofTime.clockSkewSeconds,
+    };
+    const verificationNowMs = proofTime.nowMs;
     const verifiedAt = new Date(verificationNowMs).toISOString();
     const claims = (profile && profile.claims) || {};
 

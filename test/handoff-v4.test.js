@@ -1083,6 +1083,14 @@ test('handoff v4 JWT requires artifact binding, replay claim, and revocation che
   assert.equal(invalidSkew.verified, false);
   assert.match(invalidSkew.reason, /clockSkewSeconds/);
 
+  const invalidNow = jwtVerifier.verifyProof(
+    signJwt({ ...payload, jti: 'proof-invalid-now' }, privateKey),
+    profile,
+    { ...context, now: new Date(Number.NaN) },
+  );
+  assert.equal(invalidNow.verified, false);
+  assert.match(invalidNow.reason, /valid Date/);
+
   const inverted = signJwt({
     ...payload,
     iat: now + 30,
@@ -1173,6 +1181,20 @@ test('handoff v4 detached signatures cover nonce, validity, key, and artifact me
   assert.equal(verified.replay_protected, true);
   assert.equal(verified.revocation_checked, true);
   assert.equal(verified.verified_at, new Date(now).toISOString());
+
+  const invalidSkew = detachedSignatureVerifier.verifyProof(envelope, profile, {
+    ...context,
+    clockSkewSeconds: 'not-a-number',
+  });
+  assert.equal(invalidSkew.verified, false);
+  assert.match(invalidSkew.signature_verification_reason, /clockSkewSeconds/);
+
+  const invalidNow = detachedSignatureVerifier.verifyProof(envelope, profile, {
+    ...context,
+    now: new Date(Number.NaN),
+  });
+  assert.equal(invalidNow.verified, false);
+  assert.match(invalidNow.signature_verification_reason, /valid Date/);
 
   const tampered = detachedSignatureVerifier.verifyProof({
     ...envelope,
@@ -1334,6 +1356,20 @@ test('handoff v4 certificate proof signs its replay and validity controls', t =>
   const verified = certificateVerifier.verifyProof(envelope, profile, context);
   assert.equal(verified.verified, true, verified.signature_verification_reason);
   assert.equal(verified.verified_at, new Date(now).toISOString());
+
+  const invalidSkew = certificateVerifier.verifyProof(envelope, profile, {
+    ...context,
+    clockSkewSeconds: 'not-a-number',
+  });
+  assert.equal(invalidSkew.verified, false);
+  assert.match(invalidSkew.reason, /clockSkewSeconds/);
+
+  const invalidNow = certificateVerifier.verifyProof(envelope, profile, {
+    ...context,
+    now: new Date(Number.NaN),
+  });
+  assert.equal(invalidNow.verified, false);
+  assert.match(invalidNow.reason, /valid Date/);
 
   const forged = certificateVerifier.verifyProof({
     ...envelope,

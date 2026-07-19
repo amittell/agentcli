@@ -13,6 +13,7 @@ import { createPublicKey, createVerify } from 'node:crypto';
 import { canonicalDigest } from '../canonical.js';
 import { registerVerifier } from './index.js';
 import { publicKeyId } from './key-identity.js';
+import { normalizeProofTimeContext } from './time.js';
 
 const DEFAULT_JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUDIT_SAFE_CLAIMS = [
@@ -575,20 +576,9 @@ const jwtVerifier = {
     const artifactDigest = context.artifactDigest ?? context.handoffArtifactDigest ?? null;
     const v4Required = Number(context.handoffVersion ?? context.handoff_version) === 4
       || artifactDigest != null;
-    const clockSkewInput = v4Required
-      ? (context.clockSkewSeconds ?? 60)
-      : (context.clockSkewSeconds ?? 0);
-    const clockSkewSeconds = (
-      (typeof clockSkewInput === 'number' || typeof clockSkewInput === 'string')
-      && !(typeof clockSkewInput === 'string' && clockSkewInput.trim() === '')
-    )
-      ? Number(clockSkewInput)
-      : Number.NaN;
-    const verificationNowMs = typeof context.now === 'number'
-      ? context.now
-      : context.now instanceof Date
-        ? context.now.getTime()
-        : Date.now();
+    const proofTime = normalizeProofTimeContext(context, {
+      defaultClockSkewSeconds: v4Required ? 60 : 0,
+    });
 
     // Validate proof is a non-empty string
     if (!proof || typeof proof !== 'string') {
@@ -601,15 +591,16 @@ const jwtVerifier = {
       };
     }
 
-    if (!Number.isFinite(clockSkewSeconds) || clockSkewSeconds < 0) {
+    if (!proofTime.ok) {
       return {
         verified: false,
         method: 'jwt',
-        reason: 'clockSkewSeconds must be a finite non-negative number',
+        reason: proofTime.reason,
         claims_validated: false,
         signature_verified: false,
       };
     }
+    const { clockSkewSeconds, nowMs: verificationNowMs } = proofTime;
 
     // Parse JWT structure
     let decoded;

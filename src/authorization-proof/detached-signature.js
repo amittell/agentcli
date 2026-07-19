@@ -16,6 +16,7 @@ import process from 'node:process';
 import { canonicalStringify, hashString } from '../canonical.js';
 import { registerVerifier } from './index.js';
 import { publicKeyId } from './key-identity.js';
+import { normalizeProofTimeContext } from './time.js';
 
 const PRIVATE_KEY_PEM = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const V4_PROOF_SCHEMA = 'openclaw.scheduler.authorization-proof';
@@ -188,14 +189,14 @@ function parseV4Envelope(proof, context) {
     return { error: 'detached proof artifact digest does not match', v4: true };
   }
 
-  const now = typeof context.now === 'number'
-    ? context.now
-    : context.now instanceof Date
-      ? context.now.getTime()
-      : Date.now();
+  const proofTime = normalizeProofTimeContext(context);
+  if (!proofTime.ok) {
+    return { error: proofTime.reason, v4: true };
+  }
+  const now = proofTime.nowMs;
   const issuedAt = Date.parse(envelope.issued_at);
   const expiresAt = Date.parse(envelope.expires_at);
-  const skewMs = (context.clockSkewSeconds ?? 60) * 1000;
+  const skewMs = proofTime.clockSkewMs;
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
     return { error: 'detached proof has invalid issued_at or expires_at', v4: true };
   }
@@ -280,12 +281,8 @@ function signedContent(parsed, context) {
 }
 
 function verifiedAt(context) {
-  const now = typeof context.now === 'number'
-    ? context.now
-    : context.now instanceof Date
-      ? context.now.getTime()
-      : Date.now();
-  return new Date(now).toISOString();
+  const proofTime = normalizeProofTimeContext(context);
+  return proofTime.ok ? new Date(proofTime.nowMs).toISOString() : null;
 }
 
 /**
@@ -431,8 +428,29 @@ const detachedSignatureVerifier = {
    * @returns {object} Verification result.
    */
   verifyProof(proof, profile, ctx) {
-    const context = resolveDetachedSignatureVerificationContext(profile, ctx || {});
+    let context = resolveDetachedSignatureVerificationContext(profile, ctx || {});
     const digest = context.manifestDigest;
+    const proofTime = normalizeProofTimeContext(context);
+    if (!proofTime.ok) {
+      return {
+        verified: false,
+        method: 'detached-signature',
+        issuer: profile?.issuer ?? null,
+        signature_verified: false,
+        signature_verification_reason: proofTime.reason,
+        manifest_digest: digest,
+        artifact_digest: context.artifactDigest ?? null,
+        artifact_bound: false,
+        replay_protected: false,
+        revocation_checked: false,
+        verified_at: null,
+      };
+    }
+    context = {
+      ...context,
+      now: proofTime.nowMs,
+      clockSkewSeconds: proofTime.clockSkewSeconds,
+    };
     const parsed = parseV4Envelope(proof, context);
 
     if (parsed.error) {
