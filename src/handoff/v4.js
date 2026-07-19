@@ -64,6 +64,8 @@ function schedulerJobExecutionProjection(job) {
     },
     reliability: {
       overlap_policy: job.overlap_policy ?? 'skip',
+      resource_pool: job.resource_pool ?? null,
+      job_class: job.job_class ?? 'standard',
       max_retries: job.max_retries ?? 0,
       max_queued_dispatches: job.max_queued_dispatches ?? 25,
       max_pending_approvals: job.max_pending_approvals ?? 10,
@@ -88,6 +90,7 @@ function schedulerJobExecutionProjection(job) {
       session_target: job.session_target ?? null,
       agent_id: job.agent_id ?? 'main',
       payload_kind: job.payload_kind ?? null,
+      payload_scope: job.payload_scope ?? 'own',
     },
     command: {
       payload_message_sha256: hashString(job.payload_message ?? ''),

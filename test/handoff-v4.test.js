@@ -399,6 +399,28 @@ test('scheduler execution binding changes when execution controls change', () =>
   assert.notEqual(compile(first), compile(formattedDifferently));
 });
 
+test('scheduler execution binding covers routing and resource controls', () => {
+  const job = compileManifestToScheduler(manifest(), {
+    schedulerHandoffVersion: '4',
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin' },
+  }).jobs[0];
+  const originalBinding = job.handoff_artifact_payload.scheduler_job_binding.digest;
+
+  for (const override of [
+    { payload_scope: 'global' },
+    { resource_pool: 'different-pool' },
+    { job_class: 'pre_compaction_flush' },
+  ]) {
+    const rebound = rebindSchedulerHandoffV4Job(job, override);
+    assert.notEqual(
+      rebound.handoff_artifact_payload.scheduler_job_binding.digest,
+      originalBinding,
+      `${Object.keys(override)[0]} must affect scheduler_job_binding.digest`,
+    );
+  }
+});
+
 test('handoff v4 scheduler rebinding replaces adoption metadata atomically', () => {
   const job = compileManifestToScheduler(manifest(), {
     schedulerHandoffVersion: '4',
