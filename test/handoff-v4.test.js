@@ -594,6 +594,22 @@ test('handoff v4 scheduler rebinding rejects a tampered original artifact', () =
     error => error.code === 'HANDOFF_ARTIFACT_INVALID'
       && /artifact digest does not match payload/.test(error.message),
   );
+
+  const missingDigest = structuredClone(job);
+  delete missingDigest.handoff_artifact_digest;
+  assert.throws(
+    () => rebindSchedulerHandoffV4Job(missingDigest, { origin: 'legacy-origin' }),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && /valid original artifact digest/.test(error.message),
+  );
+
+  const changedJobProjection = structuredClone(job);
+  changedJobProjection.payload_message = 'tampered outside the artifact';
+  assert.throws(
+    () => rebindSchedulerHandoffV4Job(changedJobProjection, { origin: 'legacy-origin' }),
+    error => error.code === 'HANDOFF_ARTIFACT_INVALID'
+      && /execution projection no longer matches/.test(error.message),
+  );
 });
 
 test('handoff v4 scheduler rebinding rejects artifact-bound overrides', () => {

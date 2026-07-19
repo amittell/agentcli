@@ -632,6 +632,15 @@ export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
       { code: 'HANDOFF_REBIND_OVERRIDE_INVALID', fields: invalidFields },
     );
   }
+  if (!SHA256_PATTERN.test(job.handoff_artifact_digest)) {
+    throw Object.assign(
+      new Error('Cannot rebind handoff v4 job without a valid original artifact digest'),
+      {
+        code: 'HANDOFF_ARTIFACT_INVALID',
+        errors: ['handoff_artifact_digest must be a sha256 digest'],
+      },
+    );
+  }
   const originalValidation = validateSchedulerHandoffV4Artifact(
     job.handoff_artifact_payload,
     { expectedDigest: job.handoff_artifact_digest },
@@ -642,6 +651,16 @@ export function rebindSchedulerHandoffV4Job(job, overrides = {}) {
         `Cannot rebind invalid handoff v4 artifact: ${originalValidation.errors.join('; ')}`,
       ),
       { code: 'HANDOFF_ARTIFACT_INVALID', errors: originalValidation.errors },
+    );
+  }
+  const currentBindingDigest = canonicalDigest(schedulerJobExecutionProjection(job));
+  if (originalValidation.payload.scheduler_job_binding.digest !== currentBindingDigest) {
+    throw Object.assign(
+      new Error('Cannot rebind handoff v4 job whose execution projection no longer matches its artifact'),
+      {
+        code: 'HANDOFF_ARTIFACT_INVALID',
+        errors: ['scheduler_job_binding.digest does not match the current job projection'],
+      },
     );
   }
   const reboundJob = { ...job, ...overrides };
